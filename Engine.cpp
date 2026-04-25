@@ -467,6 +467,10 @@ bool IndexingEngine::IsPathIncluded(const std::wstring& path) const {
     for (const auto& pattern : m_scopeConfig.ExcludePathPatterns) {
         if (!pattern.empty() && WildcardMatchI(pattern.c_str(), path.c_str())) return false;
     }
+    m_drives = std::move(tempDrives);
+    m_records = std::move(tempRecords);
+    m_pool.LoadRawData(pd.data(), h.PoolSize);
+    m_mftLookupTables = std::move(tempLookup);
     return true;
 }
 
