@@ -67,6 +67,17 @@ uint32_t StringPool::AddString(const std::wstring& text) {
     return offset;
 }
 
+uint32_t StringPool::AddString(const wchar_t* text, size_t length) {
+    if (!text || length == 0) return 0;
+    int bytesNeeded = WideCharToMultiByte(CP_UTF8, 0, text, (int)length, NULL, 0, NULL, NULL);
+    if (bytesNeeded <= 0) return 0;
+    uint32_t offset = (uint32_t)m_pool.size();
+    m_pool.resize(offset + bytesNeeded + 1);
+    WideCharToMultiByte(CP_UTF8, 0, text, (int)length, &m_pool[offset], bytesNeeded, NULL, NULL);
+    m_pool[offset + bytesNeeded] = '\0';
+    return offset;
+}
+
 const char* StringPool::GetString(uint32_t offset) const { 
     if (offset >= (uint32_t)m_pool.size()) return ""; 
     return &m_pool[offset]; 
@@ -308,19 +319,23 @@ bool IndexingEngine::DiscoverAllDrives() {
     m_status = L"Discovering drives...";
     wchar_t drvs[512]; GetLogicalDriveStringsW(512, drvs);
     for (wchar_t* p = drvs; *p; p += wcslen(p) + 1) {
-        if (GetDriveTypeW(p) != DRIVE_FIXED && GetDriveTypeW(p) != DRIVE_REMOVABLE) continue;
-        wchar_t fs[32]; 
+        UINT driveType = GetDriveTypeW(p);
+        if (driveType != DRIVE_FIXED && driveType != DRIVE_REMOVABLE && driveType != DRIVE_CDROM) continue;
+        wchar_t fs[32] = { 0 };
+        DriveFileSystem type = DriveFileSystem::Generic;
         if (GetVolumeInformationW(p, NULL, 0, NULL, NULL, NULL, fs, 32)) {
-            DriveFileSystem type = DriveFileSystem::Generic;
             if (_wcsicmp(fs, L"NTFS") == 0) type = DriveFileSystem::NTFS;
-            std::wstring vp = L"\\\\.\\" + std::wstring(p, 2);
-            HANDLE h = CreateFileW(vp.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-            if (h != INVALID_HANDLE_VALUE) {
-                int utf8Len = WideCharToMultiByte(CP_UTF8, 0, p, -1, NULL, 0, NULL, NULL);
-                std::string letterUTF8(utf8Len - 1, '\0');
-                WideCharToMultiByte(CP_UTF8, 0, p, -1, &letterUTF8[0], utf8Len, NULL, NULL);
-                m_drives.push_back({ p, letterUTF8, FetchVolumeSerialNumber(p), 0, h, type });
-            }
+        }
+        std::wstring vp = L"\\\\.\\" + std::wstring(p, 2);
+        HANDLE h = CreateFileW(vp.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        if (h == INVALID_HANDLE_VALUE && type == DriveFileSystem::NTFS) {
+            type = DriveFileSystem::Generic; // Can't read MFT directly; fall back to directory scan
+        }
+        if (h != INVALID_HANDLE_VALUE || type == DriveFileSystem::Generic) {
+            int utf8Len = WideCharToMultiByte(CP_UTF8, 0, p, -1, NULL, 0, NULL, NULL);
+            std::string letterUTF8(utf8Len - 1, '\0');
+            WideCharToMultiByte(CP_UTF8, 0, p, -1, &letterUTF8[0], utf8Len, NULL, NULL);
+            m_drives.push_back({ p, letterUTF8, FetchVolumeSerialNumber(p), 0, h, type });
         }
     }
     return !m_drives.empty();
@@ -355,6 +370,7 @@ void IndexingEngine::ScanMftForDrive(uint8_t di) {
         if (a->Type == 0x80) {
             struct MFT_NR { MFT_ATTRIBUTE h; uint64_t startVcn, lastVcn; uint16_t runOffset; }* nr = (MFT_NR*)a;
             uint8_t* rl = (uint8_t*)a + nr->runOffset; int64_t curLcn = 0; uint32_t mftCounter = 0;
+            std::vector<uint8_t> eb(1024*1024); // Allocated once, reused across all data runs
             while (*rl) {
                 uint8_t hb = *rl++; int ls = hb & 0xF, os = hb >> 4;
                 uint64_t len = 0; for (int j=0; j<ls; j++) len |= (uint64_t)(*rl++) << (j*8);
@@ -362,19 +378,29 @@ void IndexingEngine::ScanMftForDrive(uint8_t di) {
                 if (os > 0 && (runOff >> (os*8-1))&1) for (int j=os; j<8; j++) runOff |= (int64_t)0xFF << (j*8);
                 curLcn += runOff; LARGE_INTEGER eo; eo.QuadPart = curLcn * nt.BytesPerCluster;
                 SetFilePointerEx(d.VolumeHandle, eo, NULL, FILE_BEGIN); uint64_t bt = len * nt.BytesPerCluster;
-                std::vector<uint8_t> eb(1024*1024); DWORD br;
+                DWORD br;
                 for (uint64_t r=0; r<bt; r+=br) {
                     if (!ReadFile(d.VolumeHandle, eb.data(), (DWORD)min(bt-r, 1024*1024ULL), &br, NULL) || !br) break;
                     for (uint32_t k=0; k+nt.BytesPerFileRecordSegment <= br; k+=nt.BytesPerFileRecordSegment) {
                         uint32_t tm = mftCounter++; MFT_RECORD_HEADER* rh = (MFT_RECORD_HEADER*)&eb[k];
                         if (rh->Magic != 0x454C4946 || !(rh->Flags & 0x01)) continue;
+                        // Apply NTFS Update Sequence Array fixup to restore the correct bytes at
+                        // each 512-byte sector boundary (corrupted on-disk to detect torn writes).
+                        if (rh->UpdateSeqOffset + rh->UpdateSeqSize * (uint32_t)sizeof(uint16_t) <= nt.BytesPerFileRecordSegment) {
+                            uint16_t* usa = (uint16_t*)((uint8_t*)rh + rh->UpdateSeqOffset);
+                            for (uint16_t s = 1; s < rh->UpdateSeqSize; s++) {
+                                uint16_t* sectorEnd = (uint16_t*)((uint8_t*)rh + s * 512 - 2);
+                                if (*sectorEnd == usa[0]) *sectorEnd = usa[s];
+                            }
+                        }
                         uint32_t ao = rh->AttributeOffset;
                         while (ao + sizeof(MFT_ATTRIBUTE) < nt.BytesPerFileRecordSegment) {
                             MFT_ATTRIBUTE* aa = (MFT_ATTRIBUTE*)&eb[k+ao];
-                            if (aa->Type == 0x30) {
+                            if (aa->Type == 0xFFFFFFFF) break; // End-of-attribute-list marker
+                            if (aa->Type == 0x30 && !aa->NonResident) {
                                 MFT_FILE_NAME* fn = (MFT_FILE_NAME*)&eb[k+ao+((MFT_RESIDENT_ATTRIBUTE*)aa)->ValueOffset];
                                 if (fn->NameNamespace != 2) {
-                                    FileRecord entry = { m_pool.AddString(std::wstring(fn->Name, fn->NameLength)), (uint32_t)(fn->ParentDirectory & 0xFFFFFFFFFFFFLL), tm, fn->DataSize, fn->LastWriteTime, (uint16_t)fn->FileAttributes, rh->SequenceNumber, (uint16_t)(fn->ParentDirectory >> 48), di };
+                                    FileRecord entry = { m_pool.AddString(fn->Name, fn->NameLength), (uint32_t)(fn->ParentDirectory & 0xFFFFFFFFFFFFLL), tm, fn->DataSize, fn->LastWriteTime, (uint16_t)fn->FileAttributes, rh->SequenceNumber, (uint16_t)(fn->ParentDirectory >> 48), di };
                                     if (rh->Flags & 0x02) entry.FileAttributes |= 0x10;
                                     uint32_t ri = (uint32_t)m_records.size(); m_records.push_back(entry);
                                     if (tm < (uint32_t)m_mftLookupTables[di].size()) m_mftLookupTables[di][tm] = ri;
@@ -401,14 +427,23 @@ void IndexingEngine::PerformFullDriveScan() {
 }
 
 void IndexingEngine::WorkerThread() {
-    m_ready = false; 
+    m_ready = false;
     if (!DiscoverAllDrives()) { m_ready = true; return; }
     if (LoadIndex(ResolveIndexSavePath())) {
-        for (auto& d : m_drives) if (d.VolumeHandle == INVALID_HANDLE_VALUE && d.Type == DriveFileSystem::NTFS) {
-            std::wstring vp = L"\\\\.\\" + d.Letter.substr(0, 2);
-            d.VolumeHandle = CreateFileW(vp.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        // Drive type is not persisted in the index; re-detect it so change monitoring works.
+        for (auto& d : m_drives) {
+            wchar_t fs[32] = { 0 };
+            if (GetVolumeInformationW(d.Letter.c_str(), NULL, 0, NULL, NULL, NULL, fs, 32))
+                d.Type = (_wcsicmp(fs, L"NTFS") == 0) ? DriveFileSystem::NTFS : DriveFileSystem::Generic;
+            if (d.VolumeHandle == INVALID_HANDLE_VALUE && d.Type == DriveFileSystem::NTFS) {
+                std::wstring vp = L"\\\\.\\" + d.Letter.substr(0, 2);
+                d.VolumeHandle = CreateFileW(vp.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+            }
         }
-    } else PerformFullDriveScan();
+    } else {
+        PerformFullDriveScan();
+        SaveIndex(ResolveIndexSavePath());
+    }
     m_status = L"Ready - " + std::to_wstring(m_records.size()) + L" items";
     m_ready = true; Search(""); MonitorChanges();
 }
