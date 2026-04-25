@@ -17,6 +17,8 @@
 #include <windows.h>
 #include <winioctl.h>
 
+std::wstring FormatNumberWithCommas(size_t n);
+
 class Logger {
 public:
     static void Log(const std::wstring& message);
@@ -166,6 +168,7 @@ private:
     std::mutex m_resultBufferMutex;
     std::condition_variable m_searchEvent;
     std::atomic<bool> m_isSearchRequested;
+    std::atomic<bool> m_isSortOnlyRequested;
     std::atomic<bool> m_resultsUpdated;
     std::shared_ptr<std::vector<uint32_t>> m_currentResults;
 };

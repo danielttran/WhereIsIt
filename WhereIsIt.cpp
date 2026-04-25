@@ -278,6 +278,16 @@ static void SetSortIcon(int columnIndex, bool descending) {
     }
 }
 
+std::wstring FormatNumberWithCommas(size_t n) {
+    std::wstring s = std::to_wstring(n);
+    int insertPosition = (int)s.length() - 3;
+    while (insertPosition > 0) {
+        s.insert(insertPosition, L",");
+        insertPosition -= 3;
+    }
+    return s;
+}
+
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
@@ -292,7 +302,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         lvc.iSubItem = 1; lvc.pszText = (LPWSTR)L"Path"; lvc.cx = 350; ListView_InsertColumn(hFileList, 1, &lvc);
         lvc.iSubItem = 2; lvc.pszText = (LPWSTR)L"Size"; lvc.cx = 100; ListView_InsertColumn(hFileList, 2, &lvc);
         lvc.iSubItem = 3; lvc.pszText = (LPWSTR)L"Date Modified"; lvc.cx = 150; ListView_InsertColumn(hFileList, 3, &lvc);
-        SetSortIcon(0, false); // Default sort
+        SetSortIcon(0, false); 
         g_FontNormal = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
         LOGFONT lf; GetObject(g_FontNormal, sizeof(lf), &lf);
         lf.lfWeight = FW_BOLD; g_FontBold = CreateFontIndirect(&lf);
@@ -304,7 +314,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if ((HWND)wParam == hFileList) {
             POINT pt = { LOWORD(lParam), HIWORD(lParam) };
             int idx = -1;
-            if (pt.x == -1 && pt.y == -1) { // Apps key
+            if (pt.x == -1 && pt.y == -1) { 
                 idx = GetFirstSelectedIndex();
                 if (idx >= 0) {
                     RECT rc; ListView_GetItemRect(hFileList, idx, &rc, LVIR_BOUNDS);
@@ -326,8 +336,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_TIMER:
         if (wParam == 1) {
             if (g_CurrentQueryW[0] != 0) {
-                wchar_t status[64]; swprintf_s(status, L"%zu objects", g_ActiveResults ? g_ActiveResults->size() : 0);
-                SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)status);
+                std::wstring status = FormatNumberWithCommas(g_ActiveResults ? g_ActiveResults->size() : 0) + L" objects";
+                SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)status.c_str());
             } else SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)g_Engine.GetCurrentStatus().c_str());
             
             if (g_Engine.HasNewResults() || (!g_Engine.IsBusy() && (!g_ActiveResults || g_ActiveResults->empty()))) {
