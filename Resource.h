@@ -20,7 +20,6 @@
 #define IDC_SEARCH_EDIT         120
 #define IDC_FILE_LIST           121
 #define IDI_WHEREISIT			107
-#define IDI_SMALL				108
 #define IDC_WHEREISIT			109
 #define IDC_MYICON				2
 #ifndef IDC_STATIC

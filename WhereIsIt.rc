@@ -28,7 +28,6 @@ LANGUAGE 9, 1
 // remains consistent on all systems.
 
 IDI_WHEREISIT       ICON         "WhereIsIt.ico"
-IDI_SMALL               ICON         "small.ico"
 
 /////////////////////////////////////////////////////////////////////////////
 //
