@@ -7,6 +7,10 @@
 #include <algorithm>
 #include <unordered_map>
 #include <shlobj.h>
+#include <regex>
+#include <cctype>
+#include <cwctype>
+#include <functional>
 
 // --- CORE UTILITIES: High Speed Case-Insensitive Matching ---
 
@@ -40,6 +44,222 @@ static int FastCompareIgnoreCase(const char* s1, const char* s2) {
         s1++; s2++; 
     }
     return (int)g_ToLowerLookup[(unsigned char)*s1] - (int)g_ToLowerLookup[(unsigned char)*s2];
+}
+
+
+static std::string ToLowerAscii(std::string value) {
+    for (char& c : value) c = (char)g_ToLowerLookup[(unsigned char)c];
+    return value;
+}
+
+static bool FastContains(const std::string& haystack, const std::string& needle, bool caseSensitive) {
+    if (needle.empty()) return true;
+    if (caseSensitive) return haystack.find(needle) != std::string::npos;
+    return FastContainsIgnoreCase(haystack.c_str(), needle.c_str());
+}
+
+static bool IsWordBoundary(const std::string& text, size_t pos) {
+    if (pos >= text.size()) return true;
+    unsigned char c = (unsigned char)text[pos];
+    return !(std::isalnum(c) || c == '_');
+}
+
+static bool ContainsWholeWord(const std::string& haystack, const std::string& needle, bool caseSensitive) {
+    if (needle.empty()) return true;
+    std::string hay = haystack;
+    std::string ndl = needle;
+    if (!caseSensitive) {
+        hay = ToLowerAscii(hay);
+        ndl = ToLowerAscii(ndl);
+    }
+    size_t pos = 0;
+    while ((pos = hay.find(ndl, pos)) != std::string::npos) {
+        bool left = (pos == 0) || IsWordBoundary(hay, pos - 1);
+        bool right = (pos + ndl.size() >= hay.size()) || IsWordBoundary(hay, pos + ndl.size());
+        if (left && right) return true;
+        ++pos;
+    }
+    return false;
+}
+
+static std::string WideToUtf8(const std::wstring& value) {
+    if (value.empty()) return std::string();
+    int size = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, NULL, 0, NULL, NULL);
+    if (size <= 1) return std::string();
+    std::string out((size_t)size, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, out.data(), size, NULL, NULL);
+    out.pop_back();
+    return out;
+}
+
+enum class QuerySortKey { Name, Path, Size, Date };
+enum class QueryNodeType { Term, And, Or, Not };
+
+struct QueryNode {
+    QueryNodeType Type;
+    std::string Term;
+    std::unique_ptr<QueryNode> Left;
+    std::unique_ptr<QueryNode> Right;
+};
+
+struct QueryConfig {
+    bool CaseSensitive = false;
+    bool RegexMode = false;
+    bool WholeWord = false;
+    bool SortDescending = false;
+    QuerySortKey SortKey = QuerySortKey::Name;
+};
+
+struct QueryPlan {
+    QueryConfig Config;
+    std::vector<std::string> Tokens;
+    std::unique_ptr<QueryNode> Root;
+    std::vector<std::regex> CompiledRegex;
+};
+
+static bool ParseBool(const std::string& raw) {
+    std::string value = ToLowerAscii(raw);
+    return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
+static bool ParseSizeBytes(const std::string& raw, uint64_t& out) {
+    std::string text = ToLowerAscii(raw);
+    uint64_t mult = 1;
+    if (text.size() > 2 && text.substr(text.size() - 2) == "kb") { mult = 1024; text.resize(text.size() - 2); }
+    else if (text.size() > 2 && text.substr(text.size() - 2) == "mb") { mult = 1024ULL * 1024ULL; text.resize(text.size() - 2); }
+    else if (text.size() > 2 && text.substr(text.size() - 2) == "gb") { mult = 1024ULL * 1024ULL * 1024ULL; text.resize(text.size() - 2); }
+    else if (!text.empty() && text.back() == 'b') text.pop_back();
+    if (text.empty()) return false;
+    for (char c : text) if (!std::isdigit((unsigned char)c)) return false;
+    out = std::stoull(text) * mult;
+    return true;
+}
+
+static bool ParseDateToFileTime(const std::string& raw, uint64_t& out) {
+    int y = 0, m = 0, d = 0;
+    if (sscanf_s(raw.c_str(), "%d-%d-%d", &y, &m, &d) != 3) return false;
+    SYSTEMTIME st = { 0 }; st.wYear = (WORD)y; st.wMonth = (WORD)m; st.wDay = (WORD)d;
+    FILETIME ft;
+    if (!SystemTimeToFileTime(&st, &ft)) return false;
+    out = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    return true;
+}
+
+static std::vector<std::string> TokenizeQuery(const std::string& query) {
+    std::vector<std::string> tokens;
+    std::string current;
+    bool inQuote = false;
+    for (char c : query) {
+        if (c == '"') {
+            inQuote = !inQuote;
+            if (!inQuote && !current.empty()) { tokens.push_back(current); current.clear(); }
+            continue;
+        }
+        if (!inQuote && (c == '(' || c == ')')) {
+            if (!current.empty()) { tokens.push_back(current); current.clear(); }
+            tokens.emplace_back(1, c);
+            continue;
+        }
+        if (!inQuote && std::isspace((unsigned char)c)) {
+            if (!current.empty()) { tokens.push_back(current); current.clear(); }
+            continue;
+        }
+        current.push_back(c);
+    }
+    if (!current.empty()) tokens.push_back(current);
+    return tokens;
+}
+
+class QueryParser {
+public:
+    explicit QueryParser(const std::vector<std::string>& tokens) : m_tokens(tokens) {}
+    std::unique_ptr<QueryNode> Parse() { m_pos = 0; return ParseOr(); }
+private:
+    std::unique_ptr<QueryNode> ParseOr() {
+        auto node = ParseAnd();
+        while (Match("or")) {
+            auto rhs = ParseAnd();
+            auto n = std::make_unique<QueryNode>(); n->Type = QueryNodeType::Or; n->Left = std::move(node); n->Right = std::move(rhs); node = std::move(n);
+        }
+        return node;
+    }
+    std::unique_ptr<QueryNode> ParseAnd() {
+        auto node = ParseUnary();
+        while (true) {
+            if (Match("and") || CanImplicitAnd()) {
+                auto rhs = ParseUnary();
+                auto n = std::make_unique<QueryNode>(); n->Type = QueryNodeType::And; n->Left = std::move(node); n->Right = std::move(rhs); node = std::move(n);
+            } else break;
+        }
+        return node;
+    }
+    std::unique_ptr<QueryNode> ParseUnary() {
+        if (Match("not")) {
+            auto n = std::make_unique<QueryNode>(); n->Type = QueryNodeType::Not; n->Left = ParseUnary(); return n;
+        }
+        if (Peek() == "(") {
+            ++m_pos;
+            auto n = ParseOr();
+            if (Peek() == ")") ++m_pos;
+            return n;
+        }
+        auto n = std::make_unique<QueryNode>();
+        n->Type = QueryNodeType::Term;
+        n->Term = Consume();
+        return n;
+    }
+    bool CanImplicitAnd() const {
+        if (m_pos >= m_tokens.size()) return false;
+        std::string t = ToLowerAscii(m_tokens[m_pos]);
+        return t != ")" && t != "or";
+    }
+    bool Match(const char* op) {
+        if (m_pos >= m_tokens.size()) return false;
+        if (ToLowerAscii(m_tokens[m_pos]) == op) { ++m_pos; return true; }
+        return false;
+    }
+    std::string Peek() const { return (m_pos < m_tokens.size()) ? m_tokens[m_pos] : std::string(); }
+    std::string Consume() { return (m_pos < m_tokens.size()) ? m_tokens[m_pos++] : std::string(); }
+    const std::vector<std::string>& m_tokens;
+    size_t m_pos = 0;
+};
+
+static QueryPlan BuildQueryPlan(const std::string& rawQuery) {
+    QueryPlan plan;
+    auto tokens = TokenizeQuery(rawQuery);
+    std::vector<std::string> exprTokens;
+    for (const auto& token : tokens) {
+        std::string low = ToLowerAscii(token);
+        if (low.rfind("case:", 0) == 0) { plan.Config.CaseSensitive = ParseBool(token.substr(5)); continue; }
+        if (low.rfind("regex:", 0) == 0) { plan.Config.RegexMode = ParseBool(token.substr(6)); continue; }
+        if (low.rfind("word:", 0) == 0) { plan.Config.WholeWord = ParseBool(token.substr(5)); continue; }
+        if (low.rfind("sort:", 0) == 0) {
+            std::string key = low.substr(5);
+            if (key == "path") plan.Config.SortKey = QuerySortKey::Path;
+            else if (key == "size") plan.Config.SortKey = QuerySortKey::Size;
+            else if (key == "date") plan.Config.SortKey = QuerySortKey::Date;
+            else plan.Config.SortKey = QuerySortKey::Name;
+            continue;
+        }
+        if (low == "desc" || low == "sort:desc") { plan.Config.SortDescending = true; continue; }
+        if (low == "asc" || low == "sort:asc") { plan.Config.SortDescending = false; continue; }
+        exprTokens.push_back(token);
+    }
+    plan.Tokens = exprTokens;
+    QueryParser parser(exprTokens);
+    plan.Root = parser.Parse();
+
+    if (plan.Config.RegexMode) {
+        std::regex_constants::syntax_option_type options = std::regex_constants::ECMAScript;
+        if (!plan.Config.CaseSensitive) options |= std::regex_constants::icase;
+        for (const auto& token : exprTokens) {
+            std::string low = ToLowerAscii(token);
+            if (low == "and" || low == "or" || low == "not" || low == "(" || low == ")" || token.find(':') != std::string::npos) continue;
+            try { plan.CompiledRegex.emplace_back(token, options); }
+            catch (...) {}
+        }
+    }
+    return plan;
 }
 
 // --- StringPool: Minimal RAM for Filenames ---
@@ -122,7 +342,8 @@ std::wstring IndexingEngine::ResolveIndexSavePath() {
 }
 
 bool IndexingEngine::SaveIndex(const std::wstring& filePath) {
-    std::ofstream out(filePath, std::ios::binary); if (!out) return false;
+    std::wstring tmpPath = filePath + L".tmp";
+    std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc); if (!out) return false;
     struct IndexHeader { uint32_t Magic, Version, DriveCount, RecordCount, PoolSize; } h = { 0x54494957, 5, (uint32_t)m_drives.size(), (uint32_t)m_records.size(), (uint32_t)m_pool.GetSize() };
     out.write((char*)&h, sizeof(h));
     for (const auto& d : m_drives) {
@@ -136,30 +357,115 @@ bool IndexingEngine::SaveIndex(const std::wstring& filePath) {
         uint32_t sz = (uint32_t)m.size(); out.write((char*)&sz, sizeof(uint32_t));
         out.write((char*)m.data(), (std::streamsize)(sz * sizeof(uint32_t)));
     }
+    out.flush(); if (!out.good()) { out.close(); DeleteFileW(tmpPath.c_str()); return false; }
+    out.close(); if (!out.good()) { DeleteFileW(tmpPath.c_str()); return false; }
+    if (!MoveFileExW(tmpPath.c_str(), filePath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(tmpPath.c_str()); return false;
+    }
     return true;
 }
 
 bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
+    auto clearState = [this]() {
+        m_drives.clear(); m_records.clear(); m_mftLookupTables.clear(); m_pool.Clear();
+    };
+    auto readExact = [](std::ifstream& stream, char* buffer, size_t bytes) {
+        stream.read(buffer, (std::streamsize)bytes);
+        return stream.good() || (stream.eof() && stream.gcount() == (std::streamsize)bytes);
+    };
+
     std::ifstream in(filePath, std::ios::binary); if (!in) return false;
     struct IndexHeader { uint32_t Magic, Version, DriveCount, RecordCount, PoolSize; } h; 
-    in.read((char*)&h, sizeof(h)); if (h.Magic != 0x54494957 || h.Version != 5) return false;
+    if (!readExact(in, (char*)&h, sizeof(h))) { clearState(); return false; }
+    if (h.Magic != 0x54494957 || h.Version != 5) { clearState(); return false; }
+    if (h.DriveCount == 0 || h.DriveCount > 64 || h.RecordCount > 100000000 || h.PoolSize == 0 || h.PoolSize > (512u * 1024u * 1024u)) {
+        clearState(); return false;
+    }
+
     std::vector<DriveContext> tempDrives;
     for (uint32_t i = 0; i < h.DriveCount; ++i) {
         struct DriveInfoBin { wchar_t Letter[4]; uint32_t Serial; uint64_t LastUsn; } di; 
-        in.read((char*)&di, sizeof(di));
-        if (FetchVolumeSerialNumber(di.Letter) != di.Serial) return false;
+        if (!readExact(in, (char*)&di, sizeof(di))) { clearState(); return false; }
+        if (FetchVolumeSerialNumber(di.Letter) != di.Serial) { clearState(); return false; }
         int utf8Len = WideCharToMultiByte(CP_UTF8, 0, di.Letter, -1, NULL, 0, NULL, NULL);
+        if (utf8Len <= 1) { clearState(); return false; }
         std::string letterUTF8(utf8Len - 1, '\0');
         WideCharToMultiByte(CP_UTF8, 0, di.Letter, -1, &letterUTF8[0], utf8Len, NULL, NULL);
         tempDrives.push_back({ di.Letter, letterUTF8, di.Serial, di.LastUsn, INVALID_HANDLE_VALUE, DriveFileSystem::Unknown });
     }
-    m_drives = std::move(tempDrives);
-    m_records.resize(h.RecordCount); in.read((char*)m_records.data(), (std::streamsize)(h.RecordCount * sizeof(FileRecord)));
-    std::vector<char> pd(h.PoolSize); in.read(pd.data(), (std::streamsize)h.PoolSize); m_pool.LoadRawData(pd.data(), h.PoolSize);
-    m_mftLookupTables.resize(h.DriveCount);
+    std::vector<FileRecord> tempRecords;
+    tempRecords.resize(h.RecordCount);
+    if (!readExact(in, (char*)tempRecords.data(), (size_t)h.RecordCount * sizeof(FileRecord))) { clearState(); return false; }
+
+    std::vector<char> pd(h.PoolSize);
+    if (!readExact(in, pd.data(), h.PoolSize)) { clearState(); return false; }
+
+    for (const auto& rec : tempRecords) {
+        if (rec.DriveIndex >= h.DriveCount) { clearState(); return false; }
+        if (rec.NamePoolOffset >= h.PoolSize) { clearState(); return false; }
+    }
+
+    std::vector<std::vector<uint32_t>> tempLookup;
+    tempLookup.resize(h.DriveCount);
     for (uint32_t i = 0; i < h.DriveCount; ++i) {
-        uint32_t sz; in.read((char*)&sz, sizeof(uint32_t));
-        m_mftLookupTables[i].resize(sz); in.read((char*)m_mftLookupTables[i].data(), (std::streamsize)(sz * sizeof(uint32_t)));
+        uint32_t sz;
+        if (!readExact(in, (char*)&sz, sizeof(uint32_t))) { clearState(); return false; }
+        if (sz > 100000000) { clearState(); return false; }
+        tempLookup[i].resize(sz);
+        if (sz > 0 && !readExact(in, (char*)tempLookup[i].data(), (size_t)sz * sizeof(uint32_t))) { clearState(); return false; }
+    }
+    m_drives = std::move(tempDrives);
+    m_records = std::move(tempRecords);
+    m_pool.LoadRawData(pd.data(), h.PoolSize);
+    m_mftLookupTables = std::move(tempLookup);
+    return true;
+}
+
+void IndexingEngine::SetIndexScopeConfig(const IndexScopeConfig& config) {
+    std::lock_guard<std::mutex> lock(m_scopeConfigMutex);
+    m_scopeConfig = config;
+}
+
+IndexingEngine::IndexScopeConfig IndexingEngine::GetIndexScopeConfig() const {
+    std::lock_guard<std::mutex> lock(m_scopeConfigMutex);
+    return m_scopeConfig;
+}
+
+bool IndexingEngine::WildcardMatchI(const wchar_t* pattern, const wchar_t* text) {
+    if (!pattern || !text) return false;
+    while (*pattern) {
+        if (*pattern == L'*') {
+            ++pattern;
+            if (!*pattern) return true;
+            while (*text) {
+                if (WildcardMatchI(pattern, text)) return true;
+                ++text;
+            }
+            return false;
+        }
+        if (*pattern == L'?' || std::towlower(*pattern) == std::towlower(*text)) {
+            if (!*text) return false;
+            ++pattern; ++text;
+            continue;
+        }
+        return false;
+    }
+    return *text == L'\0';
+}
+
+bool IndexingEngine::IsRootEnabled(const std::wstring& root) const {
+    std::lock_guard<std::mutex> lock(m_scopeConfigMutex);
+    if (m_scopeConfig.IncludeRoots.empty()) return true;
+    for (const auto& allowed : m_scopeConfig.IncludeRoots) {
+        if (_wcsnicmp(root.c_str(), allowed.c_str(), allowed.size()) == 0) return true;
+    }
+    return false;
+}
+
+bool IndexingEngine::IsPathIncluded(const std::wstring& path) const {
+    std::lock_guard<std::mutex> lock(m_scopeConfigMutex);
+    for (const auto& pattern : m_scopeConfig.ExcludePathPatterns) {
+        if (!pattern.empty() && WildcardMatchI(pattern.c_str(), path.c_str())) return false;
     }
     return true;
 }
@@ -167,11 +473,12 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
 std::wstring IndexingEngine::GetFullPath(uint32_t recordIdx) const {
     if (recordIdx >= (uint32_t)m_records.size()) return L"";
     const char* parts[64]; int depth = 0; uint32_t cur = recordIdx; uint8_t di = m_records[recordIdx].DriveIndex;
+    if (di >= (uint8_t)m_drives.size() || di >= (uint8_t)m_mftLookupTables.size()) return L"";
     while (depth < 64) {
         const FileRecord& r = m_records[cur]; parts[depth++] = m_pool.GetString(r.NamePoolOffset);
         if (r.ParentMftIndex < 5 || r.ParentMftIndex >= (uint32_t)m_mftLookupTables[di].size()) break;
         uint32_t pi = m_mftLookupTables[di][r.ParentMftIndex];
-        if (pi == 0xFFFFFFFF || m_records[pi].MftSequence != r.ParentSequence) break;
+        if (pi == 0xFFFFFFFF || pi >= (uint32_t)m_records.size() || m_records[pi].MftSequence != r.ParentSequence) break;
         if (pi == cur) break; cur = pi;
     }
     std::string pa; for (int i = depth - 1; i >= 0; --i) { if (!pa.empty()) pa += "\\"; pa += parts[i]; }
@@ -183,9 +490,10 @@ std::wstring IndexingEngine::GetFullPath(uint32_t recordIdx) const {
 std::wstring IndexingEngine::GetParentPath(uint32_t recordIdx) const {
     if (recordIdx >= (uint32_t)m_records.size()) return L"";
     const FileRecord& child = m_records[recordIdx]; uint8_t di = child.DriveIndex;
+    if (di >= (uint8_t)m_drives.size() || di >= (uint8_t)m_mftLookupTables.size()) return L"";
     if (child.ParentMftIndex < 5 || child.ParentMftIndex >= (uint32_t)m_mftLookupTables[di].size()) return m_drives[di].Letter;
     uint32_t pi = m_mftLookupTables[di][child.ParentMftIndex];
-    if (pi == 0xFFFFFFFF || m_records[pi].MftSequence != child.ParentSequence) return m_drives[di].Letter;
+    if (pi == 0xFFFFFFFF || pi >= (uint32_t)m_records.size() || m_records[pi].MftSequence != child.ParentSequence) return m_drives[di].Letter;
     return GetFullPath(pi);
 }
 
@@ -195,71 +503,135 @@ void IndexingEngine::Search(const std::string& q) {
 }
 
 void IndexingEngine::SearchThread() {
+    std::function<bool(const QueryNode*, const QueryPlan&, const FileRecord&, const std::string&, const std::string&)> evaluateTerm;
+    evaluateTerm = [this, &evaluateTerm](const QueryNode* node, const QueryPlan& plan, const FileRecord& rec, const std::string& name, const std::string& fullPath) -> bool {
+        if (!node) return true;
+        if (node->Type == QueryNodeType::And) return evaluateTerm(node->Left.get(), plan, rec, name, fullPath) && evaluateTerm(node->Right.get(), plan, rec, name, fullPath);
+        if (node->Type == QueryNodeType::Or) return evaluateTerm(node->Left.get(), plan, rec, name, fullPath) || evaluateTerm(node->Right.get(), plan, rec, name, fullPath);
+        if (node->Type == QueryNodeType::Not) return !evaluateTerm(node->Left.get(), plan, rec, name, fullPath);
+
+        const std::string term = node->Term;
+        if (term.empty()) return true;
+        std::string low = ToLowerAscii(term);
+
+        if (low.rfind("ext:", 0) == 0) {
+            const std::string ext = low.substr(4);
+            std::string nameLower = ToLowerAscii(name);
+            size_t dot = nameLower.find_last_of('.');
+            return dot != std::string::npos && dot + 1 < nameLower.size() && nameLower.substr(dot + 1) == ext;
+        }
+        if (low.rfind("path:", 0) == 0) return FastContains(fullPath, term.substr(5), false);
+        if (low.rfind("attr:", 0) == 0 || low.rfind("attrib:", 0) == 0) {
+            size_t split = term.find(':');
+            std::string attr = split == std::string::npos ? std::string() : ToLowerAscii(term.substr(split + 1));
+            if (attr == "dir") return (rec.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            if (attr == "file") return (rec.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+            if (attr == "hidden") return (rec.FileAttributes & FILE_ATTRIBUTE_HIDDEN) != 0;
+            if (attr == "system") return (rec.FileAttributes & FILE_ATTRIBUTE_SYSTEM) != 0;
+            if (attr == "archive") return (rec.FileAttributes & FILE_ATTRIBUTE_ARCHIVE) != 0;
+            if (attr == "readonly") return (rec.FileAttributes & FILE_ATTRIBUTE_READONLY) != 0;
+            return false;
+        }
+        if (low.rfind("size:", 0) == 0) {
+            std::string raw = term.substr(5);
+            int cmp = 0;
+            if (raw.rfind(">=", 0) == 0) { cmp = 2; raw = raw.substr(2); }
+            else if (raw.rfind("<=", 0) == 0) { cmp = -2; raw = raw.substr(2); }
+            else if (raw.rfind(">", 0) == 0) { cmp = 1; raw = raw.substr(1); }
+            else if (raw.rfind("<", 0) == 0) { cmp = -1; raw = raw.substr(1); }
+            else if (raw.rfind("=", 0) == 0) { raw = raw.substr(1); }
+            uint64_t value = 0; if (!ParseSizeBytes(raw, value)) return false;
+            if (cmp == 2) return rec.FileSize >= value;
+            if (cmp == -2) return rec.FileSize <= value;
+            if (cmp == 1) return rec.FileSize > value;
+            if (cmp == -1) return rec.FileSize < value;
+            return rec.FileSize == value;
+        }
+        if (low.rfind("date:", 0) == 0) {
+            std::string raw = term.substr(5);
+            int cmp = 0;
+            if (raw.rfind(">=", 0) == 0) { cmp = 2; raw = raw.substr(2); }
+            else if (raw.rfind("<=", 0) == 0) { cmp = -2; raw = raw.substr(2); }
+            else if (raw.rfind(">", 0) == 0) { cmp = 1; raw = raw.substr(1); }
+            else if (raw.rfind("<", 0) == 0) { cmp = -1; raw = raw.substr(1); }
+            else if (raw.rfind("=", 0) == 0) { raw = raw.substr(1); }
+            uint64_t value = 0; if (!ParseDateToFileTime(raw, value)) return false;
+            if (cmp == 2) return rec.LastModified >= value;
+            if (cmp == -2) return rec.LastModified <= value;
+            if (cmp == 1) return rec.LastModified > value;
+            if (cmp == -1) return rec.LastModified < value;
+            return rec.LastModified == value;
+        }
+
+        if (plan.Config.RegexMode && !plan.CompiledRegex.empty()) {
+            for (const auto& rx : plan.CompiledRegex) if (std::regex_search(name, rx) || std::regex_search(fullPath, rx)) return true;
+            return false;
+        }
+        if (plan.Config.WholeWord) return ContainsWholeWord(name, term, plan.Config.CaseSensitive) || ContainsWholeWord(fullPath, term, plan.Config.CaseSensitive);
+        return FastContains(name, term, plan.Config.CaseSensitive) || FastContains(fullPath, term, plan.Config.CaseSensitive);
+    };
+
     std::string query;
     while (m_running) {
         {
             std::unique_lock<std::mutex> lock(m_searchSyncMutex);
             m_searchEvent.wait(lock, [this] { return !m_running || m_isSearchRequested; });
             if (!m_running) break;
-            query = m_pendingSearchQuery; m_isSearchRequested = false;
+            query = m_pendingSearchQuery;
+            m_isSearchRequested = false;
         }
 
         auto results = std::make_shared<std::vector<uint32_t>>();
-        const char* qCStr = query.c_str();
+        QueryPlan plan = BuildQueryPlan(query);
+        std::unordered_map<uint32_t, std::string> pathCache;
+        auto pathFor = [this, &pathCache](uint32_t idx) {
+            auto it = pathCache.find(idx);
+            if (it != pathCache.end()) return it->second;
+            std::string p = WideToUtf8(GetFullPath(idx));
+            pathCache.emplace(idx, p);
+            return p;
+        };
 
-        if (query.empty()) {
-            results->reserve(m_records.size());
-            for (uint32_t i = 0; i < (uint32_t)m_records.size(); ++i) if (m_records[i].MftIndex != 0xFFFFFFFF) results->push_back(i);
-            { std::lock_guard<std::mutex> lock(m_resultBufferMutex); m_currentResults = results; m_resultsUpdated = true; }
-            auto sortedResults = std::make_shared<std::vector<uint32_t>>(*results);
-            std::sort(sortedResults->begin(), sortedResults->end(), [this](uint32_t a, uint32_t b) {
-                return FastCompareIgnoreCase(m_pool.GetString(m_records[a].NamePoolOffset), m_pool.GetString(m_records[b].NamePoolOffset)) < 0;
-            });
-            results = std::move(sortedResults);
-        } else {
-            bool hasSep = (query.find('\\') != std::string::npos);
-            for (uint32_t i = 0; i < (uint32_t)m_records.size(); ++i) {
-                const auto& rec = m_records[i]; if (rec.MftIndex == 0xFFFFFFFF) continue;
-                const char* name = m_pool.GetString(rec.NamePoolOffset);
-                
-                // 1. Match Filename
-                if (FastContainsIgnoreCase(name, qCStr)) {
-                    results->push_back(i);
-                } 
-                // 2. Match Path (Only if backslash present, to avoid over-matching drive letters)
-                else if (hasSep) {
-                    uint32_t curParentMft = rec.ParentMftIndex;
-                    uint16_t curParentSeq = rec.ParentSequence;
-                    uint8_t dIdx = rec.DriveIndex;
-                    bool pathMatched = false;
+        for (uint32_t i = 0; i < (uint32_t)m_records.size(); ++i) {
+            if (m_isSearchRequested) break;
+            const auto& rec = m_records[i];
+            if (rec.MftIndex == 0xFFFFFFFF) continue;
+            std::string name = m_pool.GetString(rec.NamePoolOffset);
+            std::string path = pathFor(i);
+            if (query.empty() || evaluateTerm(plan.Root.get(), plan, rec, name, path)) results->push_back(i);
+        }
 
-                    // Match Drive Letter
-                    if (FastContainsIgnoreCase(m_drives[dIdx].LetterUTF8.c_str(), qCStr)) pathMatched = true;
-                    
-                    // Match Folders (Jump up the tree - No string building required)
-                    while (!pathMatched && curParentMft >= 5 && curParentMft < (uint32_t)m_mftLookupTables[dIdx].size()) {
-                        uint32_t pIdx = m_mftLookupTables[dIdx][curParentMft];
-                        if (pIdx == 0xFFFFFFFF) break;
-                        const auto& parentRec = m_records[pIdx];
-                        if (parentRec.MftSequence != curParentSeq) break;
-                        
-                        if (FastContainsIgnoreCase(m_pool.GetString(parentRec.NamePoolOffset), qCStr)) {
-                            pathMatched = true; break;
-                        }
-                        curParentMft = parentRec.ParentMftIndex;
-                        curParentSeq = parentRec.ParentSequence;
-                        if (curParentMft == parentRec.MftIndex) break; 
-                    }
-                    if (pathMatched) results->push_back(i);
-                }
-                if (m_isSearchRequested) break;
+        if (m_isSearchRequested) continue;
+
+        std::sort(results->begin(), results->end(), [this, &plan, &pathFor](uint32_t a, uint32_t b) {
+            const auto& ra = m_records[a];
+            const auto& rb = m_records[b];
+            auto cmpName = [this, &ra, &rb]() { return FastCompareIgnoreCase(m_pool.GetString(ra.NamePoolOffset), m_pool.GetString(rb.NamePoolOffset)); };
+            auto cmpPath = [&]() {
+                std::string pa = ToLowerAscii(pathFor(a));
+                std::string pb = ToLowerAscii(pathFor(b));
+                if (pa < pb) return -1;
+                if (pa > pb) return 1;
+                return 0;
+            };
+            auto cmpNum = [](uint64_t x, uint64_t y) { return (x < y) ? -1 : (x > y ? 1 : 0); };
+
+            int primary = 0;
+            switch (plan.Config.SortKey) {
+            case QuerySortKey::Path: primary = cmpPath(); break;
+            case QuerySortKey::Size: primary = cmpNum(ra.FileSize, rb.FileSize); break;
+            case QuerySortKey::Date: primary = cmpNum(ra.LastModified, rb.LastModified); break;
+            default: primary = cmpName(); break;
             }
-        }
-        
-        if (!m_isSearchRequested) {
-            std::lock_guard<std::mutex> lock(m_resultBufferMutex);
-            m_currentResults = std::move(results); m_resultsUpdated = true;
-        }
+            if (primary == 0) primary = cmpName();
+            if (primary == 0) primary = cmpPath();
+            if (primary == 0) primary = (a < b ? -1 : (a > b ? 1 : 0));
+            return plan.Config.SortDescending ? (primary > 0) : (primary < 0);
+        });
+
+        std::lock_guard<std::mutex> lock(m_resultBufferMutex);
+        m_currentResults = std::move(results);
+        m_resultsUpdated = true;
     }
 }
 
@@ -317,10 +689,14 @@ void IndexingEngine::MonitorChanges() {
 
 bool IndexingEngine::DiscoverAllDrives() {
     m_status = L"Discovering drives...";
+    const IndexScopeConfig cfg = GetIndexScopeConfig();
     wchar_t drvs[512]; GetLogicalDriveStringsW(512, drvs);
     for (wchar_t* p = drvs; *p; p += wcslen(p) + 1) {
         UINT driveType = GetDriveTypeW(p);
-        if (driveType != DRIVE_FIXED && driveType != DRIVE_REMOVABLE && driveType != DRIVE_CDROM) continue;
+        bool allowedType = (driveType == DRIVE_FIXED || driveType == DRIVE_REMOVABLE || driveType == DRIVE_CDROM);
+        if (!allowedType && cfg.IndexNetworkDrives && driveType == DRIVE_REMOTE) allowedType = true;
+        if (!allowedType) continue;
+        if (!IsRootEnabled(p)) continue;
         wchar_t fs[32] = { 0 };
         DriveFileSystem type = DriveFileSystem::Generic;
         if (GetVolumeInformationW(p, NULL, 0, NULL, NULL, NULL, fs, 32)) {
@@ -341,18 +717,39 @@ bool IndexingEngine::DiscoverAllDrives() {
     return !m_drives.empty();
 }
 
-void IndexingEngine::ScanGenericDrive(uint8_t di, const std::wstring& path, uint32_t pIdx, uint16_t pSeq) {
+void IndexingEngine::ScanGenericDrive(uint8_t di, const std::wstring& path, uint32_t pIdx, uint16_t pSeq, std::unordered_set<uint64_t>& visitedDirs) {
+    if (!IsPathIncluded(path)) return;
+
+    HANDLE dirHandle = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (dirHandle != INVALID_HANDLE_VALUE) {
+        BY_HANDLE_FILE_INFORMATION info = { 0 };
+        if (GetFileInformationByHandle(dirHandle, &info)) {
+            uint64_t fileId = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
+            if (!visitedDirs.insert(fileId).second) {
+                CloseHandle(dirHandle);
+                return;
+            }
+        }
+        CloseHandle(dirHandle);
+    }
+
     WIN32_FIND_DATAW fd; std::wstring searchPath = path + L"*";
     HANDLE h = FindFirstFileExW(searchPath.c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, FIND_FIRST_EX_LARGE_FETCH);
     if (h == INVALID_HANDLE_VALUE) return;
+    const IndexScopeConfig cfg = GetIndexScopeConfig();
     do {
         if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        std::wstring fullPath = path + fd.cFileName;
+        if (!IsPathIncluded(fullPath)) continue;
         FileRecord rec = { m_pool.AddString(fd.cFileName), pIdx, 0, ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow, 
                           ((uint64_t)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime, 
                           (uint16_t)fd.dwFileAttributes, 0, pSeq, di };
         uint32_t myIdx = (uint32_t)m_records.size(); m_records.push_back(rec);
         if (myIdx % 10000 == 0) m_status = L"Scanning " + m_drives[di].Letter + L"... " + std::to_wstring(m_records.size()) + L" items";
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ScanGenericDrive(di, path + fd.cFileName + L"\\", myIdx, 0);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (!cfg.FollowReparsePoints && (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
+            ScanGenericDrive(di, path + fd.cFileName + L"\\", myIdx, 0, visitedDirs);
+        }
     } while (FindNextFileW(h, &fd));
     FindClose(h);
 }
@@ -422,7 +819,10 @@ void IndexingEngine::PerformFullDriveScan() {
     m_records.clear(); m_pool.Clear(); m_mftLookupTables.clear();
     for (uint8_t i = 0; i < (uint8_t)m_drives.size(); ++i) {
         if (m_drives[i].Type == DriveFileSystem::NTFS) ScanMftForDrive(i);
-        else ScanGenericDrive(i, m_drives[i].Letter, 0xFFFFFFFF, 0);
+        else {
+            std::unordered_set<uint64_t> visitedDirs;
+            ScanGenericDrive(i, m_drives[i].Letter, 0xFFFFFFFF, 0, visitedDirs);
+        }
     }
 }
 
