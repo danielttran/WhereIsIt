@@ -474,6 +474,59 @@ bool IndexingEngine::IsPathIncluded(const std::wstring& path) const {
     return true;
 }
 
+void IndexingEngine::SetIndexScopeConfig(const IndexScopeConfig& config) {
+    std::lock_guard<std::mutex> lock(m_scopeConfigMutex);
+    m_scopeConfig = config;
+}
+
+IndexingEngine::IndexScopeConfig IndexingEngine::GetIndexScopeConfig() const {
+    std::lock_guard<std::mutex> lock(m_scopeConfigMutex);
+    return m_scopeConfig;
+}
+
+bool IndexingEngine::WildcardMatchI(const wchar_t* pattern, const wchar_t* text) {
+    if (!pattern || !text) return false;
+    while (*pattern) {
+        if (*pattern == L'*') {
+            ++pattern;
+            if (!*pattern) return true;
+            while (*text) {
+                if (WildcardMatchI(pattern, text)) return true;
+                ++text;
+            }
+            return false;
+        }
+        if (*pattern == L'?' || std::towlower(*pattern) == std::towlower(*text)) {
+            if (!*text) return false;
+            ++pattern; ++text;
+            continue;
+        }
+        return false;
+    }
+    return *text == L'\0';
+}
+
+bool IndexingEngine::IsRootEnabled(const std::wstring& root) const {
+    std::lock_guard<std::mutex> lock(m_scopeConfigMutex);
+    if (m_scopeConfig.IncludeRoots.empty()) return true;
+    for (const auto& allowed : m_scopeConfig.IncludeRoots) {
+        if (_wcsnicmp(root.c_str(), allowed.c_str(), allowed.size()) == 0) return true;
+    }
+    return false;
+}
+
+bool IndexingEngine::IsPathIncluded(const std::wstring& path) const {
+    std::lock_guard<std::mutex> lock(m_scopeConfigMutex);
+    for (const auto& pattern : m_scopeConfig.ExcludePathPatterns) {
+        if (!pattern.empty() && WildcardMatchI(pattern.c_str(), path.c_str())) return false;
+    }
+    m_drives = std::move(tempDrives);
+    m_records = std::move(tempRecords);
+    m_pool.LoadRawData(pd.data(), h.PoolSize);
+    m_mftLookupTables = std::move(tempLookup);
+    return true;
+}
+
 std::wstring IndexingEngine::GetFullPath(uint32_t recordIdx) const {
     if (recordIdx >= (uint32_t)m_records.size()) return L"";
     const char* parts[64]; int depth = 0; uint32_t cur = recordIdx; uint8_t di = m_records[recordIdx].DriveIndex;
@@ -588,11 +641,6 @@ void IndexingEngine::SearchThread() {
         auto results = std::make_shared<std::vector<uint32_t>>();
         QueryPlan plan = BuildQueryPlan(query);
         std::unordered_map<uint32_t, std::string> pathCache;
-        auto hasDifferentPendingQuery = [this, &query]() {
-            if (!m_isSearchRequested) return false;
-            std::lock_guard<std::mutex> lock(m_searchSyncMutex);
-            return m_isSearchRequested && m_pendingSearchQuery != query;
-        };
         auto pathFor = [this, &pathCache](uint32_t idx) {
             auto it = pathCache.find(idx);
             if (it != pathCache.end()) return it->second;
@@ -602,7 +650,7 @@ void IndexingEngine::SearchThread() {
         };
 
         for (uint32_t i = 0; i < (uint32_t)m_records.size(); ++i) {
-            if (hasDifferentPendingQuery()) break;
+            if (m_isSearchRequested) break;
             const auto& rec = m_records[i];
             if (rec.MftIndex == 0xFFFFFFFF) continue;
             std::string name = m_pool.GetString(rec.NamePoolOffset);
@@ -610,7 +658,7 @@ void IndexingEngine::SearchThread() {
             if (query.empty() || evaluateTerm(plan.Root.get(), plan, rec, name, path)) results->push_back(i);
         }
 
-        if (hasDifferentPendingQuery()) continue;
+        if (m_isSearchRequested) continue;
 
         std::sort(results->begin(), results->end(), [this, &plan, &pathFor](uint32_t a, uint32_t b) {
             const auto& ra = m_records[a];
