@@ -467,6 +467,63 @@ bool IndexingEngine::IsPathIncluded(const std::wstring& path) const {
     for (const auto& pattern : m_scopeConfig.ExcludePathPatterns) {
         if (!pattern.empty() && WildcardMatchI(pattern.c_str(), path.c_str())) return false;
     }
+    m_drives = std::move(tempDrives);
+    m_records = std::move(tempRecords);
+    m_pool.LoadRawData(pd.data(), h.PoolSize);
+    m_mftLookupTables = std::move(tempLookup);
+    return true;
+}
+
+void IndexingEngine::SetIndexScopeConfig(const IndexScopeConfig& config) {
+    std::lock_guard<std::mutex> lock(m_scopeConfigMutex);
+    m_scopeConfig = config;
+}
+
+IndexingEngine::IndexScopeConfig IndexingEngine::GetIndexScopeConfig() const {
+    std::lock_guard<std::mutex> lock(m_scopeConfigMutex);
+    return m_scopeConfig;
+}
+
+bool IndexingEngine::WildcardMatchI(const wchar_t* pattern, const wchar_t* text) {
+    if (!pattern || !text) return false;
+    while (*pattern) {
+        if (*pattern == L'*') {
+            ++pattern;
+            if (!*pattern) return true;
+            while (*text) {
+                if (WildcardMatchI(pattern, text)) return true;
+                ++text;
+            }
+            return false;
+        }
+        if (*pattern == L'?' || std::towlower(*pattern) == std::towlower(*text)) {
+            if (!*text) return false;
+            ++pattern; ++text;
+            continue;
+        }
+        return false;
+    }
+    return *text == L'\0';
+}
+
+bool IndexingEngine::IsRootEnabled(const std::wstring& root) const {
+    std::lock_guard<std::mutex> lock(m_scopeConfigMutex);
+    if (m_scopeConfig.IncludeRoots.empty()) return true;
+    for (const auto& allowed : m_scopeConfig.IncludeRoots) {
+        if (_wcsnicmp(root.c_str(), allowed.c_str(), allowed.size()) == 0) return true;
+    }
+    return false;
+}
+
+bool IndexingEngine::IsPathIncluded(const std::wstring& path) const {
+    std::lock_guard<std::mutex> lock(m_scopeConfigMutex);
+    for (const auto& pattern : m_scopeConfig.ExcludePathPatterns) {
+        if (!pattern.empty() && WildcardMatchI(pattern.c_str(), path.c_str())) return false;
+    }
+    m_drives = std::move(tempDrives);
+    m_records = std::move(tempRecords);
+    m_pool.LoadRawData(pd.data(), h.PoolSize);
+    m_mftLookupTables = std::move(tempLookup);
     return true;
 }
 
