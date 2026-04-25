@@ -108,7 +108,14 @@ public:
     FileRecord GetRecord(uint32_t recordIndex) const;
     std::wstring GetRecordName(uint32_t recordIndex) const;
     const StringPool& GetFileNamePool() const { return m_pool; }
-    std::wstring GetCurrentStatus() const { return m_status; }
+    void SetStatus(const std::wstring& status) {
+        std::lock_guard<std::mutex> lock(m_statusMutex);
+        m_status = status;
+    }
+    std::wstring GetCurrentStatus() const {
+        std::lock_guard<std::mutex> lock(m_statusMutex);
+        return m_status;
+    }
     bool IsBusy() const { return !m_ready; }
 
     std::wstring GetFullPath(uint32_t recordIndex) const;
@@ -157,6 +164,7 @@ private:
     std::thread m_searchWorker;
     std::atomic<bool> m_running;
     std::atomic<bool> m_ready;
+    mutable std::mutex m_statusMutex;
     std::wstring m_status;
     
     struct DriveContext { 
