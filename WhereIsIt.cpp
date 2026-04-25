@@ -5,6 +5,8 @@
 #include <shellapi.h>
 #include <map>
 #include <memory>
+#include <string>
+#include <algorithm>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -13,79 +15,142 @@
 #define MAX_LOADSTRING 100
 #define IDT_SEARCH_DEBOUNCE 2
 
+// Global UI Context
 HINSTANCE hInst;
 WCHAR szTitle[MAX_LOADSTRING], szWindowClass[MAX_LOADSTRING];
 HWND hSearchEdit, hFileList, hStatusBar;
 IndexingEngine g_Engine;
 std::shared_ptr<std::vector<uint32_t>> g_ActiveResults;
 
+// Search term storage for highlighting
+wchar_t g_CurrentQueryW[256] = { 0 };
+HFONT g_FontNormal = NULL;
+HFONT g_FontBold = NULL;
+
 #define IDC_STATUS_BAR 122
 std::map<std::wstring, int> g_iconCache;
 int g_folderIconIdx = -1;
 
+// --- UI FORMATTING HELPERS ---
+
 int GetIconIndex(const std::wstring& filename, uint16_t attributes) {
     if (attributes & FILE_ATTRIBUTE_DIRECTORY) {
         if (g_folderIconIdx != -1) return g_folderIconIdx;
-        SHFILEINFOW sfi = { 0 }; SHGetFileInfoW(L"C:\\Windows", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi), SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+        SHFILEINFOW sfi = { 0 }; 
+        SHGetFileInfoW(L"C:\\Windows", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi), SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
         return g_folderIconIdx = sfi.iIcon;
     }
-    size_t dot = filename.find_last_of(L'.'); std::wstring ext = (dot == std::wstring::npos) ? L"" : filename.substr(dot);
-    auto it = g_iconCache.find(ext); if (it != g_iconCache.end()) return it->second;
-    SHFILEINFOW sfi = { 0 }; SHGetFileInfoW(filename.c_str(), FILE_ATTRIBUTE_NORMAL, &sfi, sizeof(sfi), SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
-    return g_iconCache[ext] = sfi.iIcon;
+    size_t dotPos = filename.find_last_of(L'.'); 
+    std::wstring extension = (dotPos == std::wstring::npos) ? L"" : filename.substr(dotPos);
+    auto cached = g_iconCache.find(extension); 
+    if (cached != g_iconCache.end()) return cached->second;
+    SHFILEINFOW sfi = { 0 }; 
+    SHGetFileInfoW(filename.c_str(), FILE_ATTRIBUTE_NORMAL, &sfi, sizeof(sfi), SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+    return g_iconCache[extension] = sfi.iIcon;
 }
 
-void FormatSize(wchar_t* buf, size_t len, uint64_t size, uint16_t attr) {
-    if (attr & FILE_ATTRIBUTE_DIRECTORY) { buf[0] = 0; return; }
-    if (size < 1024) { swprintf_s(buf, len, L"%llu B", size); return; }
-    double s = (double)size; const wchar_t* units[] = { L"KB", L"MB", L"GB", L"TB" };
-    int i = -1; while (s >= 1024 && i < 3) { s /= 1024; i++; }
-    swprintf_s(buf, len, L"%.1f %s", s, units[i]);
+void FormatFileSize(wchar_t* buffer, size_t bufferLen, uint64_t bytes, uint16_t attributes) {
+    if (attributes & FILE_ATTRIBUTE_DIRECTORY) { buffer[0] = 0; return; }
+    if (bytes < 1024) { swprintf_s(buffer, bufferLen, L"%llu B", bytes); return; }
+    double size = (double)bytes; 
+    const wchar_t* units[] = { L"KB", L"MB", L"GB", L"TB" };
+    int unitIdx = -1;
+    while (size >= 1024 && unitIdx < 3) { size /= 1024; unitIdx++; }
+    swprintf_s(buffer, bufferLen, L"%.1f %s", size, units[unitIdx]);
 }
 
-void FormatDateTime(wchar_t* buf, size_t len, uint64_t filetime) {
-    if (!filetime) { buf[0] = 0; return; }
+void FormatFileTime(wchar_t* buffer, size_t bufferLen, uint64_t filetime) {
+    if (!filetime) { buffer[0] = 0; return; }
     FILETIME ft; ft.dwLowDateTime = (DWORD)filetime; ft.dwHighDateTime = (DWORD)(filetime >> 32);
-    SYSTEMTIME st, lst; FileTimeToSystemTime(&ft, &st); SystemTimeToTzSpecificLocalTime(NULL, &st, &lst);
-    int hour = lst.wHour % 12; if (hour == 0) hour = 12;
-    swprintf_s(buf, len, L"%02d/%02d/%04d %02d:%02d %s", lst.wMonth, lst.wDay, lst.wYear, hour, lst.wMinute, (lst.wHour >= 12 ? L"PM" : L"AM"));
+    SYSTEMTIME st, localTime; 
+    FileTimeToSystemTime(&ft, &st); 
+    SystemTimeToTzSpecificLocalTime(NULL, &st, &localTime);
+    int displayHour = localTime.wHour % 12; 
+    if (displayHour == 0) displayHour = 12;
+    swprintf_s(buffer, bufferLen, L"%02d/%02d/%04d %02d:%02d %s", 
+        localTime.wMonth, localTime.wDay, localTime.wYear, 
+        displayHour, localTime.wMinute, (localTime.wHour >= 12 ? L"PM" : L"AM"));
 }
 
-ATOM MyRegisterClass(HINSTANCE hInstance);
-BOOL InitInstance(HINSTANCE, int);
-LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
+// --- CUSTOM DRAW ENGINE (Bolding Match) ---
 
-int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nCmdShow) {
-    UNREFERENCED_PARAMETER(hPrevInstance); UNREFERENCED_PARAMETER(lpCmdLine);
-    LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
-    LoadStringW(hInstance, IDC_WHEREISIT, szWindowClass, MAX_LOADSTRING);
-    MyRegisterClass(hInstance);
-    INITCOMMONCONTROLSEX icex = { sizeof(icex), ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES };
-    InitCommonControlsEx(&icex);
-    g_Engine.Start();
-    if (!InitInstance(hInstance, nCmdShow)) return FALSE;
-    HACCEL hAccel = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_WHEREISIT));
-    MSG msg;
-    while (GetMessage(&msg, nullptr, 0, 0)) { if (!TranslateAccelerator(msg.hwnd, hAccel, &msg)) { TranslateMessage(&msg); DispatchMessage(&msg); } }
-    g_Engine.Stop();
-    return (int)msg.wParam;
+LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
+    switch (pcd->nmcd.dwDrawStage) {
+    case CDDS_PREPAINT: return CDRF_NOTIFYITEMDRAW;
+    case CDDS_ITEMPREPAINT: return CDRF_NOTIFYSUBITEMDRAW;
+    case CDDS_ITEMPREPAINT | CDDS_SUBITEM:
+        if (pcd->iSubItem == 0) {
+            if (!g_ActiveResults || pcd->nmcd.dwItemSpec >= g_ActiveResults->size()) return CDRF_DODEFAULT;
+
+            uint32_t recordIdx = (*g_ActiveResults)[pcd->nmcd.dwItemSpec];
+            const auto& rec = g_Engine.GetRecords()[recordIdx];
+            const char* nameA = g_Engine.GetFileNamePool().GetString(rec.NamePoolOffset);
+            wchar_t nameW[MAX_PATH];
+            MultiByteToWideChar(CP_UTF8, 0, nameA, -1, nameW, MAX_PATH);
+
+            RECT rect;
+            ListView_GetSubItemRect(hFileList, (int)pcd->nmcd.dwItemSpec, 0, LVIR_BOUNDS, &rect);
+            
+            bool isSelected = (ListView_GetItemState(hFileList, (int)pcd->nmcd.dwItemSpec, LVIS_SELECTED) & LVIS_SELECTED);
+            FillRect(pcd->nmcd.hdc, &rect, GetSysColorBrush(isSelected ? COLOR_HIGHLIGHT : COLOR_WINDOW));
+            SetTextColor(pcd->nmcd.hdc, GetSysColor(isSelected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT));
+
+            HIMAGELIST hSIL = ListView_GetImageList(hFileList, LVSIL_SMALL);
+            int iconIdx = GetIconIndex(nameW, rec.FileAttributes);
+            ImageList_Draw(hSIL, iconIdx, pcd->nmcd.hdc, rect.left + 2, rect.top + (rect.bottom - rect.top - 16)/2, ILD_TRANSPARENT);
+            rect.left += 20; 
+
+            std::wstring nameStr = nameW;
+            std::wstring searchStr = g_CurrentQueryW;
+            size_t matchPos = std::wstring::npos;
+            if (!searchStr.empty()) {
+                auto it = std::search(nameStr.begin(), nameStr.end(), searchStr.begin(), searchStr.end(),
+                    [](wchar_t c1, wchar_t c2) { return towlower(c1) == towlower(c2); });
+                if (it != nameStr.end()) matchPos = std::distance(nameStr.begin(), it);
+            }
+
+            SetBkMode(pcd->nmcd.hdc, TRANSPARENT);
+            if (matchPos != std::wstring::npos) {
+                std::wstring p1 = nameStr.substr(0, matchPos);
+                std::wstring p2 = nameStr.substr(matchPos, searchStr.length());
+                std::wstring p3 = nameStr.substr(matchPos + searchStr.length());
+
+                SelectObject(pcd->nmcd.hdc, g_FontNormal);
+                DrawTextW(pcd->nmcd.hdc, p1.c_str(), -1, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
+                DrawTextW(pcd->nmcd.hdc, p1.c_str(), -1, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                rect.left = rect.right; rect.right = pcd->nmcd.rc.right;
+
+                SelectObject(pcd->nmcd.hdc, g_FontBold);
+                DrawTextW(pcd->nmcd.hdc, p2.c_str(), -1, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
+                DrawTextW(pcd->nmcd.hdc, p2.c_str(), -1, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                rect.left = rect.right; rect.right = pcd->nmcd.rc.right;
+
+                SelectObject(pcd->nmcd.hdc, g_FontNormal);
+                DrawTextW(pcd->nmcd.hdc, p3.c_str(), -1, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            } else {
+                SelectObject(pcd->nmcd.hdc, g_FontNormal);
+                DrawTextW(pcd->nmcd.hdc, nameW, -1, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            }
+            return CDRF_SKIPDEFAULT;
+        }
+        break;
+    }
+    return CDRF_DODEFAULT;
 }
 
-ATOM MyRegisterClass(HINSTANCE hInstance) {
-    WNDCLASSEXW wcex = { sizeof(WNDCLASSEX) };
-    wcex.style = CS_HREDRAW | CS_VREDRAW; wcex.lpfnWndProc = WndProc; wcex.hInstance = hInstance;
-    wcex.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_WHEREISIT)); wcex.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wcex.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); wcex.lpszMenuName = MAKEINTRESOURCEW(IDC_WHEREISIT);
-    wcex.lpszClassName = szWindowClass; wcex.hIconSm = LoadIcon(wcex.hInstance, MAKEINTRESOURCE(IDI_WHEREISIT));
-    return RegisterClassExW(&wcex);
-}
+// --- MESSAGE HANDLERS ---
 
-BOOL InitInstance(HINSTANCE hInstance, int nCmdShow) {
-    hInst = hInstance;
-    HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, 0, CW_USEDEFAULT, 0, nullptr, nullptr, hInstance, nullptr);
-    if (!hWnd) return FALSE;
-    ShowWindow(hWnd, nCmdShow); UpdateWindow(hWnd);
-    return TRUE;
+void OnDisplayInfo(NMLVDISPINFO* pdi) {
+    if (!g_ActiveResults || pdi->item.iItem >= (int)g_ActiveResults->size()) return;
+    uint32_t rIdx = (*g_ActiveResults)[pdi->item.iItem]; 
+    const auto& rec = g_Engine.GetRecords()[rIdx];
+    if (pdi->item.mask & LVIF_TEXT) {
+        switch (pdi->item.iSubItem) {
+            case 1: wcsncpy_s(pdi->item.pszText, pdi->item.cchTextMax, g_Engine.GetParentPath(rIdx).c_str(), _TRUNCATE); break;
+            case 2: FormatFileSize(pdi->item.pszText, pdi->item.cchTextMax, rec.FileSize, rec.FileAttributes); break;
+            case 3: FormatFileTime(pdi->item.pszText, pdi->item.cchTextMax, rec.LastModified); break;
+        }
+    }
 }
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -96,67 +161,79 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         SHFILEINFOW sfi = { 0 }; HIMAGELIST hSIL = (HIMAGELIST)SHGetFileInfoW(L"C:\\", 0, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
         if (hSIL) ListView_SetImageList(hFileList, hSIL, LVSIL_SMALL);
         hStatusBar = CreateWindowEx(0, STATUSCLASSNAME, L"Initializing...", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, (HMENU)IDC_STATUS_BAR, hInst, NULL);
-        ListView_SetExtendedListViewStyle(hFileList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
+        ListView_SetExtendedListViewStyle(hFileList, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
         LVCOLUMN lvc = { LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM };
         lvc.iSubItem = 0; lvc.pszText = (LPWSTR)L"Name"; lvc.cx = 250; ListView_InsertColumn(hFileList, 0, &lvc);
         lvc.iSubItem = 1; lvc.pszText = (LPWSTR)L"Path"; lvc.cx = 350; ListView_InsertColumn(hFileList, 1, &lvc);
         lvc.iSubItem = 2; lvc.pszText = (LPWSTR)L"Size"; lvc.cx = 100; ListView_InsertColumn(hFileList, 2, &lvc);
         lvc.iSubItem = 3; lvc.pszText = (LPWSTR)L"Date Modified"; lvc.cx = 150; ListView_InsertColumn(hFileList, 3, &lvc);
-        HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        SendMessage(hSearchEdit, WM_SETFONT, (WPARAM)hFont, TRUE); SendMessage(hFileList, WM_SETFONT, (WPARAM)hFont, TRUE);
+        g_FontNormal = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        LOGFONT lf; GetObject(g_FontNormal, sizeof(lf), &lf);
+        lf.lfWeight = FW_BOLD; g_FontBold = CreateFontIndirect(&lf);
+        SendMessage(hSearchEdit, WM_SETFONT, (WPARAM)g_FontNormal, TRUE);
         SetTimer(hWnd, 1, 100, NULL);
-        g_ActiveResults = std::make_shared<std::vector<uint32_t>>();
         break;
     }
     case WM_TIMER:
         if (wParam == 1) {
-            SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)g_Engine.GetStatus().c_str());
-            if (g_Engine.HasNewResults()) {
+            if (g_CurrentQueryW[0] != 0) {
+                wchar_t status[64]; swprintf_s(status, L"%zu objects", g_ActiveResults ? g_ActiveResults->size() : 0);
+                SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)status);
+            } else SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)g_Engine.GetCurrentStatus().c_str());
+            if (g_Engine.HasNewResults() || (!g_Engine.IsBusy() && (!g_ActiveResults || g_ActiveResults->empty()))) {
                 g_ActiveResults = g_Engine.GetSearchResults();
                 ListView_SetItemCount(hFileList, (int)g_ActiveResults->size());
                 InvalidateRect(hFileList, NULL, FALSE);
             }
         } else if (wParam == IDT_SEARCH_DEBOUNCE) {
             KillTimer(hWnd, IDT_SEARCH_DEBOUNCE);
-            wchar_t qw[256]; GetWindowText(hSearchEdit, qw, 256); char qa[256];
-            WideCharToMultiByte(CP_UTF8, 0, qw, -1, qa, 256, NULL, NULL); g_Engine.Search(qa);
+            GetWindowText(hSearchEdit, g_CurrentQueryW, 256); char queryA[256];
+            WideCharToMultiByte(CP_UTF8, 0, g_CurrentQueryW, -1, queryA, 256, NULL, NULL); 
+            g_Engine.Search(queryA);
         }
         break;
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDC_SEARCH_EDIT && HIWORD(wParam) == EN_CHANGE) SetTimer(hWnd, IDT_SEARCH_DEBOUNCE, 150, NULL);
+        break;
     case WM_NOTIFY: {
-        LPNMHDR pnmh = (LPNMHDR)lParam;
-        if (pnmh->idFrom == IDC_FILE_LIST && pnmh->code == LVN_GETDISPINFO) {
-            NMLVDISPINFO* plvdi = (NMLVDISPINFO*)lParam;
-            if (g_ActiveResults && plvdi->item.iItem < (int)g_ActiveResults->size()) {
-                uint32_t rIdx = (*g_ActiveResults)[plvdi->item.iItem]; const auto& rec = g_Engine.GetRecords()[rIdx];
-                if (plvdi->item.mask & LVIF_TEXT) {
-                    if (plvdi->item.iSubItem == 0) MultiByteToWideChar(CP_UTF8, 0, g_Engine.GetPool().GetString(rec.NameOffset), -1, plvdi->item.pszText, plvdi->item.cchTextMax);
-                    else if (plvdi->item.iSubItem == 1) wcsncpy_s(plvdi->item.pszText, plvdi->item.cchTextMax, g_Engine.GetParentPath(rIdx).c_str(), _TRUNCATE);
-                    else if (plvdi->item.iSubItem == 2) FormatSize(plvdi->item.pszText, plvdi->item.cchTextMax, rec.Size, rec.Attributes);
-                    else if (plvdi->item.iSubItem == 3) FormatDateTime(plvdi->item.pszText, plvdi->item.cchTextMax, rec.ModifiedTime);
-                }
-                if (plvdi->item.mask & LVIF_IMAGE) {
-                    wchar_t nameW[MAX_PATH]; MultiByteToWideChar(CP_UTF8, 0, g_Engine.GetPool().GetString(rec.NameOffset), -1, nameW, MAX_PATH);
-                    plvdi->item.iImage = GetIconIndex(nameW, rec.Attributes);
-                }
-            }
+        LPNMHDR header = (LPNMHDR)lParam;
+        if (header->idFrom == IDC_FILE_LIST) {
+            if (header->code == LVN_GETDISPINFO) OnDisplayInfo((NMLVDISPINFO*)lParam);
+            else if (header->code == NM_CUSTOMDRAW) return OnCustomDraw((NMLVCUSTOMDRAW*)lParam);
         }
         break;
     }
     case WM_SIZE: {
         int w = LOWORD(lParam), h = HIWORD(lParam), sh = 24, m = 5;
-        SendMessage(hStatusBar, WM_SIZE, 0, 0); RECT rs; GetWindowRect(hStatusBar, &rs); int sth = rs.bottom - rs.top;
+        SendMessage(hStatusBar, WM_SIZE, 0, 0); RECT rs; GetWindowRect(hStatusBar, &rs);
         MoveWindow(hSearchEdit, m, m, w - 2 * m, sh, TRUE);
-        MoveWindow(hFileList, 0, sh + 2 * m, w, h - (sh + 2 * m) - sth, TRUE);
+        MoveWindow(hFileList, 0, sh + 2 * m, w, h - (sh + 2 * m) - (rs.bottom - rs.top), TRUE);
         break;
     }
-    case WM_COMMAND: {
-        int id = LOWORD(wParam), ev = HIWORD(wParam);
-        if (id == IDC_SEARCH_EDIT && ev == EN_CHANGE) { SetTimer(hWnd, IDT_SEARCH_DEBOUNCE, 150, NULL); }
-        if (id == IDM_EXIT) DestroyWindow(hWnd);
-        break;
-    }
-    case WM_DESTROY: PostQuitMessage(0); break;
+    case WM_DESTROY: if (g_FontBold) DeleteObject(g_FontBold); PostQuitMessage(0); break;
     default: return DefWindowProc(hWnd, msg, wParam, lParam);
     }
     return 0;
+}
+
+int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nCmdShow) {
+    UNREFERENCED_PARAMETER(hPrevInstance); UNREFERENCED_PARAMETER(lpCmdLine);
+    LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
+    LoadStringW(hInstance, IDC_WHEREISIT, szWindowClass, MAX_LOADSTRING);
+    WNDCLASSEXW wcex = { sizeof(WNDCLASSEX) };
+    wcex.style = CS_HREDRAW | CS_VREDRAW; wcex.lpfnWndProc = WndProc; wcex.hInstance = hInstance;
+    wcex.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_WHEREISIT)); wcex.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wcex.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); wcex.lpszMenuName = MAKEINTRESOURCEW(IDC_WHEREISIT);
+    wcex.lpszClassName = szWindowClass; wcex.hIconSm = LoadIcon(wcex.hInstance, MAKEINTRESOURCE(IDI_WHEREISIT));
+    RegisterClassExW(&wcex);
+    INITCOMMONCONTROLSEX icex = { sizeof(INITCOMMONCONTROLSEX), ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES };
+    InitCommonControlsEx(&icex);
+    g_Engine.Start(); hInst = hInstance;
+    HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, 0, CW_USEDEFAULT, 0, nullptr, nullptr, hInstance, nullptr);
+    if (!hWnd) return FALSE;
+    ShowWindow(hWnd, nCmdShow); UpdateWindow(hWnd);
+    MSG msg;
+    while (GetMessage(&msg, nullptr, 0, 0)) { TranslateMessage(&msg); DispatchMessage(&msg); }
+    g_Engine.Stop();
+    return (int)msg.wParam;
 }
