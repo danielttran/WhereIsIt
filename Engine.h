@@ -75,9 +75,11 @@ public:
     uint32_t AddString(const std::wstring& text);
     uint32_t AddString(const wchar_t* text, size_t length);
     const char* GetString(uint32_t offset) const;
+    const char* GetRawData() const { return m_pool.data(); }
     size_t GetSize() const { return m_pool.size(); }
     void Clear();
     void LoadRawData(const char* data, size_t size);
+    uint32_t AddRawData(const char* data, size_t size);
 private:
     std::vector<char> m_pool;
 };
@@ -112,6 +114,17 @@ public:
     std::wstring GetParentPath(uint32_t recordIndex) const;
 
 private:
+    struct DriveScanContext {
+        std::vector<FileRecord> Records;
+        std::vector<uint32_t> LookupTable;
+        StringPool Pool;
+        uint8_t DriveIndex;
+        std::wstring DriveLetter;
+        HANDLE VolumeHandle;
+        DriveFileSystem Type;
+        uint64_t LastProcessedUsn = 0;
+    };
+
     std::wstring GetFullPathInternal(uint32_t recordIndex) const;
     std::wstring GetParentPathInternal(uint32_t recordIndex) const;
 
@@ -127,8 +140,8 @@ private:
 
     bool DiscoverAllDrives();
     void PerformFullDriveScan();
-    void ScanMftForDrive(uint8_t driveIndex);
-    void ScanGenericDrive(uint8_t driveIndex, const std::wstring& path, uint32_t parentIdx, uint16_t parentSeq, std::unordered_set<uint64_t>& visitedDirs);
+    void ScanMftForDrive(DriveScanContext& ctx);
+    void ScanGenericDrive(DriveScanContext& ctx, const std::wstring& path, uint32_t parentIdx, uint16_t parentSeq, std::unordered_set<uint64_t>& visitedDirs);
 
     void HandleUsnJournalRecord(USN_RECORD_V2* record, uint8_t driveIndex);
     
@@ -137,6 +150,7 @@ private:
     bool IsPathIncluded(const std::wstring& path) const;
     bool IsRootEnabled(const std::wstring& root) const;
     static bool WildcardMatchI(const wchar_t* pattern, const wchar_t* text);
+    void CloseAllDriveHandles();
 
     std::thread m_mainWorker;
     std::thread m_searchWorker;
@@ -169,6 +183,7 @@ private:
     std::condition_variable m_searchEvent;
     std::atomic<bool> m_isSearchRequested;
     std::atomic<bool> m_isSortOnlyRequested;
+    std::atomic<uint64_t> m_searchGeneration{ 0 };
     std::atomic<bool> m_resultsUpdated;
     std::shared_ptr<std::vector<uint32_t>> m_currentResults;
 };

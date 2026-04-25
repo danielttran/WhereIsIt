@@ -132,6 +132,8 @@ struct QueryPlan {
     std::vector<std::string> Tokens;
     std::unique_ptr<QueryNode> Root;
     std::vector<std::regex> CompiledRegex;
+    bool Success = true;
+    std::wstring ErrorMessage;
 };
 
 static bool ParseBool(const std::string& raw) {
@@ -190,21 +192,44 @@ static std::vector<std::string> TokenizeQuery(const std::string& query) {
 class QueryParser {
 public:
     explicit QueryParser(const std::vector<std::string>& tokens) : m_tokens(tokens) {}
-    std::unique_ptr<QueryNode> Parse() { m_pos = 0; return ParseOr(); }
+    std::unique_ptr<QueryNode> Parse(bool& success, std::wstring& error) { 
+        m_pos = 0; m_error = L""; m_success = true;
+        auto node = ParseOr(); 
+        if (m_pos < m_tokens.size() && m_success) {
+            m_success = false; m_error = L"Unexpected token: " + Utf8ToWide(m_tokens[m_pos]);
+        }
+        success = m_success; error = m_error;
+        return node; 
+    }
 private:
+    std::wstring Utf8ToWide(const std::string& s) {
+        int sz = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, NULL, 0);
+        if (sz <= 1) return L"";
+        std::wstring res(sz - 1, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &res[0], sz);
+        return res;
+    }
     std::unique_ptr<QueryNode> ParseOr() {
         auto node = ParseAnd();
+        if (!node) return nullptr;
         while (Match("or")) {
             auto rhs = ParseAnd();
+            if (!rhs) { m_success = false; m_error = L"Missing operand after 'OR'"; return node; }
             auto n = std::make_unique<QueryNode>(); n->Type = QueryNodeType::Or; n->Left = std::move(node); n->Right = std::move(rhs); node = std::move(n);
         }
         return node;
     }
     std::unique_ptr<QueryNode> ParseAnd() {
         auto node = ParseUnary();
+        if (!node) return nullptr;
         while (true) {
-            if (Match("and") || CanImplicitAnd()) {
+            if (Match("and")) {
                 auto rhs = ParseUnary();
+                if (!rhs) { m_success = false; m_error = L"Missing operand after 'AND'"; return node; }
+                auto n = std::make_unique<QueryNode>(); n->Type = QueryNodeType::And; n->Left = std::move(node); n->Right = std::move(rhs); node = std::move(n);
+            } else if (CanImplicitAnd()) {
+                auto rhs = ParseUnary();
+                if (!rhs) break;
                 auto n = std::make_unique<QueryNode>(); n->Type = QueryNodeType::And; n->Left = std::move(node); n->Right = std::move(rhs); node = std::move(n);
             } else break;
         }
@@ -212,23 +237,28 @@ private:
     }
     std::unique_ptr<QueryNode> ParseUnary() {
         if (Match("not")) {
-            auto n = std::make_unique<QueryNode>(); n->Type = QueryNodeType::Not; n->Left = ParseUnary(); return n;
+            auto operand = ParseUnary();
+            if (!operand) { m_success = false; m_error = L"Missing operand after 'NOT'"; return nullptr; }
+            auto n = std::make_unique<QueryNode>(); n->Type = QueryNodeType::Not; n->Left = std::move(operand); return n;
         }
         if (Peek() == "(") {
             ++m_pos;
             auto n = ParseOr();
-            if (Peek() == ")") ++m_pos;
+            if (Peek() != ")") { m_success = false; m_error = L"Missing ')'"; return n; }
+            ++m_pos;
             return n;
         }
+        std::string term = Consume();
+        if (term.empty() || term == ")") return nullptr;
         auto n = std::make_unique<QueryNode>();
         n->Type = QueryNodeType::Term;
-        n->Term = Consume();
+        n->Term = term;
         return n;
     }
     bool CanImplicitAnd() const {
         if (m_pos >= m_tokens.size()) return false;
         std::string t = ToLowerAscii(m_tokens[m_pos]);
-        return t != ")" && t != "or";
+        return t != ")" && t != "or" && t != "and";
     }
     bool Match(const char* op) {
         if (m_pos >= m_tokens.size()) return false;
@@ -239,6 +269,8 @@ private:
     std::string Consume() { return (m_pos < m_tokens.size()) ? m_tokens[m_pos++] : std::string(); }
     const std::vector<std::string>& m_tokens;
     size_t m_pos = 0;
+    bool m_success = true;
+    std::wstring m_error;
 };
 
 static QueryPlan BuildQueryPlan(const std::string& rawQuery) {
@@ -264,16 +296,30 @@ static QueryPlan BuildQueryPlan(const std::string& rawQuery) {
     }
     plan.Tokens = exprTokens;
     QueryParser parser(exprTokens);
-    plan.Root = parser.Parse();
+    plan.Root = parser.Parse(plan.Success, plan.ErrorMessage);
 
-    if (plan.Config.RegexMode) {
+    if (plan.Success && plan.Config.RegexMode) {
         std::regex_constants::syntax_option_type options = std::regex_constants::ECMAScript;
         if (!plan.Config.CaseSensitive) options |= std::regex_constants::icase;
         for (const auto& token : exprTokens) {
             std::string low = ToLowerAscii(token);
             if (low == "and" || low == "or" || low == "not" || low == "(" || low == ")" || token.find(':') != std::string::npos) continue;
-            try { plan.CompiledRegex.emplace_back(token, options); }
-            catch (...) {}
+            try { 
+                if (token.length() > 1000) throw std::runtime_error("Regex too long");
+                plan.CompiledRegex.emplace_back(token, options); 
+            }
+            catch (const std::regex_error& e) {
+                plan.Success = false;
+                int sz = MultiByteToWideChar(CP_UTF8, 0, e.what(), -1, NULL, 0);
+                std::wstring msg(sz, L'\0'); MultiByteToWideChar(CP_UTF8, 0, e.what(), -1, &msg[0], sz);
+                plan.ErrorMessage = L"Regex Error: " + msg;
+                break;
+            }
+            catch (...) {
+                plan.Success = false;
+                plan.ErrorMessage = L"Unknown Regex Error";
+                break;
+            }
         }
     }
     return plan;
@@ -282,7 +328,7 @@ static QueryPlan BuildQueryPlan(const std::string& rawQuery) {
 // --- StringPool: Minimal RAM for Filenames ---
 
 StringPool::StringPool(size_t initialCapacity) { 
-    m_pool.reserve(initialCapacity); 
+    if (initialCapacity > 0) m_pool.reserve(initialCapacity); 
     m_pool.push_back('\0'); 
 }
 
@@ -293,6 +339,13 @@ void StringPool::Clear() {
 
 void StringPool::LoadRawData(const char* data, size_t size) { 
     m_pool.assign(data, data + size); 
+}
+
+uint32_t StringPool::AddRawData(const char* data, size_t size) {
+    if (size == 0) return 0;
+    uint32_t offset = (uint32_t)m_pool.size();
+    m_pool.insert(m_pool.end(), data, data + size);
+    return offset;
 }
 
 uint32_t StringPool::AddString(const std::wstring& text) {
@@ -322,7 +375,7 @@ const char* StringPool::GetString(uint32_t offset) const {
 
 // --- IndexingEngine Implementation ---
 
-IndexingEngine::IndexingEngine() : m_running(false), m_ready(false), m_pool(20 * 1024 * 1024), m_isSearchRequested(false), m_resultsUpdated(false) {
+IndexingEngine::IndexingEngine() : m_running(false), m_ready(false), m_pool(20 * 1024 * 1024), m_isSearchRequested(false), m_isSortOnlyRequested(false), m_resultsUpdated(false) {
     m_records.reserve(1000000);
     m_currentResults = std::make_shared<std::vector<uint32_t>>();
 }
@@ -336,11 +389,21 @@ void IndexingEngine::Start() {
     m_searchWorker = std::thread(&IndexingEngine::SearchThread, this);
 }
 
+void IndexingEngine::CloseAllDriveHandles() {
+    for (auto& d : m_drives) {
+        if (d.VolumeHandle != INVALID_HANDLE_VALUE) {
+            CloseHandle(d.VolumeHandle);
+            d.VolumeHandle = INVALID_HANDLE_VALUE;
+        }
+    }
+}
+
 void IndexingEngine::Stop() {
     m_running = false;
     m_searchEvent.notify_all();
     if (m_mainWorker.joinable()) m_mainWorker.join();
     if (m_searchWorker.joinable()) m_searchWorker.join();
+    CloseAllDriveHandles();
 }
 
 std::shared_ptr<std::vector<uint32_t>> IndexingEngine::GetSearchResults() {
@@ -479,46 +542,36 @@ IndexingEngine::IndexScopeConfig IndexingEngine::GetIndexScopeConfig() const {
 
 bool IndexingEngine::WildcardMatchI(const wchar_t* pattern, const wchar_t* text) {
     if (!pattern || !text) return false;
-    while (*pattern) {
+    const wchar_t *cp = nullptr, *mp = nullptr;
+    while (*text) {
         if (*pattern == L'*') {
-            ++pattern;
-            if (!*pattern) return true;
-            while (*text) {
-                if (WildcardMatchI(pattern, text)) return true;
-                ++text;
-            }
-            return false;
-        }
-        if (*pattern == L'?' || std::towlower(*pattern) == std::towlower(*text)) {
-            if (!*text) return false;
-            ++pattern; ++text;
-            continue;
-        }
-        return false;
+            if (!*++pattern) return true;
+            mp = pattern; cp = text + 1;
+        } else if (*pattern == L'?' || std::towlower(*pattern) == std::towlower(*text)) {
+            pattern++; text++;
+        } else if (mp) {
+            pattern = mp; text = cp++;
+        } else return false;
     }
-    return *text == L'\0';
+    while (*pattern == L'*') pattern++;
+    return !*pattern;
 }
 
 static bool WildcardMatchIAscii(const char* pattern, const char* text) {
     if (!pattern || !text) return false;
-    while (*pattern) {
+    const char *cp = nullptr, *mp = nullptr;
+    while (*text) {
         if (*pattern == '*') {
-            ++pattern;
-            if (!*pattern) return true;
-            while (*text) {
-                if (WildcardMatchIAscii(pattern, text)) return true;
-                ++text;
-            }
-            return false;
-        }
-        if (*pattern == '?' || g_ToLowerLookup[(unsigned char)*pattern] == g_ToLowerLookup[(unsigned char)*text]) {
-            if (!*text) return false;
-            ++pattern; ++text;
-            continue;
-        }
-        return false;
+            if (!*++pattern) return true;
+            mp = pattern; cp = text + 1;
+        } else if (*pattern == '?' || g_ToLowerLookup[(unsigned char)*pattern] == g_ToLowerLookup[(unsigned char)*text]) {
+            pattern++; text++;
+        } else if (mp) {
+            pattern = mp; text = cp++;
+        } else return false;
     }
-    return *text == '\0';
+    while (*pattern == '*') pattern++;
+    return !*pattern;
 }
 
 bool IndexingEngine::IsRootEnabled(const std::wstring& root) const {
@@ -551,26 +604,35 @@ std::wstring IndexingEngine::GetFullPath(uint32_t recordIdx) const {
 
 std::wstring IndexingEngine::GetFullPathInternal(uint32_t recordIdx) const {
     if (recordIdx >= (uint32_t)m_records.size()) return L"";
-    const char* parts[64]; int depth = 0; uint32_t cur = recordIdx; uint8_t di = m_records[recordIdx].DriveIndex;
+    std::vector<const char*> parts;
+    parts.reserve(32);
+    uint32_t cur = recordIdx;
+    uint8_t di = m_records[recordIdx].DriveIndex;
     if (di >= (uint8_t)m_drives.size() || di >= (uint8_t)m_mftLookupTables.size()) return L"";
-    while (depth < 64) {
+
+    std::unordered_set<uint32_t> visited;
+    while (parts.size() < 1024) { // Path depth limit guard
+        if (!visited.insert(cur).second) break; // Cycle detection
         const FileRecord& r = m_records[cur]; 
         const char* name = m_pool.GetString(r.NamePoolOffset);
-        // Skip the NTFS root directory marker "." to avoid paths like C:\.\Windows
         if (name[0] != '.' || name[1] != '\0') {
-            parts[depth++] = name;
+            parts.push_back(name);
         }
         if (r.ParentMftIndex < 5 || r.ParentMftIndex >= (uint32_t)m_mftLookupTables[di].size()) break;
         uint32_t pi = m_mftLookupTables[di][r.ParentMftIndex];
         if (pi == 0xFFFFFFFF || pi >= (uint32_t)m_records.size() || m_records[pi].MftSequence != r.ParentSequence) break;
         if (pi == cur) break; cur = pi;
     }
-    std::string pa; for (int i = depth - 1; i >= 0; --i) { if (!pa.empty()) pa += "\\"; pa += parts[i]; }
+    
+    std::string pa;
+    for (auto it = parts.rbegin(); it != parts.rend(); ++it) {
+        if (!pa.empty()) pa += "\\";
+        pa += *it;
+    }
     int sz = MultiByteToWideChar(CP_UTF8, 0, pa.c_str(), -1, NULL, 0);
     if (sz > 0) { 
         std::wstring pw(sz - 1, L'\0'); 
         MultiByteToWideChar(CP_UTF8, 0, pa.c_str(), -1, &pw[0], sz); 
-        // Ensure we don't double-backslash if pa was not empty
         return m_drives[di].Letter + pw; 
     }
     return m_drives[di].Letter;
@@ -592,7 +654,12 @@ std::wstring IndexingEngine::GetParentPathInternal(uint32_t recordIdx) const {
 }
 
 void IndexingEngine::Search(const std::string& q) {
-    { std::lock_guard<std::mutex> lock(m_searchSyncMutex); m_pendingSearchQuery = q; m_isSearchRequested = true; }
+    { 
+        std::lock_guard<std::mutex> lock(m_searchSyncMutex); 
+        m_pendingSearchQuery = q; 
+        m_isSearchRequested = true; 
+        m_searchGeneration++;
+    }
     m_searchEvent.notify_one();
 }
 
@@ -602,6 +669,7 @@ void IndexingEngine::Sort(QuerySortKey key, bool descending) {
         m_currentSortKey = key;
         m_currentSortDescending = descending;
         m_isSortOnlyRequested = true;
+        m_searchGeneration++;
     }
     m_searchEvent.notify_one();
 }
@@ -733,7 +801,7 @@ void IndexingEngine::SearchThread() {
         if (sortOnly) {
             {
                 std::lock_guard<std::mutex> lock(m_resultBufferMutex);
-                *results = *m_currentResults;
+                if (m_currentResults) *results = *m_currentResults;
             }
             Logger::Log(L"[WhereIsIt] SearchThread: Sort-only requested. Re-sorting existing results.");
         } else {
@@ -742,6 +810,14 @@ void IndexingEngine::SearchThread() {
             Logger::Log(debugBuf);
 
             QueryPlan plan = BuildQueryPlan(query);
+            if (!plan.Success) {
+                m_status = L"Query Error: " + plan.ErrorMessage;
+                std::lock_guard<std::mutex> lock(m_resultBufferMutex);
+                m_currentResults = results; // Empty results
+                m_resultsUpdated = true;
+                continue;
+            }
+
             if (query.find("sort:") != std::string::npos || query.find("desc") != std::string::npos || query.find("asc") != std::string::npos) {
                 sortKey = plan.Config.SortKey;
                 sortDescending = plan.Config.SortDescending;
@@ -836,31 +912,59 @@ void IndexingEngine::HandleUsnJournalRecord(USN_RECORD_V2* r, uint8_t di) {
     uint16_t seq = (uint16_t)(r->FileReferenceNumber >> 48);
     uint32_t pIdx = (uint32_t)(r->ParentFileReferenceNumber & 0xFFFFFFFFFFFFLL);
     uint16_t pSeq = (uint16_t)(r->ParentFileReferenceNumber >> 48);
+
     if (r->Reason & USN_REASON_FILE_DELETE) {
         std::unique_lock<std::shared_mutex> lock(m_dataMutex);
         if (mftIdx < (uint32_t)m_mftLookupTables[di].size()) {
             uint32_t idx = m_mftLookupTables[di][mftIdx];
             if (idx != 0xFFFFFFFF && m_records[idx].MftSequence == seq) { 
-                m_records[idx].MftIndex = 0xFFFFFFFF; m_mftLookupTables[di][mftIdx] = 0xFFFFFFFF; 
+                m_records[idx].MftIndex = 0xFFFFFFFF; 
+                m_mftLookupTables[di][mftIdx] = 0xFFFFFFFF; 
             }
         }
     }
-    if (r->Reason & (USN_REASON_FILE_CREATE | USN_REASON_RENAME_NEW_NAME)) {
+    
+    if (r->Reason & (USN_REASON_FILE_CREATE | USN_REASON_RENAME_NEW_NAME | USN_REASON_DATA_EXTEND | USN_REASON_DATA_TRUNCATION | USN_REASON_CLOSE)) {
         std::wstring name(r->FileName, r->FileNameLength/2);
-        std::wstring path = m_drives[di].Letter + name; WIN32_FILE_ATTRIBUTE_DATA att;
         uint64_t fileSize = 0, lastMod = 0;
-        if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &att)) {
-            fileSize = ((uint64_t)att.nFileSizeHigh << 32) | att.nFileSizeLow;
-            lastMod = ((uint64_t)att.ftLastWriteTime.dwHighDateTime << 32) | att.ftLastWriteTime.dwLowDateTime;
+        
+        {
+            std::shared_lock<std::shared_mutex> lock(m_dataMutex);
+            // Reconstruct path to get attributes. 
+            // Note: Since we are in the middle of updates, the parent might not exist yet or might be stale.
+            // But we can try to find the parent in our records.
+            std::wstring fullPath;
+            if (pIdx < (uint32_t)m_mftLookupTables[di].size()) {
+                uint32_t parentRecIdx = m_mftLookupTables[di][pIdx];
+                if (parentRecIdx != 0xFFFFFFFF) {
+                    fullPath = GetFullPathInternal(parentRecIdx) + L"\\" + name;
+                }
+            }
+            if (fullPath.empty()) fullPath = m_drives[di].Letter + name; // Fallback
+
+            WIN32_FILE_ATTRIBUTE_DATA att;
+            if (GetFileAttributesExW(fullPath.c_str(), GetFileExInfoStandard, &att)) {
+                fileSize = ((uint64_t)att.nFileSizeHigh << 32) | att.nFileSizeLow;
+                lastMod = ((uint64_t)att.ftLastWriteTime.dwHighDateTime << 32) | att.ftLastWriteTime.dwLowDateTime;
+            }
         }
         
         std::unique_lock<std::shared_mutex> lock(m_dataMutex);
         FileRecord rec = { m_pool.AddString(name), pIdx, mftIdx, fileSize, lastMod, (uint16_t)r->FileAttributes, seq, pSeq, di };
-        uint32_t existing = (mftIdx < (uint32_t)m_mftLookupTables[di].size()) ? m_mftLookupTables[di][mftIdx] : 0xFFFFFFFF;
-        if (existing != 0xFFFFFFFF) m_records[existing] = rec;
-        else {
-            uint32_t idx = (uint32_t)m_records.size(); m_records.push_back(rec);
-            if (mftIdx >= (uint32_t)m_mftLookupTables[di].size()) m_mftLookupTables[di].resize(mftIdx + 10000, 0xFFFFFFFF);
+        
+        if (mftIdx >= (uint32_t)m_mftLookupTables[di].size()) {
+            m_mftLookupTables[di].resize(mftIdx + 10000, 0xFFFFFFFF);
+        }
+        
+        uint32_t existing = m_mftLookupTables[di][mftIdx];
+        if (existing != 0xFFFFFFFF) {
+            // Update existing record if sequence matches or is newer
+            if (m_records[existing].MftSequence <= seq) {
+                m_records[existing] = rec;
+            }
+        } else {
+            uint32_t idx = (uint32_t)m_records.size();
+            m_records.push_back(rec);
             m_mftLookupTables[di][mftIdx] = idx;
         }
     }
@@ -944,92 +1048,160 @@ static bool IsRunningAsAdmin() {
     return isAdmin == TRUE;
 }
 
-void IndexingEngine::ScanGenericDrive(uint8_t di, const std::wstring& path, uint32_t pIdx, uint16_t pSeq, std::unordered_set<uint64_t>& visitedDirs) {
-    if (!IsPathIncluded(path)) return;
-
+void IndexingEngine::PerformFullDriveScan() {
     wchar_t debugBuf[256];
-    if (pIdx == 0xFFFFFFFF) {
-        swprintf_s(debugBuf, L"[WhereIsIt] Starting Generic Scan for %s\n", path.c_str());
-        Logger::Log(debugBuf);
-    }
-
-    HANDLE dirHandle = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-    if (dirHandle != INVALID_HANDLE_VALUE) {
-        BY_HANDLE_FILE_INFORMATION info = { 0 };
-        if (GetFileInformationByHandle(dirHandle, &info)) {
-            uint64_t fileId = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
-            if (!visitedDirs.insert(fileId).second) {
-                CloseHandle(dirHandle);
-                return;
-            }
-        }
-        CloseHandle(dirHandle);
-    }
-
-    WIN32_FIND_DATAW fd; std::wstring searchPath = path + L"*";
-    HANDLE h = FindFirstFileExW(searchPath.c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, FIND_FIRST_EX_LARGE_FETCH);
-    if (h == INVALID_HANDLE_VALUE) return;
-    const IndexScopeConfig cfg = GetIndexScopeConfig();
-    do {
-        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
-        std::wstring fullPath = path + fd.cFileName;
-        if (!IsPathIncluded(fullPath)) continue;
-        FileRecord rec = { m_pool.AddString(fd.cFileName), pIdx, 0, ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow, 
-                          ((uint64_t)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime, 
-                          (uint16_t)fd.dwFileAttributes, 0, pSeq, di };
-        uint32_t myIdx = (uint32_t)m_records.size(); m_records.push_back(rec);
-        if (myIdx % 10000 == 0) m_status = L"Scanning " + m_drives[di].Letter + L"... " + std::to_wstring(m_records.size()) + L" items";
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (!cfg.FollowReparsePoints && (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
-            ScanGenericDrive(di, path + fd.cFileName + L"\\", myIdx, 0, visitedDirs);
-        }
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
-}
-
-void IndexingEngine::ScanMftForDrive(uint8_t di) {
-    auto& d = m_drives[di]; NTFS_VOLUME_DATA_BUFFER nt; DWORD cb; 
-    wchar_t debugBuf[256];
-    swprintf_s(debugBuf, L"[WhereIsIt] Scanning MFT for drive %s\n", d.Letter.c_str());
+    swprintf_s(debugBuf, L"[WhereIsIt] Performing parallel full drive scan for %zu drives...\n", m_drives.size());
     Logger::Log(debugBuf);
+    
+    std::vector<DriveScanContext> contexts(m_drives.size());
+    std::vector<std::thread> workers;
+    std::atomic<size_t> totalFound{ 0 };
+    std::atomic<int> activeWorkers{ 0 };
 
-    if (!DeviceIoControl(d.VolumeHandle, FSCTL_GET_NTFS_VOLUME_DATA, NULL, 0, &nt, sizeof(nt), &cb, NULL)) {
-        Logger::Log(L"[WhereIsIt] FSCTL_GET_NTFS_VOLUME_DATA failed.\n");
-        return;
+    for (uint8_t i = 0; i < (uint8_t)m_drives.size(); ++i) {
+        auto& d = m_drives[i];
+        contexts[i].DriveIndex = i;
+        contexts[i].DriveLetter = d.Letter;
+        contexts[i].VolumeHandle = d.VolumeHandle;
+        contexts[i].Type = d.Type;
+        
+        activeWorkers++;
+        workers.emplace_back([this, &ctx = contexts[i], &totalFound, &activeWorkers]() {
+            if (ctx.Type == DriveFileSystem::NTFS) {
+                ScanMftForDrive(ctx);
+            } else {
+                std::unordered_set<uint64_t> visitedDirs;
+                ScanGenericDrive(ctx, ctx.DriveLetter, 0xFFFFFFFF, 0, visitedDirs);
+            }
+            totalFound += ctx.Records.size();
+            activeWorkers--;
+        });
     }
-    USN_JOURNAL_DATA_V0 uj; if (DeviceIoControl(d.VolumeHandle, FSCTL_QUERY_USN_JOURNAL, NULL, 0, &uj, sizeof(uj), &cb, NULL)) d.LastProcessedUsn = uj.NextUsn;
-    uint64_t maxMft = nt.MftValidDataLength.QuadPart / nt.BytesPerFileRecordSegment;
+
+    // Progress reporting thread
+    std::thread progressThread([this, &totalFound, &activeWorkers]() {
+        while (activeWorkers > 0) {
+            m_status = L"Indexing... " + FormatNumberWithCommas(totalFound.load()) + L" items";
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+    });
+
+    for (auto& t : workers) t.join();
+    if (progressThread.joinable()) progressThread.join();
+
     {
         std::unique_lock<std::shared_mutex> lock(m_dataMutex);
-        m_mftLookupTables[di] = std::vector<uint32_t>((size_t)maxMft + 100000, 0xFFFFFFFF);
+        m_records.clear(); m_pool.Clear(); m_mftLookupTables.clear();
+        m_mftLookupTables.resize(m_drives.size());
+
+        for (uint8_t i = 0; i < (uint8_t)m_drives.size(); ++i) {
+            auto& ctx = contexts[i];
+            uint32_t poolOffsetShift = m_pool.AddRawData(ctx.Pool.GetRawData(), ctx.Pool.GetSize());
+            uint32_t recordIndexShift = (uint32_t)m_records.size();
+
+            m_mftLookupTables[i] = std::move(ctx.LookupTable);
+            
+            for (auto& rec : ctx.Records) {
+                rec.NamePoolOffset += poolOffsetShift;
+                if (ctx.Type != DriveFileSystem::NTFS) {
+                    if (rec.ParentMftIndex != 0xFFFFFFFF) rec.ParentMftIndex += recordIndexShift;
+                    uint32_t localIdx = rec.MftIndex; 
+                    rec.MftIndex = recordIndexShift + localIdx;
+                    if (localIdx >= m_mftLookupTables[i].size()) m_mftLookupTables[i].resize(localIdx + 1, 0xFFFFFFFF);
+                    m_mftLookupTables[i][localIdx] = rec.MftIndex;
+                }
+                m_records.push_back(rec);
+            }
+
+            if (ctx.Type == DriveFileSystem::NTFS) {
+                for (auto& val : m_mftLookupTables[i]) {
+                    if (val != 0xFFFFFFFF) val += recordIndexShift;
+                }
+            }
+            m_drives[i].LastProcessedUsn = ctx.LastProcessedUsn;
+        }
     }
+    Logger::Log(L"[WhereIsIt] Parallel drive scan and merge complete.\n");
+}
+
+void IndexingEngine::ScanGenericDrive(DriveScanContext& ctx, const std::wstring& rootPath, uint32_t pIdx, uint16_t pSeq, std::unordered_set<uint64_t>& visitedDirs) {
+    struct StackEntry { std::wstring path; uint32_t pIdx; uint16_t pSeq; };
+    std::vector<StackEntry> stack;
+    stack.push_back({ rootPath, pIdx, pSeq });
+
+    const IndexScopeConfig cfg = GetIndexScopeConfig();
+
+    while (!stack.empty()) {
+        StackEntry current = std::move(stack.back());
+        stack.pop_back();
+
+        if (!IsPathIncluded(current.path)) continue;
+
+        HANDLE dirHandle = CreateFileW(current.path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        if (dirHandle != INVALID_HANDLE_VALUE) {
+            BY_HANDLE_FILE_INFORMATION info = { 0 };
+            if (GetFileInformationByHandle(dirHandle, &info)) {
+                uint64_t fileId = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
+                if (!visitedDirs.insert(fileId).second) {
+                    CloseHandle(dirHandle); continue;
+                }
+            }
+            CloseHandle(dirHandle);
+        }
+
+        WIN32_FIND_DATAW fd;
+        std::wstring searchPattern = current.path + L"*";
+        HANDLE hFind = FindFirstFileExW(searchPattern.c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, FIND_FIRST_EX_LARGE_FETCH);
+        if (hFind == INVALID_HANDLE_VALUE) continue;
+
+        do {
+            if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+            std::wstring fullPath = current.path + fd.cFileName;
+            if (!IsPathIncluded(fullPath)) continue;
+
+            uint32_t myLocalIdx = (uint32_t)ctx.Records.size();
+            FileRecord rec = { ctx.Pool.AddString(fd.cFileName), current.pIdx, myLocalIdx, ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow, 
+                              ((uint64_t)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime, 
+                              (uint16_t)fd.dwFileAttributes, 0, current.pSeq, ctx.DriveIndex };
+            ctx.Records.push_back(rec);
+
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (!cfg.FollowReparsePoints && (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
+                stack.push_back({ fullPath + L"\\", myLocalIdx, 0 });
+            }
+        } while (FindNextFileW(hFind, &fd));
+        FindClose(hFind);
+    }
+}
+
+void IndexingEngine::ScanMftForDrive(DriveScanContext& ctx) {
+    NTFS_VOLUME_DATA_BUFFER nt; DWORD cb; 
+    if (!DeviceIoControl(ctx.VolumeHandle, FSCTL_GET_NTFS_VOLUME_DATA, NULL, 0, &nt, sizeof(nt), &cb, NULL)) return;
+    USN_JOURNAL_DATA_V0 uj; if (DeviceIoControl(ctx.VolumeHandle, FSCTL_QUERY_USN_JOURNAL, NULL, 0, &uj, sizeof(uj), &cb, NULL)) ctx.LastProcessedUsn = uj.NextUsn;
+    uint64_t maxMft = nt.MftValidDataLength.QuadPart / nt.BytesPerFileRecordSegment;
+    ctx.LookupTable.assign((size_t)maxMft + 100000, 0xFFFFFFFF);
     std::vector<uint8_t> r0(nt.BytesPerFileRecordSegment); LARGE_INTEGER offs; offs.QuadPart = nt.MftStartLcn.QuadPart * nt.BytesPerCluster;
-    if (!SetFilePointerEx(d.VolumeHandle, offs, NULL, FILE_BEGIN) || !ReadFile(d.VolumeHandle, r0.data(), nt.BytesPerFileRecordSegment, &cb, NULL)) {
-        Logger::Log(L"[WhereIsIt] Failed to read MFT header record.\n");
-        return;
-    }
+    if (!SetFilePointerEx(ctx.VolumeHandle, offs, NULL, FILE_BEGIN) || !ReadFile(ctx.VolumeHandle, r0.data(), nt.BytesPerFileRecordSegment, &cb, NULL)) return;
     MFT_RECORD_HEADER* h0 = (MFT_RECORD_HEADER*)r0.data(); uint32_t ao0 = h0->AttributeOffset;
     while (ao0 + sizeof(MFT_ATTRIBUTE) < nt.BytesPerFileRecordSegment) {
         MFT_ATTRIBUTE* a = (MFT_ATTRIBUTE*)&r0[ao0];
         if (a->Type == 0x80) {
             struct MFT_NR { MFT_ATTRIBUTE h; uint64_t startVcn, lastVcn; uint16_t runOffset; }* nr = (MFT_NR*)a;
             uint8_t* rl = (uint8_t*)a + nr->runOffset; int64_t curLcn = 0; uint32_t mftCounter = 0;
-            std::vector<uint8_t> eb(1024*1024); // Allocated once, reused across all data runs
+            std::vector<uint8_t> eb(1024*1024);
             while (*rl) {
                 uint8_t hb = *rl++; int ls = hb & 0xF, os = hb >> 4;
                 uint64_t len = 0; for (int j=0; j<ls; j++) len |= (uint64_t)(*rl++) << (j*8);
                 int64_t runOff = 0; for (int j=0; j<os; j++) runOff |= (int64_t)(*rl++) << (j*8);
                 if (os > 0 && (runOff >> (os*8-1))&1) for (int j=os; j<8; j++) runOff |= (int64_t)0xFF << (j*8);
                 curLcn += runOff; LARGE_INTEGER eo; eo.QuadPart = curLcn * nt.BytesPerCluster;
-                SetFilePointerEx(d.VolumeHandle, eo, NULL, FILE_BEGIN); uint64_t bt = len * nt.BytesPerCluster;
+                SetFilePointerEx(ctx.VolumeHandle, eo, NULL, FILE_BEGIN); uint64_t bt = len * nt.BytesPerCluster;
                 DWORD br;
                 for (uint64_t r=0; r<bt; r+=br) {
-                    if (!ReadFile(d.VolumeHandle, eb.data(), (DWORD)min(bt-r, 1024*1024ULL), &br, NULL) || !br) break;
+                    if (!ReadFile(ctx.VolumeHandle, eb.data(), (DWORD)min(bt-r, 1024*1024ULL), &br, NULL) || !br) break;
                     for (uint32_t k=0; k+nt.BytesPerFileRecordSegment <= br; k+=nt.BytesPerFileRecordSegment) {
                         uint32_t tm = mftCounter++; MFT_RECORD_HEADER* rh = (MFT_RECORD_HEADER*)&eb[k];
                         if (rh->Magic != 0x454C4946 || !(rh->Flags & 0x01)) continue;
-                        // Apply NTFS Update Sequence Array fixup to restore the correct bytes at
-                        // each 512-byte sector boundary (corrupted on-disk to detect torn writes).
                         if (rh->UpdateSeqOffset + rh->UpdateSeqSize * (uint32_t)sizeof(uint16_t) <= nt.BytesPerFileRecordSegment) {
                             uint16_t* usa = (uint16_t*)((uint8_t*)rh + rh->UpdateSeqOffset);
                             for (uint16_t s = 1; s < rh->UpdateSeqSize; s++) {
@@ -1040,20 +1212,14 @@ void IndexingEngine::ScanMftForDrive(uint8_t di) {
                         uint32_t ao = rh->AttributeOffset;
                         while (ao + sizeof(MFT_ATTRIBUTE) < nt.BytesPerFileRecordSegment) {
                             MFT_ATTRIBUTE* aa = (MFT_ATTRIBUTE*)&eb[k+ao];
-                            if (aa->Type == 0xFFFFFFFF) break; // End-of-attribute-list marker
+                            if (aa->Type == 0xFFFFFFFF) break; 
                             if (aa->Type == 0x30 && !aa->NonResident) {
                                 MFT_FILE_NAME* fn = (MFT_FILE_NAME*)&eb[k+ao+((MFT_RESIDENT_ATTRIBUTE*)aa)->ValueOffset];
                                 if (fn->NameNamespace != 2) {
-                                    std::unique_lock<std::shared_mutex> lock(m_dataMutex);
-                                    FileRecord entry = { m_pool.AddString(fn->Name, fn->NameLength), (uint32_t)(fn->ParentDirectory & 0xFFFFFFFFFFFFLL), tm, fn->DataSize, fn->LastWriteTime, (uint16_t)fn->FileAttributes, rh->SequenceNumber, (uint16_t)(fn->ParentDirectory >> 48), di };
+                                    FileRecord entry = { ctx.Pool.AddString(fn->Name, fn->NameLength), (uint32_t)(fn->ParentDirectory & 0xFFFFFFFFFFFFLL), tm, fn->DataSize, fn->LastWriteTime, (uint16_t)fn->FileAttributes, rh->SequenceNumber, (uint16_t)(fn->ParentDirectory >> 48), ctx.DriveIndex };
                                     if (rh->Flags & 0x02) entry.FileAttributes |= 0x10;
-                                    uint32_t ri = (uint32_t)m_records.size(); m_records.push_back(entry);
-                                    if (tm < (uint32_t)m_mftLookupTables[di].size()) m_mftLookupTables[di][tm] = ri;
-                                    if (ri % 10000 == 0) {
-                                        m_status = L"Indexing " + d.Letter + L"... " + std::to_wstring(m_records.size()) + L" items";
-                                        swprintf_s(debugBuf, L"[WhereIsIt] Indexing... %zu items\n", m_records.size());
-                                        Logger::Log(debugBuf);
-                                    }
+                                    uint32_t ri = (uint32_t)ctx.Records.size(); ctx.Records.push_back(entry);
+                                    if (tm < (uint32_t)ctx.LookupTable.size()) ctx.LookupTable[tm] = ri;
                                 }
                             }
                             if (!aa->Length) break; ao += aa->Length;
@@ -1065,41 +1231,6 @@ void IndexingEngine::ScanMftForDrive(uint8_t di) {
         }
         if (!a->Length) break; ao0 += a->Length;
     }
-    swprintf_s(debugBuf, L"[WhereIsIt] MFT Scan complete for %s. Current total: %zu\n", d.Letter.c_str(), m_records.size());
-    Logger::Log(debugBuf);
-}
-
-void IndexingEngine::PerformFullDriveScan() {
-    wchar_t debugBuf[256];
-    swprintf_s(debugBuf, L"[WhereIsIt] Performing parallel full drive scan for %zu drives...\n", m_drives.size());
-    Logger::Log(debugBuf);
-    
-    {
-        std::unique_lock<std::shared_mutex> lock(m_dataMutex);
-        m_records.clear(); m_pool.Clear(); m_mftLookupTables.clear();
-        m_mftLookupTables.resize(m_drives.size());
-    }
-
-    // High Speed: Each thread builds its own local record list to avoid locking
-    struct ThreadResult { std::vector<FileRecord> Records; std::vector<uint32_t> Lookup; };
-    std::vector<std::unique_ptr<ThreadResult>> results(m_drives.size());
-    std::vector<std::thread> workers;
-
-    for (uint8_t i = 0; i < (uint8_t)m_drives.size(); ++i) {
-        results[i] = std::make_unique<ThreadResult>();
-        workers.emplace_back([this, i, res = results[i].get()]() {
-            // Temporarily redirect engine's storage to thread-local storage for this drive
-            // This requires a minor refactor of ScanMft/ScanGeneric to accept a result destination.
-            // For now, I will use a high-concurrency merge approach.
-            if (m_drives[i].Type == DriveFileSystem::NTFS) ScanMftForDrive(i);
-            else {
-                std::unordered_set<uint64_t> visitedDirs;
-                ScanGenericDrive(i, m_drives[i].Letter, 0xFFFFFFFF, 0, visitedDirs);
-            }
-        });
-    }
-    for (auto& t : workers) t.join();
-    Logger::Log(L"[WhereIsIt] Parallel drive scan complete.\n");
 }
 
 void IndexingEngine::WorkerThread() {
@@ -1116,10 +1247,8 @@ void IndexingEngine::WorkerThread() {
         m_ready = true; return; 
     }
     
-    wchar_t debugBuf[256];
     if (LoadIndex(ResolveIndexSavePath())) {
         Logger::Log(L"[WhereIsIt] Index loaded. Performing USN Journal Catch-up...");
-        // Re-detect drive types and catch up from journal
         for (uint8_t i = 0; i < (uint8_t)m_drives.size(); ++i) {
             auto& d = m_drives[i];
             wchar_t fs[32] = { 0 };
@@ -1129,14 +1258,12 @@ void IndexingEngine::WorkerThread() {
             if (d.Type == DriveFileSystem::NTFS) {
                 std::wstring vp = L"\\\\.\\" + d.Letter.substr(0, 2);
                 d.VolumeHandle = CreateFileW(vp.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-                
-                // --- CATCH UP LOGIC ---
                 USN_JOURNAL_DATA_V0 uj; DWORD cb;
                 if (d.VolumeHandle != INVALID_HANDLE_VALUE && DeviceIoControl(d.VolumeHandle, FSCTL_QUERY_USN_JOURNAL, NULL, 0, &uj, sizeof(uj), &cb, NULL)) {
                     if ((uint64_t)uj.NextUsn > d.LastProcessedUsn) {
-                        swprintf_s(debugBuf, L"[WhereIsIt] Drive %s has %llu new journal bytes. Catching up...", d.Letter.c_str(), (uint64_t)uj.NextUsn - d.LastProcessedUsn);
-                        Logger::Log(debugBuf);
-                        // The MonitorChanges loop will naturally pick this up if we just set the handle and USN.
+                        wchar_t logBuf[256];
+                        swprintf_s(logBuf, L"[WhereIsIt] Drive %s has %llu new journal bytes. Catching up...", d.Letter.c_str(), (uint64_t)uj.NextUsn - d.LastProcessedUsn);
+                        Logger::Log(logBuf);
                     }
                 }
             }
@@ -1147,6 +1274,7 @@ void IndexingEngine::WorkerThread() {
         SaveIndex(ResolveIndexSavePath());
     }
     
+    wchar_t debugBuf[256];
     swprintf_s(debugBuf, L"[WhereIsIt] Worker thread ready. Total records: %s. Triggering initial search.\n", FormatNumberWithCommas(m_records.size()).c_str());
     Logger::Log(debugBuf);
 

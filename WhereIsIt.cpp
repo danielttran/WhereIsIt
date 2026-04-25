@@ -198,8 +198,13 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
             uint32_t recordIdx = (*g_ActiveResults)[pcd->nmcd.dwItemSpec];
             FileRecord rec = g_Engine.GetRecord(recordIdx);
             const char* nameA = g_Engine.GetFileNamePool().GetString(rec.NamePoolOffset);
-            wchar_t nameW[MAX_PATH];
-            MultiByteToWideChar(CP_UTF8, 0, nameA, -1, nameW, MAX_PATH);
+            
+            std::wstring nameStr;
+            int sz = MultiByteToWideChar(CP_UTF8, 0, nameA, -1, NULL, 0);
+            if (sz > 1) {
+                nameStr.resize(sz - 1);
+                MultiByteToWideChar(CP_UTF8, 0, nameA, -1, &nameStr[0], sz);
+            }
 
             RECT rect;
             ListView_GetSubItemRect(hFileList, (int)pcd->nmcd.dwItemSpec, 0, LVIR_BOUNDS, &rect);
@@ -209,11 +214,10 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
             SetTextColor(pcd->nmcd.hdc, GetSysColor(isSelected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT));
 
             HIMAGELIST hSIL = ListView_GetImageList(hFileList, LVSIL_SMALL);
-            int iconIdx = GetIconIndex(nameW, rec.FileAttributes);
+            int iconIdx = GetIconIndex(nameStr, rec.FileAttributes);
             ImageList_Draw(hSIL, iconIdx, pcd->nmcd.hdc, rect.left + 2, rect.top + (rect.bottom - rect.top - 16)/2, ILD_TRANSPARENT);
             rect.left += 20; 
 
-            std::wstring nameStr = nameW;
             std::wstring searchStr = g_CurrentQueryW;
             size_t matchPos = std::wstring::npos;
             if (!searchStr.empty()) {
@@ -242,7 +246,7 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
                 DrawTextW(pcd->nmcd.hdc, p3.c_str(), -1, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             } else {
                 SelectObject(pcd->nmcd.hdc, g_FontNormal);
-                DrawTextW(pcd->nmcd.hdc, nameW, -1, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                DrawTextW(pcd->nmcd.hdc, nameStr.c_str(), -1, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             }
             return CDRF_SKIPDEFAULT;
         }
@@ -416,7 +420,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         MoveWindow(hFileList, 0, sh + 2 * m, w, h - (sh + 2 * m) - (rs.bottom - rs.top), TRUE);
         break;
     }
-    case WM_DESTROY: if (g_FontBold) DeleteObject(g_FontBold); PostQuitMessage(0); break;
+    case WM_DESTROY: 
+        KillTimer(hWnd, 1);
+        KillTimer(hWnd, IDT_SEARCH_DEBOUNCE);
+        if (g_FontBold) DeleteObject(g_FontBold); 
+        PostQuitMessage(0); 
+        break;
     default: return DefWindowProc(hWnd, msg, wParam, lParam);
     }
     return 0;
