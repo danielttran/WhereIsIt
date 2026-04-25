@@ -9,6 +9,7 @@
 #include <shlobj.h>
 #include <regex>
 #include <cctype>
+#include <cwctype>
 #include <functional>
 
 // --- CORE UTILITIES: High Speed Case-Insensitive Matching ---
@@ -420,6 +421,59 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
     return true;
 }
 
+void IndexingEngine::SetIndexScopeConfig(const IndexScopeConfig& config) {
+    std::lock_guard<std::mutex> lock(m_scopeConfigMutex);
+    m_scopeConfig = config;
+}
+
+IndexingEngine::IndexScopeConfig IndexingEngine::GetIndexScopeConfig() const {
+    std::lock_guard<std::mutex> lock(m_scopeConfigMutex);
+    return m_scopeConfig;
+}
+
+bool IndexingEngine::WildcardMatchI(const wchar_t* pattern, const wchar_t* text) {
+    if (!pattern || !text) return false;
+    while (*pattern) {
+        if (*pattern == L'*') {
+            ++pattern;
+            if (!*pattern) return true;
+            while (*text) {
+                if (WildcardMatchI(pattern, text)) return true;
+                ++text;
+            }
+            return false;
+        }
+        if (*pattern == L'?' || std::towlower(*pattern) == std::towlower(*text)) {
+            if (!*text) return false;
+            ++pattern; ++text;
+            continue;
+        }
+        return false;
+    }
+    return *text == L'\0';
+}
+
+bool IndexingEngine::IsRootEnabled(const std::wstring& root) const {
+    std::lock_guard<std::mutex> lock(m_scopeConfigMutex);
+    if (m_scopeConfig.IncludeRoots.empty()) return true;
+    for (const auto& allowed : m_scopeConfig.IncludeRoots) {
+        if (_wcsnicmp(root.c_str(), allowed.c_str(), allowed.size()) == 0) return true;
+    }
+    return false;
+}
+
+bool IndexingEngine::IsPathIncluded(const std::wstring& path) const {
+    std::lock_guard<std::mutex> lock(m_scopeConfigMutex);
+    for (const auto& pattern : m_scopeConfig.ExcludePathPatterns) {
+        if (!pattern.empty() && WildcardMatchI(pattern.c_str(), path.c_str())) return false;
+    }
+    m_drives = std::move(tempDrives);
+    m_records = std::move(tempRecords);
+    m_pool.LoadRawData(pd.data(), h.PoolSize);
+    m_mftLookupTables = std::move(tempLookup);
+    return true;
+}
+
 std::wstring IndexingEngine::GetFullPath(uint32_t recordIdx) const {
     if (recordIdx >= (uint32_t)m_records.size()) return L"";
     const char* parts[64]; int depth = 0; uint32_t cur = recordIdx; uint8_t di = m_records[recordIdx].DriveIndex;
@@ -534,6 +588,11 @@ void IndexingEngine::SearchThread() {
         auto results = std::make_shared<std::vector<uint32_t>>();
         QueryPlan plan = BuildQueryPlan(query);
         std::unordered_map<uint32_t, std::string> pathCache;
+        auto hasDifferentPendingQuery = [this, &query]() {
+            if (!m_isSearchRequested) return false;
+            std::lock_guard<std::mutex> lock(m_searchSyncMutex);
+            return m_isSearchRequested && m_pendingSearchQuery != query;
+        };
         auto pathFor = [this, &pathCache](uint32_t idx) {
             auto it = pathCache.find(idx);
             if (it != pathCache.end()) return it->second;
@@ -543,7 +602,7 @@ void IndexingEngine::SearchThread() {
         };
 
         for (uint32_t i = 0; i < (uint32_t)m_records.size(); ++i) {
-            if (m_isSearchRequested) break;
+            if (hasDifferentPendingQuery()) break;
             const auto& rec = m_records[i];
             if (rec.MftIndex == 0xFFFFFFFF) continue;
             std::string name = m_pool.GetString(rec.NamePoolOffset);
@@ -551,7 +610,7 @@ void IndexingEngine::SearchThread() {
             if (query.empty() || evaluateTerm(plan.Root.get(), plan, rec, name, path)) results->push_back(i);
         }
 
-        if (m_isSearchRequested) continue;
+        if (hasDifferentPendingQuery()) continue;
 
         std::sort(results->begin(), results->end(), [this, &plan, &pathFor](uint32_t a, uint32_t b) {
             const auto& ra = m_records[a];
@@ -639,10 +698,14 @@ void IndexingEngine::MonitorChanges() {
 
 bool IndexingEngine::DiscoverAllDrives() {
     m_status = L"Discovering drives...";
+    const IndexScopeConfig cfg = GetIndexScopeConfig();
     wchar_t drvs[512]; GetLogicalDriveStringsW(512, drvs);
     for (wchar_t* p = drvs; *p; p += wcslen(p) + 1) {
         UINT driveType = GetDriveTypeW(p);
-        if (driveType != DRIVE_FIXED && driveType != DRIVE_REMOVABLE && driveType != DRIVE_CDROM) continue;
+        bool allowedType = (driveType == DRIVE_FIXED || driveType == DRIVE_REMOVABLE || driveType == DRIVE_CDROM);
+        if (!allowedType && cfg.IndexNetworkDrives && driveType == DRIVE_REMOTE) allowedType = true;
+        if (!allowedType) continue;
+        if (!IsRootEnabled(p)) continue;
         wchar_t fs[32] = { 0 };
         DriveFileSystem type = DriveFileSystem::Generic;
         if (GetVolumeInformationW(p, NULL, 0, NULL, NULL, NULL, fs, 32)) {
@@ -663,18 +726,39 @@ bool IndexingEngine::DiscoverAllDrives() {
     return !m_drives.empty();
 }
 
-void IndexingEngine::ScanGenericDrive(uint8_t di, const std::wstring& path, uint32_t pIdx, uint16_t pSeq) {
+void IndexingEngine::ScanGenericDrive(uint8_t di, const std::wstring& path, uint32_t pIdx, uint16_t pSeq, std::unordered_set<uint64_t>& visitedDirs) {
+    if (!IsPathIncluded(path)) return;
+
+    HANDLE dirHandle = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (dirHandle != INVALID_HANDLE_VALUE) {
+        BY_HANDLE_FILE_INFORMATION info = { 0 };
+        if (GetFileInformationByHandle(dirHandle, &info)) {
+            uint64_t fileId = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
+            if (!visitedDirs.insert(fileId).second) {
+                CloseHandle(dirHandle);
+                return;
+            }
+        }
+        CloseHandle(dirHandle);
+    }
+
     WIN32_FIND_DATAW fd; std::wstring searchPath = path + L"*";
     HANDLE h = FindFirstFileExW(searchPath.c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, FIND_FIRST_EX_LARGE_FETCH);
     if (h == INVALID_HANDLE_VALUE) return;
+    const IndexScopeConfig cfg = GetIndexScopeConfig();
     do {
         if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        std::wstring fullPath = path + fd.cFileName;
+        if (!IsPathIncluded(fullPath)) continue;
         FileRecord rec = { m_pool.AddString(fd.cFileName), pIdx, 0, ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow, 
                           ((uint64_t)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime, 
                           (uint16_t)fd.dwFileAttributes, 0, pSeq, di };
         uint32_t myIdx = (uint32_t)m_records.size(); m_records.push_back(rec);
         if (myIdx % 10000 == 0) m_status = L"Scanning " + m_drives[di].Letter + L"... " + std::to_wstring(m_records.size()) + L" items";
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ScanGenericDrive(di, path + fd.cFileName + L"\\", myIdx, 0);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (!cfg.FollowReparsePoints && (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
+            ScanGenericDrive(di, path + fd.cFileName + L"\\", myIdx, 0, visitedDirs);
+        }
     } while (FindNextFileW(h, &fd));
     FindClose(h);
 }
@@ -744,7 +828,10 @@ void IndexingEngine::PerformFullDriveScan() {
     m_records.clear(); m_pool.Clear(); m_mftLookupTables.clear();
     for (uint8_t i = 0; i < (uint8_t)m_drives.size(); ++i) {
         if (m_drives[i].Type == DriveFileSystem::NTFS) ScanMftForDrive(i);
-        else ScanGenericDrive(i, m_drives[i].Letter, 0xFFFFFFFF, 0);
+        else {
+            std::unordered_set<uint64_t> visitedDirs;
+            ScanGenericDrive(i, m_drives[i].Letter, 0xFFFFFFFF, 0, visitedDirs);
+        }
     }
 }
 

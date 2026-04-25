@@ -8,6 +8,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <memory>
+#include <unordered_set>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -67,6 +68,13 @@ private:
 
 class IndexingEngine {
 public:
+    struct IndexScopeConfig {
+        bool IndexNetworkDrives = false;
+        bool FollowReparsePoints = false;
+        std::vector<std::wstring> IncludeRoots;
+        std::vector<std::wstring> ExcludePathPatterns;
+    };
+
     IndexingEngine();
     ~IndexingEngine();
 
@@ -87,6 +95,8 @@ public:
 
     bool SaveIndex(const std::wstring& filePath);
     bool LoadIndex(const std::wstring& filePath);
+    void SetIndexScopeConfig(const IndexScopeConfig& config);
+    IndexScopeConfig GetIndexScopeConfig() const;
 
 private:
     void WorkerThread();
@@ -96,12 +106,15 @@ private:
     bool DiscoverAllDrives();
     void PerformFullDriveScan();
     void ScanMftForDrive(uint8_t driveIndex);
-    void ScanGenericDrive(uint8_t driveIndex, const std::wstring& path, uint32_t parentIdx, uint16_t parentSeq);
+    void ScanGenericDrive(uint8_t driveIndex, const std::wstring& path, uint32_t parentIdx, uint16_t parentSeq, std::unordered_set<uint64_t>& visitedDirs);
 
     void HandleUsnJournalRecord(USN_RECORD_V2* record, uint8_t driveIndex);
     
     uint32_t FetchVolumeSerialNumber(const std::wstring& driveLetter);
     std::wstring ResolveIndexSavePath();
+    bool IsPathIncluded(const std::wstring& path) const;
+    bool IsRootEnabled(const std::wstring& root) const;
+    static bool WildcardMatchI(const wchar_t* pattern, const wchar_t* text);
 
     std::thread m_mainWorker;
     std::thread m_searchWorker;
@@ -122,6 +135,8 @@ private:
     std::vector<FileRecord> m_records;
     std::vector<std::vector<uint32_t>> m_mftLookupTables;
     StringPool m_pool;
+    IndexScopeConfig m_scopeConfig;
+    mutable std::mutex m_scopeConfigMutex;
 
     std::string m_pendingSearchQuery;
     std::mutex m_searchSyncMutex;
