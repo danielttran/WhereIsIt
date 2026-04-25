@@ -3,6 +3,8 @@
 #include "Engine.h"
 #include <commctrl.h>
 #include <shellapi.h>
+#include <shlobj.h>
+#include <objbase.h>
 #include <map>
 #include <memory>
 #include <string>
@@ -10,6 +12,7 @@
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "ole32.lib")
 #pragma comment(linker,"\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 #define MAX_LOADSTRING 100
@@ -70,6 +73,84 @@ void FormatFileTime(wchar_t* buffer, size_t bufferLen, uint64_t filetime) {
     swprintf_s(buffer, bufferLen, L"%02d/%02d/%04d %02d:%02d %s", 
         localTime.wMonth, localTime.wDay, localTime.wYear, 
         displayHour, localTime.wMinute, (localTime.wHour >= 12 ? L"PM" : L"AM"));
+}
+
+// --- FILE INTERACTION ---
+
+// Globals kept alive only while a shell context menu's TrackPopupMenu loop is running.
+IContextMenu2* g_pCtxMenu2 = nullptr;
+IContextMenu3* g_pCtxMenu3 = nullptr;
+
+static int GetFirstSelectedIndex() {
+    return ListView_GetNextItem(hFileList, -1, LVNI_SELECTED);
+}
+
+static void OpenFile(HWND hwnd, int listIdx) {
+    if (!g_ActiveResults || listIdx < 0 || listIdx >= (int)g_ActiveResults->size()) return;
+    std::wstring path = g_Engine.GetFullPath((*g_ActiveResults)[listIdx]);
+    if (!path.empty()) ShellExecuteW(hwnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+static void OpenContainingFolder(HWND hwnd, int listIdx) {
+    if (!g_ActiveResults || listIdx < 0 || listIdx >= (int)g_ActiveResults->size()) return;
+    std::wstring path = g_Engine.GetFullPath((*g_ActiveResults)[listIdx]);
+    if (path.empty()) return;
+    LPITEMIDLIST pidl = nullptr;
+    if (SUCCEEDED(SHParseDisplayName(path.c_str(), nullptr, &pidl, 0, nullptr))) {
+        SHOpenFolderAndSelectItems(pidl, 0, nullptr, 0);
+        ILFree(pidl);
+    }
+}
+
+static void ShowShellContextMenu(HWND hwnd, int listIdx, POINT screenPt) {
+    if (!g_ActiveResults || listIdx < 0 || listIdx >= (int)g_ActiveResults->size()) return;
+    std::wstring path = g_Engine.GetFullPath((*g_ActiveResults)[listIdx]);
+    if (path.empty()) return;
+
+    LPITEMIDLIST pidlFull = nullptr;
+    if (FAILED(SHParseDisplayName(path.c_str(), nullptr, &pidlFull, 0, nullptr))) return;
+
+    // Split pidlFull into parent folder + single-item child pidl.
+    LPITEMIDLIST pidlChild = ILClone(ILFindLastID(pidlFull));
+    ILRemoveLastID(pidlFull);
+
+    IShellFolder* pDesktop = nullptr;
+    SHGetDesktopFolder(&pDesktop);
+
+    IShellFolder* pParent = nullptr;
+    if (pidlFull->mkid.cb == 0) { pParent = pDesktop; pParent->AddRef(); }
+    else pDesktop->BindToObject(pidlFull, nullptr, IID_PPV_ARGS(&pParent));
+
+    if (pParent) {
+        LPCITEMIDLIST apidl = pidlChild;
+        IContextMenu* pcm = nullptr;
+        if (SUCCEEDED(pParent->GetUIObjectOf(hwnd, 1, &apidl, IID_IContextMenu, nullptr, (void**)&pcm))) {
+            // Prefer IContextMenu3 > IContextMenu2 for owner-draw menu items (icons, etc.).
+            pcm->QueryInterface(IID_PPV_ARGS(&g_pCtxMenu3));
+            if (!g_pCtxMenu3) pcm->QueryInterface(IID_PPV_ARGS(&g_pCtxMenu2));
+
+            HMENU hMenu = CreatePopupMenu();
+            if (SUCCEEDED(pcm->QueryContextMenu(hMenu, 0, 1, 0x7FFF, CMF_NORMAL | CMF_EXPLORE))) {
+                int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                        screenPt.x, screenPt.y, 0, hwnd, nullptr);
+                if (cmd > 0) {
+                    CMINVOKECOMMANDINFO ici = { sizeof(ici), 0, hwnd,
+                        MAKEINTRESOURCEA(cmd - 1), nullptr, nullptr, SW_SHOWNORMAL };
+                    pcm->InvokeCommand(&ici);
+                }
+            }
+            DestroyMenu(hMenu);
+
+            if (g_pCtxMenu3) { g_pCtxMenu3->Release(); g_pCtxMenu3 = nullptr; }
+            if (g_pCtxMenu2) { g_pCtxMenu2->Release(); g_pCtxMenu2 = nullptr; }
+            pcm->Release();
+        }
+        pParent->Release();
+    }
+
+    pDesktop->Release();
+    ILFree(pidlChild);
+    ILFree(pidlFull);
 }
 
 // --- CUSTOM DRAW ENGINE (Bolding Match) ---
@@ -200,9 +281,47 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (header->idFrom == IDC_FILE_LIST) {
             if (header->code == LVN_GETDISPINFO) OnDisplayInfo((NMLVDISPINFO*)lParam);
             else if (header->code == NM_CUSTOMDRAW) return OnCustomDraw((NMLVCUSTOMDRAW*)lParam);
+            else if (header->code == NM_DBLCLK) {
+                NMITEMACTIVATE* pnm = (NMITEMACTIVATE*)lParam;
+                if (pnm->iItem >= 0) OpenFile(hWnd, pnm->iItem);
+            }
+            else if (header->code == NM_RCLICK) {
+                NMITEMACTIVATE* pnm = (NMITEMACTIVATE*)lParam;
+                int idx = pnm->iItem >= 0 ? pnm->iItem : GetFirstSelectedIndex();
+                if (idx >= 0) {
+                    ListView_SetItemState(hFileList, idx, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+                    POINT pt; GetCursorPos(&pt);
+                    ShowShellContextMenu(hWnd, idx, pt);
+                }
+            }
+            else if (header->code == LVN_KEYDOWN) {
+                NMLVKEYDOWN* pnkd = (NMLVKEYDOWN*)lParam;
+                if (pnkd->wVKey == VK_RETURN) {
+                    int idx = GetFirstSelectedIndex();
+                    if (idx >= 0) {
+                        if (GetKeyState(VK_CONTROL) & 0x8000) OpenContainingFolder(hWnd, idx);
+                        else OpenFile(hWnd, idx);
+                    }
+                }
+            }
         }
         break;
     }
+    case WM_INITMENUPOPUP:
+        if (g_pCtxMenu3) { g_pCtxMenu3->HandleMenuMsg(WM_INITMENUPOPUP, wParam, lParam); return 0; }
+        if (g_pCtxMenu2) { g_pCtxMenu2->HandleMenuMsg(WM_INITMENUPOPUP, wParam, lParam); return 0; }
+        break;
+    case WM_MENUCHAR:
+        if (g_pCtxMenu3) { LRESULT r = 0; g_pCtxMenu3->HandleMenuMsg2(WM_MENUCHAR, wParam, lParam, &r); return r; }
+        break;
+    case WM_DRAWITEM:
+        if (g_pCtxMenu3) { g_pCtxMenu3->HandleMenuMsg(WM_DRAWITEM, wParam, lParam); return TRUE; }
+        if (g_pCtxMenu2) { g_pCtxMenu2->HandleMenuMsg(WM_DRAWITEM, wParam, lParam); return TRUE; }
+        break;
+    case WM_MEASUREITEM:
+        if (g_pCtxMenu3) { g_pCtxMenu3->HandleMenuMsg(WM_MEASUREITEM, wParam, lParam); return TRUE; }
+        if (g_pCtxMenu2) { g_pCtxMenu2->HandleMenuMsg(WM_MEASUREITEM, wParam, lParam); return TRUE; }
+        break;
     case WM_SIZE: {
         int w = LOWORD(lParam), h = HIWORD(lParam), sh = 24, m = 5;
         SendMessage(hStatusBar, WM_SIZE, 0, 0); RECT rs; GetWindowRect(hStatusBar, &rs);
@@ -218,6 +337,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nCmdShow) {
     UNREFERENCED_PARAMETER(hPrevInstance); UNREFERENCED_PARAMETER(lpCmdLine);
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
     LoadStringW(hInstance, IDC_WHEREISIT, szWindowClass, MAX_LOADSTRING);
     WNDCLASSEXW wcex = { sizeof(WNDCLASSEX) };
@@ -235,5 +355,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0)) { TranslateMessage(&msg); DispatchMessage(&msg); }
     g_Engine.Stop();
+    CoUninitialize();
     return (int)msg.wParam;
 }
