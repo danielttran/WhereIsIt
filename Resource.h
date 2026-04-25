@@ -9,6 +9,16 @@
 #define IDD_ABOUTBOX			103
 #define IDM_ABOUT				104
 #define IDM_EXIT				105
+#define IDM_EDIT_UNDO           110
+#define IDM_EDIT_CUT            111
+#define IDM_EDIT_COPY           112
+#define IDM_EDIT_PASTE          113
+#define IDM_VIEW_STATUSBAR      114
+#define IDM_SEARCH_MATCHCASE    115
+#define IDM_BOOKMARKS_ADD       116
+#define IDM_TOOLS_OPTIONS       117
+#define IDC_SEARCH_EDIT         120
+#define IDC_FILE_LIST           121
 #define IDI_WHEREISIT			107
 #define IDI_SMALL				108
 #define IDC_WHEREISIT			109
