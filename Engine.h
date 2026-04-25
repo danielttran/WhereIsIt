@@ -106,6 +106,7 @@ public:
 
     const std::vector<FileRecord>& GetRecords() const { return m_records; }
     FileRecord GetRecord(uint32_t recordIndex) const;
+    std::wstring GetRecordName(uint32_t recordIndex) const;
     const StringPool& GetFileNamePool() const { return m_pool; }
     std::wstring GetCurrentStatus() const { return m_status; }
     bool IsBusy() const { return !m_ready; }

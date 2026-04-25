@@ -197,14 +197,7 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
 
             uint32_t recordIdx = (*g_ActiveResults)[pcd->nmcd.dwItemSpec];
             FileRecord rec = g_Engine.GetRecord(recordIdx);
-            const char* nameA = g_Engine.GetFileNamePool().GetString(rec.NamePoolOffset);
-            
-            std::wstring nameStr;
-            int sz = MultiByteToWideChar(CP_UTF8, 0, nameA, -1, NULL, 0);
-            if (sz > 1) {
-                nameStr.resize(sz - 1);
-                MultiByteToWideChar(CP_UTF8, 0, nameA, -1, &nameStr[0], sz);
-            }
+            std::wstring nameStr = g_Engine.GetRecordName(recordIdx);
 
             RECT rect;
             ListView_GetSubItemRect(hFileList, (int)pcd->nmcd.dwItemSpec, 0, LVIR_BOUNDS, &rect);
@@ -220,17 +213,45 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
 
             std::wstring searchStr = g_CurrentQueryW;
             size_t matchPos = std::wstring::npos;
+            std::wstring matchedTerm;
+
             if (!searchStr.empty()) {
-                auto it = std::search(nameStr.begin(), nameStr.end(), searchStr.begin(), searchStr.end(),
-                    [](wchar_t c1, wchar_t c2) { return towlower(c1) == towlower(c2); });
-                if (it != nameStr.end()) matchPos = std::distance(nameStr.begin(), it);
+                std::vector<std::wstring> tokens;
+                size_t start = 0;
+                while (start < searchStr.length()) {
+                    while (start < searchStr.length() && (searchStr[start] == L' ' || searchStr[start] == L'\t')) start++;
+                    if (start >= searchStr.length()) break;
+                    size_t end = start;
+                    while (end < searchStr.length() && searchStr[end] != L' ' && searchStr[end] != L'\t') end++;
+                    tokens.push_back(searchStr.substr(start, end - start));
+                    start = end;
+                }
+                if (tokens.empty()) tokens.push_back(searchStr);
+
+                for (auto& token : tokens) {
+                    size_t slash = token.find_last_of(L"\\/");
+                    if (slash != std::wstring::npos) token = token.substr(slash + 1);
+                    token.erase(std::remove(token.begin(), token.end(), L'*'), token.end());
+                    token.erase(std::remove(token.begin(), token.end(), L'?'), token.end());
+                    token.erase(std::remove(token.begin(), token.end(), L'"'), token.end());
+
+                    if (!token.empty()) {
+                        auto it = std::search(nameStr.begin(), nameStr.end(), token.begin(), token.end(),
+                            [](wchar_t c1, wchar_t c2) { return towlower(c1) == towlower(c2); });
+                        if (it != nameStr.end()) {
+                            matchPos = std::distance(nameStr.begin(), it);
+                            matchedTerm = token;
+                            break;
+                        }
+                    }
+                }
             }
 
             SetBkMode(pcd->nmcd.hdc, TRANSPARENT);
-            if (matchPos != std::wstring::npos) {
+            if (matchPos != std::wstring::npos && !matchedTerm.empty()) {
                 std::wstring p1 = nameStr.substr(0, matchPos);
-                std::wstring p2 = nameStr.substr(matchPos, searchStr.length());
-                std::wstring p3 = nameStr.substr(matchPos + searchStr.length());
+                std::wstring p2 = nameStr.substr(matchPos, matchedTerm.length());
+                std::wstring p3 = nameStr.substr(matchPos + matchedTerm.length());
 
                 SelectObject(pcd->nmcd.hdc, g_FontNormal);
                 DrawTextW(pcd->nmcd.hdc, p1.c_str(), -1, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
@@ -344,7 +365,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)status.c_str());
             } else SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)g_Engine.GetCurrentStatus().c_str());
             
-            if (g_Engine.HasNewResults() || (!g_Engine.IsBusy() && (!g_ActiveResults || g_ActiveResults->empty()))) {
+            if (g_Engine.HasNewResults() || (!g_Engine.IsBusy() && !g_ActiveResults)) {
                 g_ActiveResults = g_Engine.GetSearchResults();
                 wchar_t debugBuf[256];
                 swprintf_s(debugBuf, L"[WhereIsIt] UI Update: New results received. Count: %zu\n", g_ActiveResults ? g_ActiveResults->size() : 0);
