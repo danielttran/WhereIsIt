@@ -25,6 +25,9 @@ HWND hSearchEdit, hFileList, hStatusBar;
 IndexingEngine g_Engine;
 std::shared_ptr<std::vector<uint32_t>> g_ActiveResults;
 
+int g_SortColumn = 0;
+bool g_SortDescending = false;
+
 // Search term storage for highlighting
 wchar_t g_CurrentQueryW[256] = { 0 };
 HFONT g_FontNormal = NULL;
@@ -92,6 +95,7 @@ static void OpenFile(HWND hwnd, int listIdx) {
 }
 
 static void OpenContainingFolder(HWND hwnd, int listIdx) {
+    UNREFERENCED_PARAMETER(hwnd);
     if (!g_ActiveResults || listIdx < 0 || listIdx >= (int)g_ActiveResults->size()) return;
     std::wstring path = g_Engine.GetFullPath((*g_ActiveResults)[listIdx]);
     if (path.empty()) return;
@@ -105,51 +109,79 @@ static void OpenContainingFolder(HWND hwnd, int listIdx) {
 static void ShowShellContextMenu(HWND hwnd, int listIdx, POINT screenPt) {
     if (!g_ActiveResults || listIdx < 0 || listIdx >= (int)g_ActiveResults->size()) return;
     std::wstring path = g_Engine.GetFullPath((*g_ActiveResults)[listIdx]);
+    
+    wchar_t debugBuf[512];
+    swprintf_s(debugBuf, L"[WhereIsIt] ShowContextMenu for path: %s\n", path.c_str());
+    Logger::Log(debugBuf);
+
     if (path.empty()) return;
 
-    LPITEMIDLIST pidlFull = nullptr;
-    if (FAILED(SHParseDisplayName(path.c_str(), nullptr, &pidlFull, 0, nullptr))) return;
-
-    // Split pidlFull into parent folder + single-item child pidl.
-    LPITEMIDLIST pidlChild = ILClone(ILFindLastID(pidlFull));
-    ILRemoveLastID(pidlFull);
-
-    IShellFolder* pDesktop = nullptr;
-    SHGetDesktopFolder(&pDesktop);
-
-    IShellFolder* pParent = nullptr;
-    if (pidlFull->mkid.cb == 0) { pParent = pDesktop; pParent->AddRef(); }
-    else pDesktop->BindToObject(pidlFull, nullptr, IID_PPV_ARGS(&pParent));
-
-    if (pParent) {
-        LPCITEMIDLIST apidl = pidlChild;
-        IContextMenu* pcm = nullptr;
-        if (SUCCEEDED(pParent->GetUIObjectOf(hwnd, 1, &apidl, IID_IContextMenu, nullptr, (void**)&pcm))) {
-            // Prefer IContextMenu3 > IContextMenu2 for owner-draw menu items (icons, etc.).
-            pcm->QueryInterface(IID_PPV_ARGS(&g_pCtxMenu3));
-            if (!g_pCtxMenu3) pcm->QueryInterface(IID_PPV_ARGS(&g_pCtxMenu2));
-
-            HMENU hMenu = CreatePopupMenu();
-            if (SUCCEEDED(pcm->QueryContextMenu(hMenu, 0, 1, 0x7FFF, CMF_NORMAL | CMF_EXPLORE))) {
-                int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
-                                        screenPt.x, screenPt.y, 0, hwnd, nullptr);
-                if (cmd > 0) {
-                    CMINVOKECOMMANDINFO ici = { sizeof(ici), 0, hwnd,
-                        MAKEINTRESOURCEA(cmd - 1), nullptr, nullptr, SW_SHOWNORMAL };
-                    pcm->InvokeCommand(&ici);
-                }
-            }
-            DestroyMenu(hMenu);
-
-            if (g_pCtxMenu3) { g_pCtxMenu3->Release(); g_pCtxMenu3 = nullptr; }
-            if (g_pCtxMenu2) { g_pCtxMenu2->Release(); g_pCtxMenu2 = nullptr; }
-            pcm->Release();
-        }
-        pParent->Release();
+    PIDLIST_ABSOLUTE pidlFull = nullptr;
+    HRESULT hr = SHParseDisplayName(path.c_str(), nullptr, &pidlFull, 0, nullptr);
+    if (FAILED(hr)) {
+        swprintf_s(debugBuf, L"[WhereIsIt] SHParseDisplayName failed (0x%08X) for path: %s\n", hr, path.c_str());
+        Logger::Log(debugBuf);
+        return;
     }
 
-    pDesktop->Release();
-    ILFree(pidlChild);
+    // Split pidlFull into parent folder + single-item child pidl.
+    PUIDLIST_RELATIVE pidlChild = (PUIDLIST_RELATIVE)ILFindLastID(pidlFull);
+    PIDLIST_ABSOLUTE pidlParent = ILClone(pidlFull);
+    ILRemoveLastID(pidlParent);
+
+    IShellFolder* pDesktop = nullptr;
+    if (SUCCEEDED(SHGetDesktopFolder(&pDesktop))) {
+        IShellFolder* pParentFolder = nullptr;
+        // If pidlParent is empty, it means the item is on the desktop or is a drive root
+        if (ILIsEmpty(pidlParent)) {
+            pParentFolder = pDesktop;
+            pParentFolder->AddRef();
+        } else {
+            hr = pDesktop->BindToObject(pidlParent, nullptr, IID_PPV_ARGS(&pParentFolder));
+        }
+
+        if (SUCCEEDED(hr) && pParentFolder) {
+            PCUITEMID_CHILD pidlChildConst = pidlChild;
+            IContextMenu* pcm = nullptr;
+            hr = pParentFolder->GetUIObjectOf(hwnd, 1, &pidlChildConst, IID_IContextMenu, nullptr, (void**)&pcm);
+            if (SUCCEEDED(hr)) {
+                pcm->QueryInterface(IID_PPV_ARGS(&g_pCtxMenu3));
+                if (!g_pCtxMenu3) pcm->QueryInterface(IID_PPV_ARGS(&g_pCtxMenu2));
+
+                HMENU hMenu = CreatePopupMenu();
+                if (SUCCEEDED(pcm->QueryContextMenu(hMenu, 0, 1, 0x7FFF, CMF_NORMAL | CMF_EXPLORE))) {
+                    Logger::Log(L"[WhereIsIt] Context menu created, tracking popup...");
+                    int cmd = TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                                            screenPt.x, screenPt.y, 0, hwnd, nullptr);
+                    if (cmd > 0) {
+                        CMINVOKECOMMANDINFO ici = { sizeof(ici) };
+                        ici.fMask = 0; ici.hwnd = hwnd; ici.lpVerb = MAKEINTRESOURCEA(cmd - 1);
+                        ici.nShow = SW_SHOWNORMAL;
+                        hr = pcm->InvokeCommand(&ici);
+                        if (FAILED(hr)) {
+                            swprintf_s(debugBuf, L"[WhereIsIt] InvokeCommand failed (0x%08X)\n", hr);
+                            Logger::Log(debugBuf);
+                        }
+                    } else {
+                        Logger::Log(L"[WhereIsIt] Popup menu closed or failed.");
+                    }
+                }
+                DestroyMenu(hMenu);
+                if (g_pCtxMenu3) { g_pCtxMenu3->Release(); g_pCtxMenu3 = nullptr; }
+                if (g_pCtxMenu2) { g_pCtxMenu2->Release(); g_pCtxMenu2 = nullptr; }
+                pcm->Release();
+            } else {
+                swprintf_s(debugBuf, L"[WhereIsIt] GetUIObjectOf failed (0x%08X)\n", hr);
+                Logger::Log(debugBuf);
+            }
+            pParentFolder->Release();
+        } else {
+            swprintf_s(debugBuf, L"[WhereIsIt] BindToObject failed (0x%08X)\n", hr);
+            Logger::Log(debugBuf);
+        }
+        pDesktop->Release();
+    }
+    ILFree(pidlParent);
     ILFree(pidlFull);
 }
 
@@ -164,7 +196,7 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
             if (!g_ActiveResults || pcd->nmcd.dwItemSpec >= g_ActiveResults->size()) return CDRF_DODEFAULT;
 
             uint32_t recordIdx = (*g_ActiveResults)[pcd->nmcd.dwItemSpec];
-            const auto& rec = g_Engine.GetRecords()[recordIdx];
+            FileRecord rec = g_Engine.GetRecord(recordIdx);
             const char* nameA = g_Engine.GetFileNamePool().GetString(rec.NamePoolOffset);
             wchar_t nameW[MAX_PATH];
             MultiByteToWideChar(CP_UTF8, 0, nameA, -1, nameW, MAX_PATH);
@@ -224,13 +256,25 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
 void OnDisplayInfo(NMLVDISPINFO* pdi) {
     if (!g_ActiveResults || pdi->item.iItem >= (int)g_ActiveResults->size()) return;
     uint32_t rIdx = (*g_ActiveResults)[pdi->item.iItem]; 
-    const auto& rec = g_Engine.GetRecords()[rIdx];
+    FileRecord rec = g_Engine.GetRecord(rIdx);
     if (pdi->item.mask & LVIF_TEXT) {
         switch (pdi->item.iSubItem) {
             case 1: wcsncpy_s(pdi->item.pszText, pdi->item.cchTextMax, g_Engine.GetParentPath(rIdx).c_str(), _TRUNCATE); break;
             case 2: FormatFileSize(pdi->item.pszText, pdi->item.cchTextMax, rec.FileSize, rec.FileAttributes); break;
             case 3: FormatFileTime(pdi->item.pszText, pdi->item.cchTextMax, rec.LastModified); break;
         }
+    }
+}
+
+static void SetSortIcon(int columnIndex, bool descending) {
+    HWND hHeader = ListView_GetHeader(hFileList);
+    int count = Header_GetItemCount(hHeader);
+    for (int i = 0; i < count; i++) {
+        HDITEM hdi = { HDI_FORMAT };
+        Header_GetItem(hHeader, i, &hdi);
+        hdi.fmt &= ~(HDF_SORTUP | HDF_SORTDOWN);
+        if (i == columnIndex) hdi.fmt |= (descending ? HDF_SORTDOWN : HDF_SORTUP);
+        Header_SetItem(hHeader, i, &hdi);
     }
 }
 
@@ -248,11 +292,35 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         lvc.iSubItem = 1; lvc.pszText = (LPWSTR)L"Path"; lvc.cx = 350; ListView_InsertColumn(hFileList, 1, &lvc);
         lvc.iSubItem = 2; lvc.pszText = (LPWSTR)L"Size"; lvc.cx = 100; ListView_InsertColumn(hFileList, 2, &lvc);
         lvc.iSubItem = 3; lvc.pszText = (LPWSTR)L"Date Modified"; lvc.cx = 150; ListView_InsertColumn(hFileList, 3, &lvc);
+        SetSortIcon(0, false); // Default sort
         g_FontNormal = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
         LOGFONT lf; GetObject(g_FontNormal, sizeof(lf), &lf);
         lf.lfWeight = FW_BOLD; g_FontBold = CreateFontIndirect(&lf);
         SendMessage(hSearchEdit, WM_SETFONT, (WPARAM)g_FontNormal, TRUE);
         SetTimer(hWnd, 1, 100, NULL);
+        break;
+    }
+    case WM_CONTEXTMENU: {
+        if ((HWND)wParam == hFileList) {
+            POINT pt = { LOWORD(lParam), HIWORD(lParam) };
+            int idx = -1;
+            if (pt.x == -1 && pt.y == -1) { // Apps key
+                idx = GetFirstSelectedIndex();
+                if (idx >= 0) {
+                    RECT rc; ListView_GetItemRect(hFileList, idx, &rc, LVIR_BOUNDS);
+                    pt.x = rc.left; pt.y = rc.top; ClientToScreen(hFileList, &pt);
+                }
+            } else {
+                POINT cpt = pt; ScreenToClient(hFileList, &cpt);
+                LVHITTESTINFO ht = { cpt };
+                idx = ListView_HitTest(hFileList, &ht);
+            }
+            if (idx >= 0) {
+                ListView_SetItemState(hFileList, idx, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+                ShowShellContextMenu(hWnd, idx, pt);
+            }
+            return 0;
+        }
         break;
     }
     case WM_TIMER:
@@ -261,8 +329,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 wchar_t status[64]; swprintf_s(status, L"%zu objects", g_ActiveResults ? g_ActiveResults->size() : 0);
                 SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)status);
             } else SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)g_Engine.GetCurrentStatus().c_str());
+            
             if (g_Engine.HasNewResults() || (!g_Engine.IsBusy() && (!g_ActiveResults || g_ActiveResults->empty()))) {
                 g_ActiveResults = g_Engine.GetSearchResults();
+                wchar_t debugBuf[256];
+                swprintf_s(debugBuf, L"[WhereIsIt] UI Update: New results received. Count: %zu\n", g_ActiveResults ? g_ActiveResults->size() : 0);
+                Logger::Log(debugBuf);
                 ListView_SetItemCount(hFileList, (int)g_ActiveResults->size());
                 InvalidateRect(hFileList, NULL, FALSE);
             }
@@ -285,14 +357,19 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 NMITEMACTIVATE* pnm = (NMITEMACTIVATE*)lParam;
                 if (pnm->iItem >= 0) OpenFile(hWnd, pnm->iItem);
             }
-            else if (header->code == NM_RCLICK) {
-                NMITEMACTIVATE* pnm = (NMITEMACTIVATE*)lParam;
-                int idx = pnm->iItem >= 0 ? pnm->iItem : GetFirstSelectedIndex();
-                if (idx >= 0) {
-                    ListView_SetItemState(hFileList, idx, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-                    POINT pt; GetCursorPos(&pt);
-                    ShowShellContextMenu(hWnd, idx, pt);
-                }
+            else if (header->code == LVN_COLUMNCLICK) {
+                NMLISTVIEW* pnmv = (NMLISTVIEW*)lParam;
+                if (pnmv->iSubItem == g_SortColumn) g_SortDescending = !g_SortDescending;
+                else { g_SortColumn = pnmv->iSubItem; g_SortDescending = false; }
+                
+                SetSortIcon(g_SortColumn, g_SortDescending);
+                
+                QuerySortKey key = QuerySortKey::Name;
+                if (g_SortColumn == 1) key = QuerySortKey::Path;
+                else if (g_SortColumn == 2) key = QuerySortKey::Size;
+                else if (g_SortColumn == 3) key = QuerySortKey::Date;
+                
+                g_Engine.Sort(key, g_SortDescending);
             }
             else if (header->code == LVN_KEYDOWN) {
                 NMLVKEYDOWN* pnkd = (NMLVKEYDOWN*)lParam;
@@ -337,7 +414,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nCmdShow) {
     UNREFERENCED_PARAMETER(hPrevInstance); UNREFERENCED_PARAMETER(lpCmdLine);
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE))) return FALSE;
     LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
     LoadStringW(hInstance, IDC_WHEREISIT, szWindowClass, MAX_LOADSTRING);
     WNDCLASSEXW wcex = { sizeof(WNDCLASSEX) };

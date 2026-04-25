@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <string>
+#include <shared_mutex>
 #include <thread>
 #include <atomic>
 #include <stdint.h>
@@ -9,16 +10,29 @@
 #include <condition_variable>
 #include <memory>
 #include <unordered_set>
+#include <chrono>
+#include <iomanip>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winioctl.h>
+
+class Logger {
+public:
+    static void Log(const std::wstring& message);
+    static void SetEnabled(bool enabled) { m_enabled = enabled; }
+    static bool IsEnabled() { return m_enabled; }
+private:
+    static bool m_enabled;
+};
 
 enum class DriveFileSystem {
     Unknown,
     NTFS,
     Generic
 };
+
+enum class QuerySortKey { Name, Path, Size, Date };
 
 #pragma pack(push, 1)
 struct FileRecord {
@@ -82,16 +96,22 @@ public:
     void Stop();
     
     void Search(const std::string& query);
+    void Sort(QuerySortKey key, bool descending);
     std::shared_ptr<std::vector<uint32_t>> GetSearchResults();
     bool HasNewResults() { return m_resultsUpdated.exchange(false); }
 
     const std::vector<FileRecord>& GetRecords() const { return m_records; }
+    FileRecord GetRecord(uint32_t recordIndex) const;
     const StringPool& GetFileNamePool() const { return m_pool; }
     std::wstring GetCurrentStatus() const { return m_status; }
     bool IsBusy() const { return !m_ready; }
 
     std::wstring GetFullPath(uint32_t recordIndex) const;
     std::wstring GetParentPath(uint32_t recordIndex) const;
+
+private:
+    std::wstring GetFullPathInternal(uint32_t recordIndex) const;
+    std::wstring GetParentPathInternal(uint32_t recordIndex) const;
 
     bool SaveIndex(const std::wstring& filePath);
     bool LoadIndex(const std::wstring& filePath);
@@ -138,7 +158,10 @@ private:
     IndexScopeConfig m_scopeConfig;
     mutable std::mutex m_scopeConfigMutex;
 
+    mutable std::shared_mutex m_dataMutex;
     std::string m_pendingSearchQuery;
+    QuerySortKey m_currentSortKey = QuerySortKey::Name;
+    bool m_currentSortDescending = false;
     std::mutex m_searchSyncMutex;
     std::mutex m_resultBufferMutex;
     std::condition_variable m_searchEvent;
