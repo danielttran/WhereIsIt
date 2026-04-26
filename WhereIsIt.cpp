@@ -237,18 +237,10 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
             size_t listIdx = pcd->nmcd.dwItemSpec;
             if (!g_ActiveResults || listIdx >= g_ActiveResults->size()) return CDRF_DODEFAULT;
 
-            // Use pre-cached record+name (single lock in GetRecordAndName, called at results-update time).
-            // Fall back to live query only if cache is out of sync (shouldn't happen in practice).
             uint32_t recordIdx = (*g_ActiveResults)[listIdx];
-            std::wstring nameStr;
-            uint16_t attribs = 0;
-            if (listIdx < g_CachedNames.size()) {
-                nameStr  = g_CachedNames[listIdx];
-                attribs  = g_CachedAttribs[listIdx];
-            } else {
-                auto [r, n] = g_Engine.GetRecordAndName(recordIdx);
-                attribs = r.FileAttributes; nameStr = std::move(n);
-            }
+            // GetRecordAndName: single shared_lock acquisition for both record and name.
+            // Only called for ~30 visible rows, not all results.
+            auto [rec, nameStr] = g_Engine.GetRecordAndName(recordIdx);
 
             RECT rect;
             ListView_GetSubItemRect(hFileList, (int)listIdx, 0, LVIR_BOUNDS, &rect);
@@ -258,7 +250,7 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
             SetTextColor(pcd->nmcd.hdc, GetSysColor(isSelected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT));
 
             HIMAGELIST hSIL = ListView_GetImageList(hFileList, LVSIL_SMALL);
-            int iconIdx = GetIconIndex(nameStr, attribs);
+            int iconIdx = GetIconIndex(nameStr, rec.FileAttributes);
             ImageList_Draw(hSIL, iconIdx, pcd->nmcd.hdc, rect.left + 2, rect.top + (rect.bottom - rect.top - 16)/2, ILD_TRANSPARENT);
             rect.left += 20; 
 
@@ -266,18 +258,12 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
             std::wstring matchedTerm;
 
             if (!g_HighlightTokens.empty()) {
-                // Use pre-lowercased name cache to avoid per-paint towlower loop.
-                const std::wstring& nameLower = (listIdx < g_CachedNamesLower.size())
-                    ? g_CachedNamesLower[listIdx]
-                    : nameStr;  // fallback: search is approximate
-
+                // Lower-case name for highlight matching. Only for visible rows, so towlower loop is cheap.
+                std::wstring nameLower = nameStr;
+                for (auto& c : nameLower) c = towlower(c);
                 for (const auto& token : g_HighlightTokens) {
                     size_t pos = nameLower.find(token);
-                    if (pos != std::wstring::npos) {
-                        matchPos = pos;
-                        matchedTerm = token;
-                        break;
-                    }
+                    if (pos != std::wstring::npos) { matchPos = pos; matchedTerm = token; break; }
                 }
             }
 
@@ -315,36 +301,12 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
 void OnDisplayInfo(NMLVDISPINFO* pdi) {
     if (!g_ActiveResults || pdi->item.iItem >= (int)g_ActiveResults->size()) return;
     if (pdi->item.mask & LVIF_TEXT) {
-        size_t idx = (size_t)pdi->item.iItem;
+        // On-demand lookup — only called for ~30 visible rows at a time, never for the whole result set.
+        uint32_t rIdx = (*g_ActiveResults)[pdi->item.iItem];
         switch (pdi->item.iSubItem) {
-            case 1:
-                // Use pre-cached path (zero mutex) — populated at WM_USER_SEARCH_FINISHED.
-                if (idx < g_CachedPaths.size()) {
-                    wcsncpy_s(pdi->item.pszText, pdi->item.cchTextMax, g_CachedPaths[idx].c_str(), _TRUNCATE);
-                } else {
-                    // Fallback for race between cache rebuild and paint.
-                    uint32_t rIdx = (*g_ActiveResults)[idx];
-                    wcsncpy_s(pdi->item.pszText, pdi->item.cchTextMax, g_Engine.GetParentPath(rIdx).c_str(), _TRUNCATE);
-                }
-                break;
-            case 2:
-                if (idx < g_CachedSizes.size()) {
-                    FormatFileSize(pdi->item.pszText, pdi->item.cchTextMax, g_CachedSizes[idx], g_CachedAttribs[idx]);
-                } else {
-                    uint32_t rIdx = (*g_ActiveResults)[idx];
-                    FileRecord rec = g_Engine.GetRecord(rIdx);
-                    FormatFileSize(pdi->item.pszText, pdi->item.cchTextMax, rec.FileSize, rec.FileAttributes);
-                }
-                break;
-            case 3:
-                if (idx < g_CachedDates.size()) {
-                    FormatFileTime(pdi->item.pszText, pdi->item.cchTextMax, g_CachedDates[idx]);
-                } else {
-                    uint32_t rIdx = (*g_ActiveResults)[idx];
-                    FileRecord rec = g_Engine.GetRecord(rIdx);
-                    FormatFileTime(pdi->item.pszText, pdi->item.cchTextMax, rec.LastModified);
-                }
-                break;
+            case 1: wcsncpy_s(pdi->item.pszText, pdi->item.cchTextMax, g_Engine.GetParentPath(rIdx).c_str(), _TRUNCATE); break;
+            case 2: { FileRecord r = g_Engine.GetRecord(rIdx); FormatFileSize(pdi->item.pszText, pdi->item.cchTextMax, r.FileSize, r.FileAttributes); break; }
+            case 3: { FileRecord r = g_Engine.GetRecord(rIdx); FormatFileTime(pdi->item.pszText, pdi->item.cchTextMax, r.LastModified); break; }
         }
     }
 }
@@ -426,43 +388,23 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         break;
     case WM_USER_SEARCH_FINISHED:
+        // CRITICAL: This handler must be O(1) — it runs on the UI thread and blocks keystroke processing.
+        // Do NOT iterate over results here. Only swap the pointer and tell the list view the new count.
         g_ActiveResults = g_Engine.GetSearchResults();
+        // Clear display caches — they are no longer pre-built upfront (too expensive for large result sets).
+        // OnDisplayInfo/OnCustomDraw use on-demand per-visible-row lookups.
+        g_CachedPaths.clear(); g_CachedNames.clear(); g_CachedNamesLower.clear();
+        g_CachedAttribs.clear(); g_CachedSizes.clear(); g_CachedDates.clear();
         if (g_ActiveResults) {
             size_t count = g_ActiveResults->size();
-            // Rebuild display caches in a single pass — each item calls GetRecordAndName once.
-            // This is done on the UI thread but OUTSIDE any paint, so it's safe to take brief locks.
-            g_CachedPaths.resize(count);
-            g_CachedNames.resize(count);
-            g_CachedNamesLower.resize(count);
-            g_CachedAttribs.resize(count);
-            g_CachedSizes.resize(count);
-            g_CachedDates.resize(count);
-            for (size_t i = 0; i < count; ++i) {
-                uint32_t rIdx = (*g_ActiveResults)[i];
-                auto [rec, name] = g_Engine.GetRecordAndName(rIdx);
-                g_CachedPaths[i]      = g_Engine.GetParentPath(rIdx);
-                g_CachedNames[i]      = name;
-                g_CachedNamesLower[i] = name;
-                for (auto& c : g_CachedNamesLower[i]) c = towlower(c);
-                g_CachedAttribs[i]    = rec.FileAttributes;
-                g_CachedSizes[i]      = rec.FileSize;
-                g_CachedDates[i]      = rec.LastModified;
-            }
-
-            wchar_t debugBuf[256];
-            swprintf_s(debugBuf, L"[WhereIsIt] UI Update: New results received. Count: %zu\n", count);
-            Logger::Log(debugBuf);
             ListView_SetItemCount(hFileList, (int)count);
             InvalidateRect(hFileList, NULL, FALSE);
-            UpdateWindow(hFileList);
-
             if (g_CurrentQueryW[0] != 0) {
                 std::wstring status = FormatNumberWithCommas(count) + L" objects";
                 SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)status.c_str());
             } else {
                 SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)g_Engine.GetCurrentStatus().c_str());
             }
-            UpdateWindow(hStatusBar);
         }
         break;
     case WM_COMMAND:
