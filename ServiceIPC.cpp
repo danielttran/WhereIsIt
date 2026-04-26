@@ -420,6 +420,11 @@ void NamedPipeEngine::ApplySort(
     std::vector<uint32_t>& v, QuerySortKey key, bool descending)
 {
     if (v.size() < 2) return;
+    
+    // The background IndexingEngine already returns results sorted by Name ascending
+    // by default. Skip re-sorting to prevent a massive O(N log N) UI freeze when
+    // resetting empty queries that return up to 1,000,000 records.
+    if (key == QuerySortKey::Name && !descending) return;
 
     std::stable_sort(v.begin(), v.end(),
         [this, key, descending](uint32_t a, uint32_t b) -> bool {
