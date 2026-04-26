@@ -1,14 +1,17 @@
 #include "framework.h"
 #include "ServiceIPC.h"
 #include <chrono>
+#include <algorithm>
 #include <vector>
 #include <string>
 
-// Max response buffer: 1 M result indices (4 bytes each) + 4-byte count header.
-static constexpr DWORD kMaxResultBytes   = 4u * 1024u * 1024u + sizeof(uint32_t);
-static constexpr DWORD kPipeCallTimeout  = 5000;   // ms, used by CallNamedPipeW
-static constexpr int   kSearchTimeoutMs  = 5000;   // ms, server waits for engine results
-static constexpr int   kSearchPollMs     = 10;     // ms between polls
+// Max response payload: 1 M result indices × 4 bytes + 4-byte count header.
+// Both the server write buffer and the client receive buffer are sized to this.
+static constexpr DWORD kMaxResultBytes  = 4u * 1024u * 1024u + sizeof(uint32_t);
+static constexpr DWORD kMaxResultCount  = (kMaxResultBytes - sizeof(uint32_t)) / sizeof(uint32_t);
+static constexpr DWORD kPipeCallTimeout = 5000;  // ms, passed to CallNamedPipeW
+static constexpr int   kSearchTimeoutMs = 5000;  // ms, server polls for engine results
+static constexpr int   kSearchPollMs    = 10;    // ms between result-ready polls
 
 // ---------------------------------------------------------------------------
 // Availability check
@@ -16,7 +19,20 @@ static constexpr int   kSearchPollMs     = 10;     // ms between polls
 
 bool IsNamedPipeServerAvailable()
 {
-    return WaitNamedPipeW(WHEREISIT_PIPE_NAME, 1) != FALSE;
+    // Attempt an immediate connection. If the server exists but every instance
+    // is momentarily busy, CreateFile returns ERROR_PIPE_BUSY (not
+    // ERROR_FILE_NOT_FOUND), so we still correctly report the server as up.
+    // (WaitNamedPipeW with 1 ms is unreliable under load.)
+    HANDLE h = CreateFileW(
+        WHEREISIT_PIPE_NAME,
+        GENERIC_READ | GENERIC_WRITE,
+        0, nullptr, OPEN_EXISTING, 0, nullptr);
+
+    if (h != INVALID_HANDLE_VALUE) {
+        CloseHandle(h);
+        return true;
+    }
+    return GetLastError() == ERROR_PIPE_BUSY;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,7 +100,7 @@ int ServiceUninstall()
 // ---------------------------------------------------------------------------
 
 // Poll GetSearchResults() until it returns a pointer different from prevResults
-// or the timeout elapses.
+// or the timeout elapses. Returns a non-null (possibly empty) vector.
 static std::shared_ptr<std::vector<uint32_t>> WaitForNewResults(
     IndexingEngine* engine,
     const std::shared_ptr<std::vector<uint32_t>>& prevResults)
@@ -105,7 +121,6 @@ static std::shared_ptr<std::vector<uint32_t>> WaitForNewResults(
 void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
 {
     for (;;) {
-        // Check stop before creating the next pipe instance.
         if (WaitForSingleObject(hStopEvent, 0) == WAIT_OBJECT_0) return;
 
         HANDLE hPipe = CreateNamedPipeW(
@@ -146,6 +161,7 @@ void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
                     clientConnected =
                         GetOverlappedResult(hPipe, &ov, &dummy, FALSE) != FALSE;
                 }
+                // If w == WAIT_FAILED: clientConnected stays false → pipe closed below.
             }
             CloseHandle(ov.hEvent);
         }
@@ -168,13 +184,9 @@ void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
             }
 
             BOOL ok = ReadFile(hPipe, readBuf, sizeof(readBuf), &bytesRead, &rdOv);
-            if (!ok) {
-                DWORD err = GetLastError();
-                if (err == ERROR_IO_PENDING)
-                    ok = GetOverlappedResult(hPipe, &rdOv, &bytesRead, TRUE);
-                else
-                    bytesRead = 0;
-            }
+            if (!ok && GetLastError() == ERROR_IO_PENDING)
+                ok = GetOverlappedResult(hPipe, &rdOv, &bytesRead, TRUE);
+
             CloseHandle(rdOv.hEvent);
 
             if (!ok || bytesRead < sizeof(uint32_t)) {
@@ -200,8 +212,11 @@ void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
         auto results = WaitForNewResults(engine, prevResults);
 
         // ---- Write response: [uint32_t count][uint32_t indices...] ----
-        uint32_t count        = static_cast<uint32_t>(results->size());
-        DWORD    responseSize = sizeof(uint32_t) + count * sizeof(uint32_t);
+        // Cap count so responseSize never exceeds kMaxResultBytes.
+        uint32_t count = static_cast<uint32_t>(
+            (std::min)(results->size(), static_cast<size_t>(kMaxResultCount)));
+
+        DWORD responseSize = sizeof(uint32_t) + count * sizeof(uint32_t);
         std::vector<uint8_t> writeBuf(responseSize);
         memcpy(writeBuf.data(), &count, sizeof(count));
         if (count > 0)
@@ -304,7 +319,6 @@ static void WINAPI ServiceMain(DWORD argc, LPWSTR* argv)
 
 int RunAsService()
 {
-    // SERVICE_TABLE_ENTRYW requires a non-const LPWSTR for the service name.
     wchar_t svcName[] = WHEREISIT_SERVICE_NAME;
     SERVICE_TABLE_ENTRYW dispatchTable[] = {
         { svcName, ServiceMain },
@@ -325,6 +339,7 @@ NamedPipeEngine::~NamedPipeEngine() { Stop(); }
 void NamedPipeEngine::Start()
 {
     if (m_running.exchange(true)) return;
+    m_rxBuf.resize(kMaxResultBytes);   // allocate once; reused every search
     m_local.Start();
     m_searchThread = std::thread(&NamedPipeEngine::SearchWorker, this);
 }
@@ -332,12 +347,22 @@ void NamedPipeEngine::Start()
 void NamedPipeEngine::Stop()
 {
     if (!m_running.exchange(false)) return;
+
     {
         std::lock_guard<std::mutex> lk(m_searchMutex);
-        m_searchPending = true;  // wake worker so it can observe !m_running
+        m_searchPending = true;
+        m_sortPending   = true;
     }
     m_searchCv.notify_all();
-    if (m_searchThread.joinable()) m_searchThread.join();
+
+    if (m_searchThread.joinable()) {
+        // CancelSynchronousIo interrupts any blocking CallNamedPipeW in the
+        // worker so the join returns promptly instead of waiting up to
+        // kPipeCallTimeout (5 s).
+        CancelSynchronousIo(m_searchThread.native_handle());
+        m_searchThread.join();
+    }
+
     m_local.Stop();
 }
 
@@ -351,63 +376,158 @@ void NamedPipeEngine::Search(const std::string& query)
     m_searchCv.notify_one();
 }
 
+void NamedPipeEngine::Sort(QuerySortKey key, bool descending)
+{
+    {
+        std::lock_guard<std::mutex> lk(m_searchMutex);
+        m_sortKey        = key;
+        m_sortDescending = descending;
+        m_sortPending    = true;
+        m_searchPending  = false;  // sort-only — do not re-issue search query
+    }
+    m_searchCv.notify_one();
+}
+
+// Sort v in-place by key/descending using m_local record accessors.
+// Uses _wcsicmp for case-insensitive comparison, mirroring IndexingEngine.
+// Falls back to Name comparison when Size or Date values are equal.
+void NamedPipeEngine::ApplySort(
+    std::vector<uint32_t>& v, QuerySortKey key, bool descending)
+{
+    if (v.size() < 2) return;
+
+    std::stable_sort(v.begin(), v.end(),
+        [this, key, descending](uint32_t a, uint32_t b) -> bool {
+            int cmp = 0;
+            switch (key) {
+            case QuerySortKey::Name: {
+                auto na = m_local.GetRecordName(a);
+                auto nb = m_local.GetRecordName(b);
+                cmp = _wcsicmp(na.c_str(), nb.c_str());
+                break;
+            }
+            case QuerySortKey::Path: {
+                auto pa = m_local.GetParentPath(a);
+                auto pb = m_local.GetParentPath(b);
+                cmp = _wcsicmp(pa.c_str(), pb.c_str());
+                if (cmp == 0) {
+                    auto na = m_local.GetRecordName(a);
+                    auto nb = m_local.GetRecordName(b);
+                    cmp = _wcsicmp(na.c_str(), nb.c_str());
+                }
+                break;
+            }
+            case QuerySortKey::Size: {
+                uint64_t sa = m_local.GetRecordFileSize(a);
+                uint64_t sb = m_local.GetRecordFileSize(b);
+                if (sa != sb) { cmp = (sa < sb) ? -1 : 1; break; }
+                auto na = m_local.GetRecordName(a);
+                auto nb = m_local.GetRecordName(b);
+                cmp = _wcsicmp(na.c_str(), nb.c_str());
+                break;
+            }
+            case QuerySortKey::Date: {
+                uint64_t da = m_local.GetRecordLastModifiedFileTime(a);
+                uint64_t db = m_local.GetRecordLastModifiedFileTime(b);
+                if (da != db) { cmp = (da < db) ? -1 : 1; break; }
+                auto na = m_local.GetRecordName(a);
+                auto nb = m_local.GetRecordName(b);
+                cmp = _wcsicmp(na.c_str(), nb.c_str());
+                break;
+            }
+            }
+            // cmp == 0 → equal → return false (strict weak ordering)
+            return descending ? (cmp > 0) : (cmp < 0);
+        });
+}
+
 void NamedPipeEngine::SearchWorker()
 {
     while (m_running) {
-        std::string query;
+        // Snapshot all pending work under the lock.
+        std::string  query;
+        bool         doSearch      = false;
+        bool         doSort        = false;
+        QuerySortKey sortKey       = QuerySortKey::Name;
+        bool         sortDescending = false;
         {
             std::unique_lock<std::mutex> lk(m_searchMutex);
             m_searchCv.wait(lk, [this] {
-                return m_searchPending || !m_running;
+                return m_searchPending || m_sortPending || !m_running;
             });
             if (!m_running) break;
-            query           = std::move(m_pendingQuery);
-            m_pendingQuery.clear();
-            m_searchPending = false;
-        }
 
-        // Build write buffer: [uint32_t queryLen][char query[queryLen]]
-        uint32_t queryLen = static_cast<uint32_t>(query.size());
-        std::vector<char> writeBuf(sizeof(uint32_t) + queryLen);
-        memcpy(writeBuf.data(), &queryLen, sizeof(queryLen));
-        if (queryLen)
-            memcpy(writeBuf.data() + sizeof(uint32_t), query.data(), queryLen);
+            doSearch        = m_searchPending;
+            doSort          = m_sortPending;
+            sortKey         = m_sortKey;
+            sortDescending  = m_sortDescending;
 
-        // Receive buffer: [uint32_t count][uint32_t indices...]
-        std::vector<char> rxBuf(kMaxResultBytes);
-        DWORD bytesRead = 0;
-
-        BOOL ok = CallNamedPipeW(
-            WHEREISIT_PIPE_NAME,
-            writeBuf.data(), static_cast<DWORD>(writeBuf.size()),
-            rxBuf.data(),    kMaxResultBytes,
-            &bytesRead,      kPipeCallTimeout);
-
-        auto results = std::make_shared<std::vector<uint32_t>>();
-        if (ok && bytesRead >= sizeof(uint32_t)) {
-            uint32_t count = 0;
-            memcpy(&count, rxBuf.data(), sizeof(count));
-            DWORD expectedBytes = sizeof(uint32_t) + count * sizeof(uint32_t);
-            if (count > 0 && bytesRead >= expectedBytes) {
-                results->resize(count);
-                memcpy(results->data(),
-                       rxBuf.data() + sizeof(uint32_t),
-                       count * sizeof(uint32_t));
+            if (doSearch) {
+                query           = std::move(m_pendingQuery);
+                m_pendingQuery.clear();
+                m_searchPending = false;
             }
+            m_sortPending = false;
         }
 
-        {
-            std::lock_guard<std::mutex> lk(m_resultsMutex);
-            m_results = std::move(results);
+        if (doSearch) {
+            // Build write buffer: [uint32_t queryLen][char query[queryLen]]
+            uint32_t queryLen = static_cast<uint32_t>(query.size());
+            std::vector<char> writeBuf(sizeof(uint32_t) + queryLen);
+            memcpy(writeBuf.data(), &queryLen, sizeof(queryLen));
+            if (queryLen)
+                memcpy(writeBuf.data() + sizeof(uint32_t), query.data(), queryLen);
+
+            DWORD bytesRead = 0;
+            BOOL  ok = CallNamedPipeW(
+                WHEREISIT_PIPE_NAME,
+                writeBuf.data(), static_cast<DWORD>(writeBuf.size()),
+                m_rxBuf.data(),  kMaxResultBytes,
+                &bytesRead,      kPipeCallTimeout);
+
+            auto results = std::make_shared<std::vector<uint32_t>>();
+            if (ok && bytesRead >= sizeof(uint32_t)) {
+                uint32_t count = 0;
+                memcpy(&count, m_rxBuf.data(), sizeof(count));
+                DWORD expectedBytes = sizeof(uint32_t) + count * sizeof(uint32_t);
+                if (count > 0 && bytesRead >= expectedBytes) {
+                    results->resize(count);
+                    memcpy(results->data(),
+                           m_rxBuf.data() + sizeof(uint32_t),
+                           count * sizeof(uint32_t));
+                }
+            }
+
+            // Always sort with the current sort key so the list order matches
+            // the column headers immediately after a search.
+            ApplySort(*results, sortKey, sortDescending);
+
+            {
+                std::lock_guard<std::mutex> lk(m_resultsMutex);
+                m_results = std::move(results);
+            }
+            HWND hwnd = m_hwndNotify.load(std::memory_order_acquire);
+            if (hwnd) PostMessage(hwnd, WM_USER_SEARCH_FINISHED, 0, 0);
+
+        } else if (doSort) {
+            // Sort-only: re-sort the existing result set without issuing a new
+            // pipe query. Makes a sorted copy so the UI's existing pointer
+            // (g_ActiveResults) remains valid during the sort.
+            std::shared_ptr<std::vector<uint32_t>> sorted;
+            {
+                std::lock_guard<std::mutex> lk(m_resultsMutex);
+                if (m_results)
+                    sorted = std::make_shared<std::vector<uint32_t>>(*m_results);
+            }
+            if (sorted) {
+                ApplySort(*sorted, sortKey, sortDescending);
+                std::lock_guard<std::mutex> lk(m_resultsMutex);
+                m_results = std::move(sorted);
+            }
+            HWND hwnd = m_hwndNotify.load(std::memory_order_acquire);
+            if (hwnd) PostMessage(hwnd, WM_USER_SEARCH_FINISHED, 0, 0);
         }
-        if (m_hwndNotify)
-            PostMessage(m_hwndNotify, WM_USER_SEARCH_FINISHED, 0, 0);
     }
-}
-
-void NamedPipeEngine::Sort(QuerySortKey key, bool descending)
-{
-    m_local.Sort(key, descending);
 }
 
 std::shared_ptr<std::vector<uint32_t>> NamedPipeEngine::GetSearchResults()

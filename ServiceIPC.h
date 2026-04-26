@@ -12,7 +12,9 @@
 #define WHEREISIT_SERVICE_NAME    L"WhereIsIt"
 #define WHEREISIT_SERVICE_DISPLAY L"WhereIsIt File Indexer"
 
-// Returns true if the named pipe server is reachable (non-blocking probe).
+// Returns true if the named pipe server is reachable.
+// Uses a CreateFile probe so the check is reliable even when all server
+// instances are momentarily busy (WaitNamedPipeW with 1 ms would miss that).
 bool IsNamedPipeServerAvailable();
 
 // Installs the executable as a Windows service (SERVICE_AUTO_START, LocalSystem).
@@ -33,8 +35,9 @@ int RunAsService();
 // ---------------------------------------------------------------------------
 // NamedPipeEngine
 // IIndexEngine proxy that routes Search() over the WhereIsItIPC named pipe.
-// All record-accessor calls delegate to an embedded local IndexingEngine that
-// loads index.dat from disk.
+// Sort() re-sorts the received result set locally using m_local's record
+// accessors. All other record-accessor calls also delegate to m_local, which
+// loads index.dat from disk on Start().
 // ---------------------------------------------------------------------------
 class NamedPipeEngine : public IIndexEngine {
 public:
@@ -48,7 +51,12 @@ public:
     void Sort(QuerySortKey key, bool descending) override;
     std::shared_ptr<std::vector<uint32_t>> GetSearchResults() override;
 
-    void SetNotifyWindow(HWND hwnd) override { m_hwndNotify = hwnd; }
+    // SetNotifyWindow is called once from the UI thread before any search.
+    // m_hwndNotify is atomic so SearchWorker can read it without a lock.
+    void SetNotifyWindow(HWND hwnd) override
+    {
+        m_hwndNotify.store(hwnd, std::memory_order_release);
+    }
 
     FileRecord                           GetRecord(uint32_t idx) const override;
     uint64_t                             GetRecordFileSize(uint32_t idx) const override;
@@ -66,16 +74,36 @@ public:
 private:
     void SearchWorker();
 
-    HWND                     m_hwndNotify  = nullptr;
-    IndexingEngine           m_local;          // record-accessor fallback
+    // Sort the result vector in-place using m_local record accessors.
+    void ApplySort(std::vector<uint32_t>& v, QuerySortKey key, bool descending);
+
+    // Atomic so SetNotifyWindow (UI thread) and SearchWorker (worker thread)
+    // do not race. HWND is a pointer so atomic<HWND> is lock-free on all
+    // supported Windows platforms.
+    std::atomic<HWND>        m_hwndNotify{ nullptr };
+
+    // Local engine used solely for record-accessor calls (GetRecord, GetFullPath…).
+    // NOTE (Phase 1 limitation): Start() also launches a full MFT scan, which
+    // duplicates work already done by the service. A future "load-only" mode
+    // in IndexingEngine would eliminate this redundancy.
+    IndexingEngine           m_local;
 
     std::thread              m_searchThread;
     std::atomic<bool>        m_running{ false };
+
+    // All fields below are protected by m_searchMutex.
     std::mutex               m_searchMutex;
     std::condition_variable  m_searchCv;
     std::string              m_pendingQuery;
-    bool                     m_searchPending = false;
+    bool                     m_searchPending = false;  // new query waiting
+    bool                     m_sortPending   = false;  // sort-only re-sort needed
+    QuerySortKey             m_sortKey       = QuerySortKey::Name;
+    bool                     m_sortDescending = false;
 
     mutable std::mutex                     m_resultsMutex;
     std::shared_ptr<std::vector<uint32_t>> m_results;
+
+    // Persistent 4 MB receive buffer — avoids a heap alloc on every search.
+    // Accessed only from SearchWorker; no locking needed.
+    std::vector<char>        m_rxBuf;
 };
