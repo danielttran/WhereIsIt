@@ -785,6 +785,73 @@ void IndexingEngine::Sort(QuerySortKey key, bool descending) {
 
 namespace {
     class SortAbortedException : public std::exception {};
+
+    uint32_t ResolveParentRecordIndex(
+        const FileRecord& rec,
+        const std::vector<FileRecord>& records,
+        const std::vector<std::vector<uint32_t>>& mftLookupTables) {
+        const uint8_t di = rec.DriveIndex;
+        if (di >= (uint8_t)mftLookupTables.size()) return 0xFFFFFFFF;
+        if (rec.ParentMftIndex < 5 || rec.ParentMftIndex >= (uint32_t)mftLookupTables[di].size()) return 0xFFFFFFFF;
+        const uint32_t parentIdx = mftLookupTables[di][rec.ParentMftIndex];
+        if (parentIdx == 0xFFFFFFFF || parentIdx >= (uint32_t)records.size()) return 0xFFFFFFFF;
+        if (records[parentIdx].MftSequence != rec.ParentSequence) return 0xFFFFFFFF;
+        return parentIdx;
+    }
+
+    int ComparePathByHierarchy(
+        uint32_t aIdx,
+        uint32_t bIdx,
+        const std::vector<FileRecord>& records,
+        const std::vector<std::string>& driveLetters,
+        const std::vector<std::vector<uint32_t>>& mftLookupTables,
+        const StringPool& pool) {
+        if (aIdx >= records.size() || bIdx >= records.size()) return (aIdx < bIdx) ? -1 : 1;
+
+        const FileRecord& aRec = records[aIdx];
+        const FileRecord& bRec = records[bIdx];
+
+        if (aRec.DriveIndex != bRec.DriveIndex) {
+            const char* aDrive = (aRec.DriveIndex < driveLetters.size()) ? driveLetters[aRec.DriveIndex].c_str() : "";
+            const char* bDrive = (bRec.DriveIndex < driveLetters.size()) ? driveLetters[bRec.DriveIndex].c_str() : "";
+            int driveCmp = FastCompareIgnoreCase(aDrive, bDrive);
+            if (driveCmp != 0) return driveCmp;
+            return (aRec.DriveIndex < bRec.DriveIndex) ? -1 : 1;
+        }
+
+        constexpr size_t kMaxDepth = 1024;
+        uint32_t aChain[kMaxDepth];
+        uint32_t bChain[kMaxDepth];
+        size_t aCount = 0, bCount = 0;
+
+        uint32_t cur = aIdx;
+        while (aCount < kMaxDepth && cur != 0xFFFFFFFF) {
+            aChain[aCount++] = cur;
+            const uint32_t parent = ResolveParentRecordIndex(records[cur], records, mftLookupTables);
+            if (parent == cur) break;
+            cur = parent;
+        }
+        cur = bIdx;
+        while (bCount < kMaxDepth && cur != 0xFFFFFFFF) {
+            bChain[bCount++] = cur;
+            const uint32_t parent = ResolveParentRecordIndex(records[cur], records, mftLookupTables);
+            if (parent == cur) break;
+            cur = parent;
+        }
+
+        size_t ai = aCount;
+        size_t bi = bCount;
+        while (ai > 0 && bi > 0) {
+            const char* aName = pool.GetString(records[aChain[ai - 1]].NamePoolOffset);
+            const char* bName = pool.GetString(records[bChain[bi - 1]].NamePoolOffset);
+            int cmp = FastCompareIgnoreCase(aName ? aName : "", bName ? bName : "");
+            if (cmp != 0) return cmp;
+            --ai;
+            --bi;
+        }
+        if (ai == 0 && bi == 0) return 0;
+        return (ai == 0) ? -1 : 1;
+    }
 }
 
 void IndexingEngine::SearchThread() {
@@ -1028,10 +1095,56 @@ void IndexingEngine::SearchThread() {
                                     results->push_back(idx);
                             }
                         };
+                        auto parallelFastLoop = [&](uint32_t count, auto getIndex) {
+                            const unsigned int hw = std::thread::hardware_concurrency();
+                            const uint32_t workerCount = (std::min)((uint32_t)(hw ? hw : 4), (uint32_t)8);
+                            if (workerCount < 2 || count < 200000) {
+                                fastLoop(count, getIndex);
+                                return;
+                            }
+
+                            std::vector<std::vector<uint32_t>> chunks(workerCount);
+                            std::vector<std::thread> workers;
+                            workers.reserve(workerCount > 0 ? workerCount - 1 : 0);
+
+                            auto workerFn = [&](uint32_t begin, uint32_t end, uint32_t workerId) {
+                                auto& local = chunks[workerId];
+                                local.reserve((end - begin) / 8 + 64);
+                                for (uint32_t i = begin; i < end; ++i) {
+                                    if ((i & 0xFF) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) return;
+                                    const uint32_t idx = getIndex(i);
+                                    const auto& rec = m_records[idx];
+                                    if (rec.MftIndex == 0xFFFFFFFF) continue;
+                                    const char* name = m_pool.GetString(rec.NamePoolOffset);
+                                    if (FastContainsCIPtr(name, needlePtr, needleLen)) local.push_back(idx);
+                                }
+                            };
+
+                            const uint32_t base = count / workerCount;
+                            const uint32_t rem = count % workerCount;
+                            uint32_t begin = 0;
+                            for (uint32_t w = 0; w < workerCount; ++w) {
+                                const uint32_t len = base + (w < rem ? 1 : 0);
+                                const uint32_t end = begin + len;
+                                if (w == 0) workerFn(begin, end, w);
+                                else workers.emplace_back(workerFn, begin, end, w);
+                                begin = end;
+                            }
+                            for (auto& t : workers) t.join();
+                            if (m_isSearchRequested.load(std::memory_order_relaxed)) return;
+
+                            size_t total = 0;
+                            for (const auto& c : chunks) total += c.size();
+                            results->clear();
+                            results->reserve(total);
+                            for (auto& c : chunks) {
+                                results->insert(results->end(), c.begin(), c.end());
+                            }
+                        };
                         if (usePreSorted)
-                            fastLoop((uint32_t)m_preSortedByName.size(), [&](uint32_t i) { return m_preSortedByName[i]; });
+                            parallelFastLoop((uint32_t)m_preSortedByName.size(), [&](uint32_t i) { return m_preSortedByName[i]; });
                         else
-                            fastLoop((uint32_t)m_records.size(), [&](uint32_t i) { return i; });
+                            parallelFastLoop((uint32_t)m_records.size(), [&](uint32_t i) { return i; });
                     } else {
                         // MEDIUM FAST PATH: single-term path query (e.g. C:\Windows\*.exe).
                         // Detects queries that contain a slash but no operators, spaces, quotes,
@@ -1140,34 +1253,19 @@ void IndexingEngine::SearchThread() {
             if (usePreSorted) {
                 // Already sorted!
             } else if (sortKey == QuerySortKey::Path) {
-                struct PathSortItem { std::string path; uint32_t idx; };
-                std::vector<PathSortItem> sortItems;
-                sortItems.reserve(results->size());
-                for (uint32_t idx : *results) {
-                    if (m_isSearchRequested) break;
-                    sortItems.push_back({WideToUtf8(GetFullPathInternal(idx)), idx});
-                }
-                
-                if (!m_isSearchRequested) {
-                    try {
-                        int cmpCount = 0;
-                        std::sort(sortItems.begin(), sortItems.end(), [this, sortDescending, &cmpCount](const PathSortItem& a, const PathSortItem& b) {
-                            if ((++cmpCount & 0x3F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) throw SortAbortedException();
-                            int primary = FastCompareIgnoreCase(a.path.c_str(), b.path.c_str());
-                            if (primary == 0) {
-                                const auto& ra = m_records[a.idx];
-                                const auto& rb = m_records[b.idx];
-                                primary = FastCompareIgnoreCase(m_pool.GetString(ra.NamePoolOffset), m_pool.GetString(rb.NamePoolOffset));
-                                if (primary == 0) primary = (a.idx < b.idx ? -1 : 1);
-                            }
-                            return sortDescending ? (primary > 0) : (primary < 0);
-                        });
-                    } catch (const SortAbortedException&) {
-                        // Sort aborted
-                    }
-                    for (size_t i = 0; i < sortItems.size(); ++i) {
-                        (*results)[i] = sortItems[i].idx;
-                    }
+                std::vector<std::string> driveLetters;
+                driveLetters.reserve(m_drives.size());
+                for (const auto& d : m_drives) driveLetters.push_back(d.LetterUTF8);
+                try {
+                    int cmpCount = 0;
+                    std::sort(results->begin(), results->end(), [this, &driveLetters, sortDescending, &cmpCount](uint32_t a, uint32_t b) {
+                        if ((++cmpCount & 0x3F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) throw SortAbortedException();
+                        int primary = ComparePathByHierarchy(a, b, m_records, driveLetters, m_mftLookupTables, m_pool);
+                        if (primary == 0) primary = (a < b ? -1 : 1);
+                        return sortDescending ? (primary > 0) : (primary < 0);
+                    });
+                } catch (const SortAbortedException&) {
+                    // Sort aborted
                 }
             } else {
                 try {
