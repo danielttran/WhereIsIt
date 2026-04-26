@@ -30,6 +30,47 @@ bool g_SortDescending = false;
 
 // Search term storage for highlighting
 wchar_t g_CurrentQueryW[256] = { 0 };
+std::vector<std::wstring> g_HighlightTokens;
+
+// Pre-cached display data: populated at WM_USER_SEARCH_FINISHED, read lock-free from paint callbacks.
+// Indexed parallel to g_ActiveResults (same size). Avoids holding m_dataMutex during LVN_GETDISPINFO.
+std::vector<std::wstring> g_CachedPaths;       // parent path per result
+std::vector<std::wstring> g_CachedNames;       // file name (wide) per result
+std::vector<std::wstring> g_CachedNamesLower;  // lower-case name per result, for highlight matching
+std::vector<uint16_t>     g_CachedAttribs;     // FileAttributes per result
+std::vector<uint64_t>     g_CachedSizes;       // FileSize per result
+std::vector<uint64_t>     g_CachedDates;       // LastModified per result
+
+void UpdateHighlightTokens() {
+    g_HighlightTokens.clear();
+    std::wstring searchStr = g_CurrentQueryW;
+    if (searchStr.empty()) return;
+
+    std::vector<std::wstring> tokens;
+    size_t start = 0;
+    while (start < searchStr.length()) {
+        while (start < searchStr.length() && (searchStr[start] == L' ' || searchStr[start] == L'\t')) start++;
+        if (start >= searchStr.length()) break;
+        size_t end = start;
+        while (end < searchStr.length() && searchStr[end] != L' ' && searchStr[end] != L'\t') end++;
+        tokens.push_back(searchStr.substr(start, end - start));
+        start = end;
+    }
+    if (tokens.empty()) tokens.push_back(searchStr);
+
+    for (auto& token : tokens) {
+        size_t slash = token.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) token = token.substr(slash + 1);
+        token.erase(std::remove(token.begin(), token.end(), L'*'), token.end());
+        token.erase(std::remove(token.begin(), token.end(), L'?'), token.end());
+        token.erase(std::remove(token.begin(), token.end(), L'"'), token.end());
+
+        if (!token.empty()) {
+            for (auto& c : token) c = towlower(c);
+            g_HighlightTokens.push_back(token);
+        }
+    }
+}
 HFONT g_FontNormal = NULL;
 HFONT g_FontBold = NULL;
 
@@ -193,56 +234,49 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
     case CDDS_ITEMPREPAINT: return CDRF_NOTIFYSUBITEMDRAW;
     case CDDS_ITEMPREPAINT | CDDS_SUBITEM:
         if (pcd->iSubItem == 0) {
-            if (!g_ActiveResults || pcd->nmcd.dwItemSpec >= g_ActiveResults->size()) return CDRF_DODEFAULT;
+            size_t listIdx = pcd->nmcd.dwItemSpec;
+            if (!g_ActiveResults || listIdx >= g_ActiveResults->size()) return CDRF_DODEFAULT;
 
-            uint32_t recordIdx = (*g_ActiveResults)[pcd->nmcd.dwItemSpec];
-            FileRecord rec = g_Engine.GetRecord(recordIdx);
-            std::wstring nameStr = g_Engine.GetRecordName(recordIdx);
+            // Use pre-cached record+name (single lock in GetRecordAndName, called at results-update time).
+            // Fall back to live query only if cache is out of sync (shouldn't happen in practice).
+            uint32_t recordIdx = (*g_ActiveResults)[listIdx];
+            std::wstring nameStr;
+            uint16_t attribs = 0;
+            if (listIdx < g_CachedNames.size()) {
+                nameStr  = g_CachedNames[listIdx];
+                attribs  = g_CachedAttribs[listIdx];
+            } else {
+                auto [r, n] = g_Engine.GetRecordAndName(recordIdx);
+                attribs = r.FileAttributes; nameStr = std::move(n);
+            }
 
             RECT rect;
-            ListView_GetSubItemRect(hFileList, (int)pcd->nmcd.dwItemSpec, 0, LVIR_BOUNDS, &rect);
+            ListView_GetSubItemRect(hFileList, (int)listIdx, 0, LVIR_BOUNDS, &rect);
             
-            bool isSelected = (ListView_GetItemState(hFileList, (int)pcd->nmcd.dwItemSpec, LVIS_SELECTED) & LVIS_SELECTED);
+            bool isSelected = (ListView_GetItemState(hFileList, (int)listIdx, LVIS_SELECTED) & LVIS_SELECTED);
             FillRect(pcd->nmcd.hdc, &rect, GetSysColorBrush(isSelected ? COLOR_HIGHLIGHT : COLOR_WINDOW));
             SetTextColor(pcd->nmcd.hdc, GetSysColor(isSelected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT));
 
             HIMAGELIST hSIL = ListView_GetImageList(hFileList, LVSIL_SMALL);
-            int iconIdx = GetIconIndex(nameStr, rec.FileAttributes);
+            int iconIdx = GetIconIndex(nameStr, attribs);
             ImageList_Draw(hSIL, iconIdx, pcd->nmcd.hdc, rect.left + 2, rect.top + (rect.bottom - rect.top - 16)/2, ILD_TRANSPARENT);
             rect.left += 20; 
 
-            std::wstring searchStr = g_CurrentQueryW;
             size_t matchPos = std::wstring::npos;
             std::wstring matchedTerm;
 
-            if (!searchStr.empty()) {
-                std::vector<std::wstring> tokens;
-                size_t start = 0;
-                while (start < searchStr.length()) {
-                    while (start < searchStr.length() && (searchStr[start] == L' ' || searchStr[start] == L'\t')) start++;
-                    if (start >= searchStr.length()) break;
-                    size_t end = start;
-                    while (end < searchStr.length() && searchStr[end] != L' ' && searchStr[end] != L'\t') end++;
-                    tokens.push_back(searchStr.substr(start, end - start));
-                    start = end;
-                }
-                if (tokens.empty()) tokens.push_back(searchStr);
+            if (!g_HighlightTokens.empty()) {
+                // Use pre-lowercased name cache to avoid per-paint towlower loop.
+                const std::wstring& nameLower = (listIdx < g_CachedNamesLower.size())
+                    ? g_CachedNamesLower[listIdx]
+                    : nameStr;  // fallback: search is approximate
 
-                for (auto& token : tokens) {
-                    size_t slash = token.find_last_of(L"\\/");
-                    if (slash != std::wstring::npos) token = token.substr(slash + 1);
-                    token.erase(std::remove(token.begin(), token.end(), L'*'), token.end());
-                    token.erase(std::remove(token.begin(), token.end(), L'?'), token.end());
-                    token.erase(std::remove(token.begin(), token.end(), L'"'), token.end());
-
-                    if (!token.empty()) {
-                        auto it = std::search(nameStr.begin(), nameStr.end(), token.begin(), token.end(),
-                            [](wchar_t c1, wchar_t c2) { return towlower(c1) == towlower(c2); });
-                        if (it != nameStr.end()) {
-                            matchPos = std::distance(nameStr.begin(), it);
-                            matchedTerm = token;
-                            break;
-                        }
+                for (const auto& token : g_HighlightTokens) {
+                    size_t pos = nameLower.find(token);
+                    if (pos != std::wstring::npos) {
+                        matchPos = pos;
+                        matchedTerm = token;
+                        break;
                     }
                 }
             }
@@ -280,13 +314,37 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
 
 void OnDisplayInfo(NMLVDISPINFO* pdi) {
     if (!g_ActiveResults || pdi->item.iItem >= (int)g_ActiveResults->size()) return;
-    uint32_t rIdx = (*g_ActiveResults)[pdi->item.iItem]; 
-    FileRecord rec = g_Engine.GetRecord(rIdx);
     if (pdi->item.mask & LVIF_TEXT) {
+        size_t idx = (size_t)pdi->item.iItem;
         switch (pdi->item.iSubItem) {
-            case 1: wcsncpy_s(pdi->item.pszText, pdi->item.cchTextMax, g_Engine.GetParentPath(rIdx).c_str(), _TRUNCATE); break;
-            case 2: FormatFileSize(pdi->item.pszText, pdi->item.cchTextMax, rec.FileSize, rec.FileAttributes); break;
-            case 3: FormatFileTime(pdi->item.pszText, pdi->item.cchTextMax, rec.LastModified); break;
+            case 1:
+                // Use pre-cached path (zero mutex) — populated at WM_USER_SEARCH_FINISHED.
+                if (idx < g_CachedPaths.size()) {
+                    wcsncpy_s(pdi->item.pszText, pdi->item.cchTextMax, g_CachedPaths[idx].c_str(), _TRUNCATE);
+                } else {
+                    // Fallback for race between cache rebuild and paint.
+                    uint32_t rIdx = (*g_ActiveResults)[idx];
+                    wcsncpy_s(pdi->item.pszText, pdi->item.cchTextMax, g_Engine.GetParentPath(rIdx).c_str(), _TRUNCATE);
+                }
+                break;
+            case 2:
+                if (idx < g_CachedSizes.size()) {
+                    FormatFileSize(pdi->item.pszText, pdi->item.cchTextMax, g_CachedSizes[idx], g_CachedAttribs[idx]);
+                } else {
+                    uint32_t rIdx = (*g_ActiveResults)[idx];
+                    FileRecord rec = g_Engine.GetRecord(rIdx);
+                    FormatFileSize(pdi->item.pszText, pdi->item.cchTextMax, rec.FileSize, rec.FileAttributes);
+                }
+                break;
+            case 3:
+                if (idx < g_CachedDates.size()) {
+                    FormatFileTime(pdi->item.pszText, pdi->item.cchTextMax, g_CachedDates[idx]);
+                } else {
+                    uint32_t rIdx = (*g_ActiveResults)[idx];
+                    FileRecord rec = g_Engine.GetRecord(rIdx);
+                    FormatFileTime(pdi->item.pszText, pdi->item.cchTextMax, rec.LastModified);
+                }
+                break;
         }
     }
 }
@@ -332,7 +390,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         LOGFONT lf; GetObject(g_FontNormal, sizeof(lf), &lf);
         lf.lfWeight = FW_BOLD; g_FontBold = CreateFontIndirect(&lf);
         SendMessage(hSearchEdit, WM_SETFONT, (WPARAM)g_FontNormal, TRUE);
-        SetTimer(hWnd, 1, 100, NULL);
+        g_Engine.SetNotifyWindow(hWnd);
+        SetTimer(hWnd, 1, 500, NULL);
         break;
     }
     case WM_CONTEXTMENU: {
@@ -364,24 +423,55 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 std::wstring status = FormatNumberWithCommas(g_ActiveResults ? g_ActiveResults->size() : 0) + L" objects";
                 SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)status.c_str());
             } else SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)g_Engine.GetCurrentStatus().c_str());
-            
-            if (g_Engine.HasNewResults() || (!g_Engine.IsBusy() && !g_ActiveResults)) {
-                g_ActiveResults = g_Engine.GetSearchResults();
-                wchar_t debugBuf[256];
-                swprintf_s(debugBuf, L"[WhereIsIt] UI Update: New results received. Count: %zu\n", g_ActiveResults ? g_ActiveResults->size() : 0);
-                Logger::Log(debugBuf);
-                ListView_SetItemCount(hFileList, (int)g_ActiveResults->size());
-                InvalidateRect(hFileList, NULL, FALSE);
+        }
+        break;
+    case WM_USER_SEARCH_FINISHED:
+        g_ActiveResults = g_Engine.GetSearchResults();
+        if (g_ActiveResults) {
+            size_t count = g_ActiveResults->size();
+            // Rebuild display caches in a single pass — each item calls GetRecordAndName once.
+            // This is done on the UI thread but OUTSIDE any paint, so it's safe to take brief locks.
+            g_CachedPaths.resize(count);
+            g_CachedNames.resize(count);
+            g_CachedNamesLower.resize(count);
+            g_CachedAttribs.resize(count);
+            g_CachedSizes.resize(count);
+            g_CachedDates.resize(count);
+            for (size_t i = 0; i < count; ++i) {
+                uint32_t rIdx = (*g_ActiveResults)[i];
+                auto [rec, name] = g_Engine.GetRecordAndName(rIdx);
+                g_CachedPaths[i]      = g_Engine.GetParentPath(rIdx);
+                g_CachedNames[i]      = name;
+                g_CachedNamesLower[i] = name;
+                for (auto& c : g_CachedNamesLower[i]) c = towlower(c);
+                g_CachedAttribs[i]    = rec.FileAttributes;
+                g_CachedSizes[i]      = rec.FileSize;
+                g_CachedDates[i]      = rec.LastModified;
             }
-        } else if (wParam == IDT_SEARCH_DEBOUNCE) {
-            KillTimer(hWnd, IDT_SEARCH_DEBOUNCE);
-            GetWindowText(hSearchEdit, g_CurrentQueryW, 256); char queryA[256];
-            WideCharToMultiByte(CP_UTF8, 0, g_CurrentQueryW, -1, queryA, 256, NULL, NULL); 
-            g_Engine.Search(queryA);
+
+            wchar_t debugBuf[256];
+            swprintf_s(debugBuf, L"[WhereIsIt] UI Update: New results received. Count: %zu\n", count);
+            Logger::Log(debugBuf);
+            ListView_SetItemCount(hFileList, (int)count);
+            InvalidateRect(hFileList, NULL, FALSE);
+            UpdateWindow(hFileList);
+
+            if (g_CurrentQueryW[0] != 0) {
+                std::wstring status = FormatNumberWithCommas(count) + L" objects";
+                SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)status.c_str());
+            } else {
+                SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)g_Engine.GetCurrentStatus().c_str());
+            }
+            UpdateWindow(hStatusBar);
         }
         break;
     case WM_COMMAND:
-        if (LOWORD(wParam) == IDC_SEARCH_EDIT && HIWORD(wParam) == EN_CHANGE) SetTimer(hWnd, IDT_SEARCH_DEBOUNCE, 150, NULL);
+        if (LOWORD(wParam) == IDC_SEARCH_EDIT && HIWORD(wParam) == EN_CHANGE) {
+            GetWindowText(hSearchEdit, g_CurrentQueryW, 256); char queryA[256];
+            UpdateHighlightTokens();
+            WideCharToMultiByte(CP_UTF8, 0, g_CurrentQueryW, -1, queryA, 256, NULL, NULL); 
+            g_Engine.Search(queryA);
+        }
         break;
     case WM_NOTIFY: {
         LPNMHDR header = (LPNMHDR)lParam;
@@ -443,7 +533,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
     case WM_DESTROY: 
         KillTimer(hWnd, 1);
-        KillTimer(hWnd, IDT_SEARCH_DEBOUNCE);
         if (g_FontBold) DeleteObject(g_FontBold); 
         PostQuitMessage(0); 
         break;

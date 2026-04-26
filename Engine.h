@@ -17,6 +17,8 @@
 #include <windows.h>
 #include <winioctl.h>
 
+#define WM_USER_SEARCH_FINISHED (WM_USER + 1)
+
 std::wstring FormatNumberWithCommas(size_t n);
 
 class Logger {
@@ -103,10 +105,13 @@ public:
     void Sort(QuerySortKey key, bool descending);
     std::shared_ptr<std::vector<uint32_t>> GetSearchResults();
     bool HasNewResults() { return m_resultsUpdated.exchange(false); }
+    void SetNotifyWindow(HWND hwnd) { m_hwndNotify = hwnd; }
 
     const std::vector<FileRecord>& GetRecords() const { return m_records; }
     FileRecord GetRecord(uint32_t recordIndex) const;
     std::wstring GetRecordName(uint32_t recordIndex) const;
+    // Single-lock fetch of both record and name — use in hot paint paths to halve lock acquisitions.
+    std::pair<FileRecord, std::wstring> GetRecordAndName(uint32_t recordIndex) const;
     const StringPool& GetFileNamePool() const { return m_pool; }
     void SetStatus(const std::wstring& status) {
         std::lock_guard<std::mutex> lock(m_statusMutex);
@@ -159,6 +164,7 @@ private:
     bool IsRootEnabled(const std::wstring& root) const;
     static bool WildcardMatchI(const wchar_t* pattern, const wchar_t* text);
     void CloseAllDriveHandles();
+    void UpdatePreSortedIndex();
 
     std::thread m_mainWorker;
     std::thread m_searchWorker;
@@ -166,6 +172,7 @@ private:
     std::atomic<bool> m_ready;
     mutable std::mutex m_statusMutex;
     std::wstring m_status;
+    HWND m_hwndNotify = NULL;
     
     struct DriveContext { 
         std::wstring Letter; 
@@ -178,6 +185,7 @@ private:
     std::vector<DriveContext> m_drives;
     
     std::vector<FileRecord> m_records;
+    std::vector<uint32_t> m_preSortedByName;
     std::vector<std::vector<uint32_t>> m_mftLookupTables;
     StringPool m_pool;
     IndexScopeConfig m_scopeConfig;

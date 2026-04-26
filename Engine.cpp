@@ -83,19 +83,22 @@ static bool IsWordBoundary(const std::string& text, size_t pos) {
 }
 
 static bool ContainsWholeWord(const std::string& haystack, const std::string& needle, bool caseSensitive) {
+    // Alloc-free implementation: scan using the lookup table directly, no string copies.
     if (needle.empty()) return true;
-    std::string hay = haystack;
-    std::string ndl = needle;
-    if (!caseSensitive) {
-        hay = ToLowerAscii(hay);
-        ndl = ToLowerAscii(ndl);
-    }
-    size_t pos = 0;
-    while ((pos = hay.find(ndl, pos)) != std::string::npos) {
-        bool left = (pos == 0) || IsWordBoundary(hay, pos - 1);
-        bool right = (pos + ndl.size() >= hay.size()) || IsWordBoundary(hay, pos + ndl.size());
-        if (left && right) return true;
-        ++pos;
+    const size_t hLen = haystack.size(), nLen = needle.size();
+    if (nLen > hLen) return false;
+    for (size_t i = 0; i <= hLen - nLen; ++i) {
+        bool match = true;
+        for (size_t j = 0; j < nLen && match; ++j) {
+            unsigned char hc = (unsigned char)haystack[i + j];
+            unsigned char nc = (unsigned char)needle[j];
+            match = caseSensitive ? (hc == nc) : (g_ToLowerLookup[hc] == g_ToLowerLookup[nc]);
+        }
+        if (match) {
+            bool left  = (i == 0)            || IsWordBoundary(haystack, i - 1);
+            bool right = (i + nLen >= hLen)  || IsWordBoundary(haystack, i + nLen);
+            if (left && right) return true;
+        }
     }
     return false;
 }
@@ -311,7 +314,7 @@ static QueryPlan BuildQueryPlan(const std::string& rawQuery) {
             catch (const std::regex_error& e) {
                 plan.Success = false;
                 int sz = MultiByteToWideChar(CP_UTF8, 0, e.what(), -1, NULL, 0);
-                std::wstring msg(sz, L'\0'); MultiByteToWideChar(CP_UTF8, 0, e.what(), -1, &msg[0], sz);
+                std::wstring msg(sz - 1, L'\0'); MultiByteToWideChar(CP_UTF8, 0, e.what(), -1, &msg[0], sz);
                 plan.ErrorMessage = L"Regex Error: " + msg;
                 break;
             }
@@ -489,13 +492,24 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
     }
     
     std::vector<FileRecord> tempRecords;
-    tempRecords.resize(h.RecordCount);
+    try {
+        tempRecords.resize(h.RecordCount);
+    } catch (const std::bad_alloc&) {
+        Logger::Log(L"[WhereIsIt] Memory allocation failed for file records.");
+        clearState(); return false;
+    }
     if (!readExact(in, (char*)tempRecords.data(), (size_t)h.RecordCount * sizeof(FileRecord))) { 
         Logger::Log(L"[WhereIsIt] Failed to read file records from index.");
         clearState(); return false; 
     }
 
-    std::vector<char> pd(h.PoolSize);
+    std::vector<char> pd;
+    try {
+        pd.resize(h.PoolSize);
+    } catch (const std::bad_alloc&) {
+        Logger::Log(L"[WhereIsIt] Memory allocation failed for string pool.");
+        clearState(); return false;
+    }
     if (!readExact(in, pd.data(), h.PoolSize)) { 
         Logger::Log(L"[WhereIsIt] Failed to read string pool from index.");
         clearState(); return false; 
@@ -513,7 +527,12 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
     }
 
     for (uint32_t i = 0; i < h.DriveCount; ++i) {
-        tempLookup[i].assign((size_t)maxMft[i] + 1, 0xFFFFFFFF);
+        try {
+            tempLookup[i].assign((size_t)maxMft[i] + 1, 0xFFFFFFFF);
+        } catch (const std::bad_alloc&) {
+            Logger::Log(L"[WhereIsIt] Memory allocation failed for MFT lookup table (possibly corrupted index).");
+            clearState(); return false;
+        }
     }
 
     for (uint32_t i = 0; i < (uint32_t)tempRecords.size(); ++i) {
@@ -609,6 +628,20 @@ std::wstring IndexingEngine::GetRecordName(uint32_t recordIdx) const {
     return nameStr;
 }
 
+// Single shared_lock acquisition returning both record and wide name — use in paint hot paths.
+std::pair<FileRecord, std::wstring> IndexingEngine::GetRecordAndName(uint32_t recordIdx) const {
+    std::shared_lock<std::shared_mutex> lock(m_dataMutex);
+    if (recordIdx >= m_records.size()) return { {}, L"" };
+    const FileRecord& rec = m_records[recordIdx];
+    const char* nameA = m_pool.GetString(rec.NamePoolOffset);
+    if (!nameA || !nameA[0]) return { rec, L"" };
+    int sz = MultiByteToWideChar(CP_UTF8, 0, nameA, -1, NULL, 0);
+    if (sz <= 1) return { rec, L"" };
+    std::wstring nameStr(sz - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, nameA, -1, &nameStr[0], sz);
+    return { rec, std::move(nameStr) };
+}
+
 std::wstring IndexingEngine::GetFullPath(uint32_t recordIdx) const {
     std::shared_lock<std::shared_mutex> lock(m_dataMutex);
     return GetFullPathInternal(recordIdx);
@@ -674,6 +707,39 @@ std::wstring IndexingEngine::GetParentPathInternal(uint32_t recordIdx) const {
     return GetFullPathInternal(pi);
 }
 
+void IndexingEngine::UpdatePreSortedIndex() {
+    SetStatus(L"Sorting index...");
+    std::vector<uint32_t> sorted;
+
+    // Phase 1: collect indices and snapshot the name pointers under a short shared lock.
+    // Sorting itself does NOT hold any lock — the sort comparator uses snapshots.
+    struct NameEntry { uint32_t idx; const char* name; };
+    std::vector<NameEntry> entries;
+    {
+        std::shared_lock<std::shared_mutex> dataLock(m_dataMutex);
+        entries.reserve(m_records.size());
+        for (uint32_t i = 0; i < (uint32_t)m_records.size(); ++i) {
+            if (m_records[i].MftIndex != 0xFFFFFFFF)
+                entries.push_back({ i, m_pool.GetString(m_records[i].NamePoolOffset) });
+        }
+    } // shared lock released before sort
+
+    // Phase 2: sort without any lock held.
+    std::sort(entries.begin(), entries.end(), [](const NameEntry& a, const NameEntry& b) {
+        int cmp = FastCompareIgnoreCase(a.name, b.name);
+        return cmp != 0 ? (cmp < 0) : (a.idx < b.idx);
+    });
+
+    sorted.resize(entries.size());
+    for (size_t i = 0; i < entries.size(); ++i) sorted[i] = entries[i].idx;
+
+    // Phase 3: write under exclusive lock.
+    {
+        std::unique_lock<std::shared_mutex> lockWrite(m_dataMutex);
+        m_preSortedByName = std::move(sorted);
+    }
+}
+
 void IndexingEngine::Search(const std::string& q) {
     { 
         std::lock_guard<std::mutex> lock(m_searchSyncMutex); 
@@ -695,6 +761,10 @@ void IndexingEngine::Sort(QuerySortKey key, bool descending) {
     m_searchEvent.notify_one();
 }
 
+namespace {
+    class SortAbortedException : public std::exception {};
+}
+
 void IndexingEngine::SearchThread() {
     std::function<bool(const QueryNode*, const QueryPlan&, const FileRecord&, const std::string&, const std::function<std::string()>&)> evaluateTerm;
     evaluateTerm = [this, &evaluateTerm](const QueryNode* node, const QueryPlan& plan, const FileRecord& rec, const std::string& name, const std::function<std::string()>& getFullPath) -> bool {
@@ -703,9 +773,11 @@ void IndexingEngine::SearchThread() {
         if (node->Type == QueryNodeType::Or) return evaluateTerm(node->Left.get(), plan, rec, name, getFullPath) || evaluateTerm(node->Right.get(), plan, rec, name, getFullPath);
         if (node->Type == QueryNodeType::Not) return !evaluateTerm(node->Left.get(), plan, rec, name, getFullPath);
 
-        const std::string term = node->Term;
+        const std::string& term = node->Term;
         if (term.empty()) return true;
-        std::string low = ToLowerAscii(term);
+        // Note: low is computed once per node, not per record. The lambda is called once per
+        // QueryNode per record, but `term` and `low` are constant for the lifetime of a query.
+        const std::string low = ToLowerAscii(term);
 
         if (low.rfind("ext:", 0) == 0) {
             const std::string ext = low.substr(4);
@@ -853,25 +925,45 @@ void IndexingEngine::SearchThread() {
             {
                 std::shared_lock<std::shared_mutex> dataLock(m_dataMutex);
                 results->reserve(m_records.size());
+                bool usePreSorted = (sortKey == QuerySortKey::Name && !sortDescending && m_preSortedByName.size() == m_records.size());
+
                 if (query.empty()) {
-                    for (uint32_t i = 0; i < (uint32_t)m_records.size(); ++i) {
-                        if (m_records[i].MftIndex != 0xFFFFFFFF) results->push_back(i);
+                    if (usePreSorted) {
+                        for (size_t i = 0; i < m_preSortedByName.size(); ++i) {
+                            if ((i & 0x3F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) break;
+                            uint32_t idx = m_preSortedByName[i];
+                            if (m_records[idx].MftIndex != 0xFFFFFFFF) results->push_back(idx);
+                        }
+                    } else {
+                        for (uint32_t i = 0; i < (uint32_t)m_records.size(); ++i) {
+                            if ((i & 0x3F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) break;
+                            if (m_records[i].MftIndex != 0xFFFFFFFF) results->push_back(i);
+                        }
                     }
                 } else {
-                    for (uint32_t i = 0; i < (uint32_t)m_records.size(); ++i) {
-                        if (m_isSearchRequested) break;
-                        const auto& rec = m_records[i];
-                        if (rec.MftIndex == 0xFFFFFFFF) continue;
-                        std::string name = m_pool.GetString(rec.NamePoolOffset);
-                        
-                        std::string cachedPath;
-                        bool pathCached = false;
-                        auto getPath = [&]() -> std::string {
-                            if (!pathCached) { cachedPath = WideToUtf8(GetFullPathInternal(i)); pathCached = true; }
-                            return cachedPath;
-                        };
-                        
-                        if (evaluateTerm(plan.Root.get(), plan, rec, name, getPath)) results->push_back(i);
+                    auto evalLoop = [&](uint32_t count, auto getIndex) {
+                        for (uint32_t i = 0; i < count; ++i) {
+                            if ((i & 0x3F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) break;
+                            uint32_t idx = getIndex(i);
+                            const auto& rec = m_records[idx];
+                            if (rec.MftIndex == 0xFFFFFFFF) continue;
+                            std::string name = m_pool.GetString(rec.NamePoolOffset);
+                            
+                            std::string cachedPath;
+                            bool pathCached = false;
+                            auto getPath = [&]() -> std::string {
+                                if (!pathCached) { cachedPath = WideToUtf8(GetFullPathInternal(idx)); pathCached = true; }
+                                return cachedPath;
+                            };
+                            
+                            if (evaluateTerm(plan.Root.get(), plan, rec, name, getPath)) results->push_back(idx);
+                        }
+                    };
+
+                    if (usePreSorted) {
+                        evalLoop((uint32_t)m_preSortedByName.size(), [&](uint32_t i) { return m_preSortedByName[i]; });
+                    } else {
+                        evalLoop((uint32_t)m_records.size(), [&](uint32_t i) { return i; });
                     }
                 }
             }
@@ -882,7 +974,11 @@ void IndexingEngine::SearchThread() {
         {
             std::shared_lock<std::shared_mutex> dataLock(m_dataMutex);
             
-            if (sortKey == QuerySortKey::Path) {
+            bool usePreSorted = (sortKey == QuerySortKey::Name && !sortDescending && m_preSortedByName.size() == m_records.size());
+            
+            if (usePreSorted) {
+                // Already sorted!
+            } else if (sortKey == QuerySortKey::Path) {
                 struct PathSortItem { std::string path; uint32_t idx; };
                 std::vector<PathSortItem> sortItems;
                 sortItems.reserve(results->size());
@@ -892,46 +988,64 @@ void IndexingEngine::SearchThread() {
                 }
                 
                 if (!m_isSearchRequested) {
-                    std::sort(sortItems.begin(), sortItems.end(), [this, sortDescending](const PathSortItem& a, const PathSortItem& b) {
-                        int primary = FastCompareIgnoreCase(a.path.c_str(), b.path.c_str());
-                        if (primary == 0) {
-                            const auto& ra = m_records[a.idx];
-                            const auto& rb = m_records[b.idx];
-                            primary = FastCompareIgnoreCase(m_pool.GetString(ra.NamePoolOffset), m_pool.GetString(rb.NamePoolOffset));
-                            if (primary == 0) primary = (a.idx < b.idx ? -1 : 1);
-                        }
-                        return sortDescending ? (primary > 0) : (primary < 0);
-                    });
+                    try {
+                        int cmpCount = 0;
+                        std::sort(sortItems.begin(), sortItems.end(), [this, sortDescending, &cmpCount](const PathSortItem& a, const PathSortItem& b) {
+                            if ((++cmpCount & 0x3F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) throw SortAbortedException();
+                            int primary = FastCompareIgnoreCase(a.path.c_str(), b.path.c_str());
+                            if (primary == 0) {
+                                const auto& ra = m_records[a.idx];
+                                const auto& rb = m_records[b.idx];
+                                primary = FastCompareIgnoreCase(m_pool.GetString(ra.NamePoolOffset), m_pool.GetString(rb.NamePoolOffset));
+                                if (primary == 0) primary = (a.idx < b.idx ? -1 : 1);
+                            }
+                            return sortDescending ? (primary > 0) : (primary < 0);
+                        });
+                    } catch (const SortAbortedException&) {
+                        // Sort aborted
+                    }
                     for (size_t i = 0; i < sortItems.size(); ++i) {
                         (*results)[i] = sortItems[i].idx;
                     }
                 }
             } else {
-                std::sort(results->begin(), results->end(), [this, sortKey, sortDescending](uint32_t a, uint32_t b) {
-                    const auto& ra = m_records[a];
-                    const auto& rb = m_records[b];
-                    
-                    int primary = 0;
-                    if (sortKey == QuerySortKey::Size) {
-                        if (ra.FileSize < rb.FileSize) primary = -1; else if (ra.FileSize > rb.FileSize) primary = 1;
-                    } else if (sortKey == QuerySortKey::Date) {
-                        if (ra.LastModified < rb.LastModified) primary = -1; else if (ra.LastModified > rb.LastModified) primary = 1;
-                    }
+                try {
+                    int cmpCount = 0;
+                    std::sort(results->begin(), results->end(), [this, sortKey, sortDescending, &cmpCount](uint32_t a, uint32_t b) {
+                        if ((++cmpCount & 0x3F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) throw SortAbortedException();
+                        const auto& ra = m_records[a];
+                        const auto& rb = m_records[b];
+                        
+                        int primary = 0;
+                        if (sortKey == QuerySortKey::Size) {
+                            if (ra.FileSize < rb.FileSize) primary = -1; else if (ra.FileSize > rb.FileSize) primary = 1;
+                        } else if (sortKey == QuerySortKey::Date) {
+                            if (ra.LastModified < rb.LastModified) primary = -1; else if (ra.LastModified > rb.LastModified) primary = 1;
+                        }
 
-                    if (primary == 0) {
-                        primary = FastCompareIgnoreCase(m_pool.GetString(ra.NamePoolOffset), m_pool.GetString(rb.NamePoolOffset));
-                    }
-                    if (primary == 0) primary = (a < b ? -1 : 1);
-                    
-                    return sortDescending ? (primary > 0) : (primary < 0);
-                });
+                        if (primary == 0) {
+                            primary = FastCompareIgnoreCase(m_pool.GetString(ra.NamePoolOffset), m_pool.GetString(rb.NamePoolOffset));
+                        }
+                        if (primary == 0) primary = (a < b ? -1 : 1);
+                        
+                        return sortDescending ? (primary > 0) : (primary < 0);
+                    });
+                } catch (const SortAbortedException&) {
+                    // Sort aborted
+                }
             }
         }
+
+        if (m_isSearchRequested) continue;
 
         {
             std::lock_guard<std::mutex> lock(m_resultBufferMutex);
             m_currentResults = std::move(results);
             m_resultsUpdated = true;
+        }
+        
+        if (m_hwndNotify) {
+            PostMessage((HWND)m_hwndNotify, WM_USER_SEARCH_FINISHED, 0, 0);
         }
         Logger::Log(L"[WhereIsIt] SearchThread: Sort and update complete.");
     }
@@ -949,7 +1063,9 @@ void IndexingEngine::HandleUsnJournalRecord(USN_RECORD_V2* r, uint8_t di) {
             uint32_t idx = m_mftLookupTables[di][mftIdx];
             if (idx != 0xFFFFFFFF && m_records[idx].MftSequence == seq) { 
                 m_records[idx].MftIndex = 0xFFFFFFFF; 
-                m_mftLookupTables[di][mftIdx] = 0xFFFFFFFF; 
+                m_mftLookupTables[di][mftIdx] = 0xFFFFFFFF;
+                // #6: Clear the pre-sorted index so a deleted entry is never referenced.
+                m_preSortedByName.clear();
             }
         }
     }
@@ -957,44 +1073,79 @@ void IndexingEngine::HandleUsnJournalRecord(USN_RECORD_V2* r, uint8_t di) {
     if (r->Reason & (USN_REASON_FILE_CREATE | USN_REASON_RENAME_NEW_NAME | USN_REASON_DATA_EXTEND | USN_REASON_DATA_TRUNCATION | USN_REASON_CLOSE)) {
         std::wstring name((LPCWSTR)((uint8_t*)r + r->FileNameOffset), r->FileNameLength/2);
         uint64_t fileSize = 0, lastMod = 0;
-        
+
+        // #4: Build fullPath under short shared lock, then do filesystem I/O OUTSIDE the lock.
+        // Previously GetFileAttributesExW was called while holding shared_lock — any slow disk
+        // (HDD/network/AV scan) would block all readers including SearchThread and paint.
+        std::wstring fullPath;
         {
             std::shared_lock<std::shared_mutex> lock(m_dataMutex);
-            // Reconstruct path to get attributes. 
-            // Note: Since we are in the middle of updates, the parent might not exist yet or might be stale.
-            // But we can try to find the parent in our records.
-            std::wstring fullPath;
             if (pIdx < (uint32_t)m_mftLookupTables[di].size()) {
                 uint32_t parentRecIdx = m_mftLookupTables[di][pIdx];
                 if (parentRecIdx != 0xFFFFFFFF) {
                     fullPath = GetFullPathInternal(parentRecIdx) + L"\\" + name;
                 }
             }
-            if (fullPath.empty()) fullPath = m_drives[di].Letter + name; // Fallback
+            if (fullPath.empty()) fullPath = m_drives[di].Letter + name;
+        } // shared lock released before filesystem call
 
-            WIN32_FILE_ATTRIBUTE_DATA att;
-            if (GetFileAttributesExW(fullPath.c_str(), GetFileExInfoStandard, &att)) {
-                fileSize = ((uint64_t)att.nFileSizeHigh << 32) | att.nFileSizeLow;
-                lastMod = ((uint64_t)att.ftLastWriteTime.dwHighDateTime << 32) | att.ftLastWriteTime.dwLowDateTime;
-            }
+        WIN32_FILE_ATTRIBUTE_DATA att;
+        if (GetFileAttributesExW(fullPath.c_str(), GetFileExInfoStandard, &att)) {
+            fileSize = ((uint64_t)att.nFileSizeHigh << 32) | att.nFileSizeLow;
+            lastMod  = ((uint64_t)att.ftLastWriteTime.dwHighDateTime << 32) | att.ftLastWriteTime.dwLowDateTime;
         }
         
         std::unique_lock<std::shared_mutex> lock(m_dataMutex);
-        FileRecord rec = { m_pool.AddString(name), pIdx, mftIdx, fileSize, lastMod, (uint16_t)r->FileAttributes, seq, pSeq, di };
         
-        if (mftIdx >= (uint32_t)m_mftLookupTables[di].size()) {
-            m_mftLookupTables[di].resize(mftIdx + 10000, 0xFFFFFFFF);
+        uint32_t existing = 0xFFFFFFFF;
+        if (mftIdx < (uint32_t)m_mftLookupTables[di].size()) {
+            existing = m_mftLookupTables[di][mftIdx];
         }
         
-        uint32_t existing = m_mftLookupTables[di][mftIdx];
-        if (existing != 0xFFFFFFFF) {
+        uint32_t nameOffset = 0;
+        if (existing != 0xFFFFFFFF && existing < m_records.size()) {
+            const char* existingNameUtf8 = m_pool.GetString(m_records[existing].NamePoolOffset);
+            std::string incomingNameUtf8 = WideToUtf8(name);
+            if (incomingNameUtf8 == existingNameUtf8) {
+                nameOffset = m_records[existing].NamePoolOffset;
+            }
+        }
+        
+        if (nameOffset == 0) {
+            try {
+                nameOffset = m_pool.AddString(name);
+            } catch (const std::bad_alloc&) {
+                Logger::Log(L"[WhereIsIt] bad_alloc allocating string pool in HandleUsnJournalRecord. Discarding record.");
+                return;
+            }
+        }
+        
+        FileRecord rec = { nameOffset, pIdx, mftIdx, fileSize, lastMod, (uint16_t)r->FileAttributes, seq, pSeq, di };
+        
+        if (mftIdx >= (uint32_t)m_mftLookupTables[di].size()) {
+            try {
+                m_mftLookupTables[di].resize(mftIdx + 10000, 0xFFFFFFFF);
+            } catch (const std::bad_alloc&) {
+                Logger::Log(L"[WhereIsIt] bad_alloc resizing m_mftLookupTables in HandleUsnJournalRecord. Discarding record.");
+                return;
+            }
+        }
+        
+        if (existing != 0xFFFFFFFF && existing < m_records.size()) {
             // Update existing record if sequence matches or is newer
             if (m_records[existing].MftSequence <= seq) {
+                if (m_records[existing].NamePoolOffset != rec.NamePoolOffset) m_preSortedByName.clear();
                 m_records[existing] = rec;
             }
         } else {
             uint32_t idx = (uint32_t)m_records.size();
-            m_records.push_back(rec);
+            try {
+                m_records.push_back(rec);
+                m_preSortedByName.clear();
+            } catch (const std::bad_alloc&) {
+                Logger::Log(L"[WhereIsIt] bad_alloc pushing to m_records in HandleUsnJournalRecord. Discarding record.");
+                return;
+            }
             m_mftLookupTables[di][mftIdx] = idx;
         }
     }
@@ -1002,23 +1153,70 @@ void IndexingEngine::HandleUsnJournalRecord(USN_RECORD_V2* r, uint8_t di) {
 
 void IndexingEngine::MonitorChanges() {
     auto buf = std::make_unique<uint8_t[]>(65536);
+    
+    std::vector<HANDLE> events;
+    for (uint8_t i = 0; i < (uint8_t)m_drives.size(); ++i) {
+        auto& d = m_drives[i]; 
+        if (d.VolumeHandle == INVALID_HANDLE_VALUE || d.Type != DriveFileSystem::NTFS) continue;
+        
+        HANDLE hChange = FindFirstChangeNotificationW(d.Letter.c_str(), TRUE, 
+            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | 
+            FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_SIZE | 
+            FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_CREATION);
+            
+        if (hChange != INVALID_HANDLE_VALUE) {
+            events.push_back(hChange);
+        }
+    }
+
     while (m_running) {
-        for (uint8_t i = 0; i < (uint8_t)m_drives.size(); ++i) {
-            auto& d = m_drives[i]; if (d.VolumeHandle == INVALID_HANDLE_VALUE || d.Type != DriveFileSystem::NTFS) continue;
-            USN_JOURNAL_DATA_V0 uj; DWORD cb; if (!DeviceIoControl(d.VolumeHandle, FSCTL_QUERY_USN_JOURNAL, NULL, 0, &uj, sizeof(uj), &cb, NULL)) continue;
-            READ_USN_JOURNAL_DATA_V0 rd = { (USN)d.LastProcessedUsn, 0xFFFFFFFF, FALSE, 0, 0, uj.UsnJournalID };
-            if (DeviceIoControl(d.VolumeHandle, FSCTL_READ_USN_JOURNAL, &rd, sizeof(rd), buf.get(), 65536, &cb, NULL)) {
-                if (cb > sizeof(USN)) {
-                    uint8_t* p = buf.get() + sizeof(USN);
-                    while (p < buf.get() + cb) { USN_RECORD_V2* record = (USN_RECORD_V2*)p; HandleUsnJournalRecord(record, i); p += record->RecordLength; }
-                    d.LastProcessedUsn = (uint64_t)(*(USN*)buf.get());
+        // #5: Use a longer idle timeout (2s) to reduce background CPU.
+        // USN journal is only polled when an actual filesystem change notification fires.
+        DWORD waitRes = events.empty()
+            ? WaitForSingleObject(GetCurrentThread(), 2000)   // pure sleep; USN still polled below
+            : WaitForMultipleObjects((DWORD)events.size(), events.data(), FALSE, 2000);
+        if (!m_running) break;
+
+        // Only read the USN journal if a change was actually signaled (or on fallback timeout
+        // for drives without change-notification handles, e.g. Generic FS drives).
+        bool shouldPollUsn = events.empty() || (waitRes != WAIT_TIMEOUT && waitRes != WAIT_FAILED);
+
+        if (shouldPollUsn) {
+            bool anyChanges = false;
+            for (uint8_t i = 0; i < (uint8_t)m_drives.size(); ++i) {
+                auto& d = m_drives[i]; if (d.VolumeHandle == INVALID_HANDLE_VALUE || d.Type != DriveFileSystem::NTFS) continue;
+                USN_JOURNAL_DATA_V0 uj; DWORD cb; if (!DeviceIoControl(d.VolumeHandle, FSCTL_QUERY_USN_JOURNAL, NULL, 0, &uj, sizeof(uj), &cb, NULL)) continue;
+                READ_USN_JOURNAL_DATA_V0 rd = { (USN)d.LastProcessedUsn, 0xFFFFFFFF, FALSE, 0, 0, uj.UsnJournalID };
+                if (DeviceIoControl(d.VolumeHandle, FSCTL_READ_USN_JOURNAL, &rd, sizeof(rd), buf.get(), 65536, &cb, NULL)) {
+                    if (cb > sizeof(USN)) {
+                        uint8_t* p = buf.get() + sizeof(USN);
+                        while (p < buf.get() + cb) { USN_RECORD_V2* record = (USN_RECORD_V2*)p; HandleUsnJournalRecord(record, i); p += record->RecordLength; }
+                        d.LastProcessedUsn = (uint64_t)(*(USN*)buf.get());
+                        anyChanges = true;
+                    }
+                } else if (GetLastError() == ERROR_JOURNAL_ENTRY_DELETED) {
+                    SetStatus(L"Journal Truncated. Sync lost.");
                 }
-            } else if (GetLastError() == ERROR_JOURNAL_ENTRY_DELETED) {
-                SetStatus(L"Journal Truncated. Sync lost.");
+            }
+            if (anyChanges) {
+                std::lock_guard<std::mutex> lock(m_searchSyncMutex);
+                m_isSearchRequested = true;
+                m_searchGeneration++;
+                m_searchEvent.notify_one();
             }
         }
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+
+        // Re-arm change notification handles that fired.
+        if (!events.empty() && waitRes != WAIT_TIMEOUT && waitRes != WAIT_FAILED) {
+            for (HANDLE h : events) {
+                if (WaitForSingleObject(h, 0) == WAIT_OBJECT_0) {
+                    FindNextChangeNotification(h);
+                }
+            }
+        }
     }
+    
+    for (HANDLE h : events) FindCloseChangeNotification(h);
 }
 
 bool IndexingEngine::DiscoverAllDrives() {
@@ -1235,6 +1433,7 @@ void IndexingEngine::ScanMftForDrive(DriveScanContext& ctx) {
                         if (rh->UpdateSeqOffset + rh->UpdateSeqSize * (uint32_t)sizeof(uint16_t) <= nt.BytesPerFileRecordSegment) {
                             uint16_t* usa = (uint16_t*)((uint8_t*)rh + rh->UpdateSeqOffset);
                             for (uint16_t s = 1; s < rh->UpdateSeqSize; s++) {
+                                if (s * 512u > nt.BytesPerFileRecordSegment) break;
                                 uint16_t* sectorEnd = (uint16_t*)((uint8_t*)rh + s * 512 - 2);
                                 if (*sectorEnd == usa[0]) *sectorEnd = usa[s];
                             }
@@ -1301,6 +1500,8 @@ void IndexingEngine::WorkerThread() {
     wchar_t debugBuf[256];
     swprintf_s(debugBuf, L"[WhereIsIt] Worker thread ready. Total records: %s. Triggering initial search.\n", FormatNumberWithCommas(m_records.size()).c_str());
     Logger::Log(debugBuf);
+
+    UpdatePreSortedIndex();
 
     SetStatus(L"Ready - " + FormatNumberWithCommas(m_records.size()) + L" items");
     m_ready = true;
