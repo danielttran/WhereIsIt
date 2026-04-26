@@ -204,7 +204,6 @@ private:
     std::condition_variable m_searchEvent;
     std::atomic<bool> m_isSearchRequested;
     std::atomic<bool> m_isSortOnlyRequested;
-    std::atomic<uint64_t> m_searchGeneration{ 0 };
     std::atomic<bool> m_resultsUpdated;
     std::shared_ptr<std::vector<uint32_t>> m_currentResults;
 };

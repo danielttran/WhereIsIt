@@ -769,7 +769,6 @@ void IndexingEngine::Search(const std::string& q) {
         std::lock_guard<std::mutex> lock(m_searchSyncMutex); 
         m_pendingSearchQuery = q; 
         m_isSearchRequested = true; 
-        m_searchGeneration++;
     }
     m_searchEvent.notify_one();
 }
@@ -780,7 +779,6 @@ void IndexingEngine::Sort(QuerySortKey key, bool descending) {
         m_currentSortKey = key;
         m_currentSortDescending = descending;
         m_isSortOnlyRequested = true;
-        m_searchGeneration++;
     }
     m_searchEvent.notify_one();
 }
@@ -1288,7 +1286,6 @@ void IndexingEngine::MonitorChanges() {
                 pendingChanges = false;
                 std::lock_guard<std::mutex> lock(m_searchSyncMutex);
                 m_isSearchRequested = true;
-                m_searchGeneration++;
                 m_searchEvent.notify_one();
             }
             continue;
@@ -1338,7 +1335,6 @@ void IndexingEngine::MonitorChanges() {
                 pendingChanges = false;
                 std::lock_guard<std::mutex> lock(m_searchSyncMutex);
                 m_isSearchRequested = true;
-                m_searchGeneration++;
                 m_searchEvent.notify_one();
             }
         }
