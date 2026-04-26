@@ -85,7 +85,7 @@ class StringPool {
 public:
     static constexpr size_t kChunkSize = 16 * 1024 * 1024;  // 16 MB per chunk
 
-    StringPool(size_t /*ignored*/ = 0);
+    StringPool(bool isShared = false);
     ~StringPool();
     uint32_t AddString(const std::wstring& text);
     uint32_t AddString(const wchar_t* text, size_t length);
@@ -113,6 +113,7 @@ private:
     std::vector<Chunk> m_chunks;
     size_t m_chunkUsed = 0;  // bytes used in the current (last) chunk
     size_t m_totalSize = 0;  // total bytes across all chunks
+    bool m_shared = false;
 
     // Ensure there is room for `needed` bytes in the current chunk,
     // allocating a new chunk if necessary.

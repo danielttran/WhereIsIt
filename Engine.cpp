@@ -379,6 +379,22 @@ static QueryPlan BuildQueryPlan(const std::string& rawQuery) {
     QueryParser parser(exprTokens);
     plan.Root = parser.Parse(plan.Success, plan.ErrorMessage);
 
+    if (!plan.Success) {
+        // Fallback: if the query contains invalid syntax (e.g. unmatched parentheses),
+        // treat the entire raw input as a single literal search term instead of throwing an error.
+        plan.Success = true;
+        plan.ErrorMessage.clear();
+        plan.Root = std::make_unique<QueryNode>();
+        plan.Root->Type = QueryNodeType::Term;
+        std::string rawTerm;
+        for (size_t i = 0; i < exprTokens.size(); ++i) {
+            if (i > 0) rawTerm += " ";
+            rawTerm += exprTokens[i];
+        }
+        plan.Root->Term = rawTerm;
+        plan.Root->TermLower = ToLowerAscii(rawTerm);
+    }
+
     if (plan.Success && plan.Config.RegexMode) {
         std::regex_constants::syntax_option_type options = std::regex_constants::ECMAScript;
         if (!plan.Config.CaseSensitive) options |= std::regex_constants::icase;
@@ -430,11 +446,14 @@ char* StringPool::Reserve(size_t needed) {
         size_t allocSize = (needed > kChunkSize) ? needed : kChunkSize;
         size_t chunkIdx = m_chunks.size();
         wchar_t mapName[64];
-        swprintf_s(mapName, L"Global\\WhereIsIt_PoolChunk_%zu", chunkIdx);
-        
-        HANDLE hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, GetPermissiveSA(), PAGE_READWRITE, 
-            (DWORD)(allocSize >> 32), (DWORD)(allocSize & 0xFFFFFFFF), mapName);
-        char* view = nullptr;
+        const wchar_t* pMapName = nullptr;
+        if (m_shared) {
+            swprintf_s(mapName, L"Global\\WhereIsIt_PoolChunk_%zu", chunkIdx);
+            pMapName = mapName;
+        }
+
+        HANDLE hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, GetPermissiveSA(), PAGE_READWRITE,
+            (DWORD)(allocSize >> 32), (DWORD)(allocSize & 0xFFFFFFFF), pMapName);        char* view = nullptr;
         if (hMap) {
             view = (char*)MapViewOfFile(hMap, FILE_MAP_WRITE, 0, 0, allocSize);
             if (!view) {
@@ -455,7 +474,7 @@ char* StringPool::Reserve(size_t needed) {
     return ptr;
 }
 
-StringPool::StringPool(size_t /*ignored*/) {
+StringPool::StringPool(bool isShared) : m_shared(isShared) {
     // Seed chunk 0 with a single null byte so offset 0 == empty string.
     Reserve(1)[0] = '\0';
 }
@@ -501,9 +520,26 @@ const char* StringPool::GetString(uint32_t offset) const {
 }
 
 void StringPool::LoadRawData(const char* data, size_t size) {
-    Clear();
-    if (size == 0) return;
+    for (auto& chunk : m_chunks) {
+        if (chunk.hMap) {
+            UnmapViewOfFile(chunk.data);
+            CloseHandle(chunk.hMap);
+        } else if (chunk.data) {
+            delete[] chunk.data;
+        }
+    }
+    m_chunks.clear();
+    m_chunkUsed = 0;
+    m_totalSize = 0;
+
+    if (size == 0) {
+        Reserve(1)[0] = '\0';
+        return;
+    }
+
     // Flat import: split the incoming buffer into kChunkSize pages.
+    // By keeping m_chunkUsed = 0 initially, Reserve(take) correctly maps the first
+    // 16MB of index.dat to chunk 0, instead of pushing it to chunk 1.
     size_t remaining = size;
     const char* src  = data;
     while (remaining > 0) {
@@ -573,7 +609,7 @@ void StringPool::WriteRawTo(uint8_t* dest) const {
 
 // --- IndexingEngine Implementation ---
 
-IndexingEngine::IndexingEngine() : m_running(false), m_ready(false), m_pool(20 * 1024 * 1024), m_isSearchRequested(false), m_isSortOnlyRequested(false) {
+IndexingEngine::IndexingEngine() : m_running(false), m_ready(false), m_pool(true), m_isSearchRequested(false), m_isSortOnlyRequested(false) {
     m_hDataMutex = CreateMutexW(GetPermissiveSA(), FALSE, L"Global\\WhereIsIt_DataMutex");
     
     // 640 MB for ~20 million records
@@ -1356,7 +1392,7 @@ void IndexingEngine::SearchThread() {
             {
                 std::shared_lock<std::shared_mutex> dataLock(m_dataMutex);
                 results->reserve(GetRecordCount());
-                bool usePreSorted = (sortKey == QuerySortKey::Name && !sortDescending && m_preSortedByName.size() == GetRecordCount());
+                bool usePreSorted = (sortKey == QuerySortKey::Name && !sortDescending && !m_preSortedByName.empty());
 
                 if (query.empty()) {
                     if (usePreSorted) {
@@ -1392,31 +1428,6 @@ void IndexingEngine::SearchThread() {
                     const char* needlePtr = needleLow.c_str();
                     const size_t needleLen = needleLow.size();
 
-                    // Streaming: post partial results to UI every ~50ms so user sees
-                    // results appearing immediately, not just after full scan completes.
-                    auto lastStreamTime = std::chrono::steady_clock::now();
-                    const auto streamInterval = std::chrono::milliseconds(50);
-
-                    auto maybeStreamResults = [&]() {
-                        if (!m_hwndNotify) return;
-                        auto now = std::chrono::steady_clock::now();
-                        if (now - lastStreamTime >= streamInterval) {
-                            // Cap partial copy at 50 000 entries so we never memcpy
-                            // megabytes every 50 ms — this would cause visible CPU spikes
-                            // for queries matching hundreds of thousands of files.
-                            // The full result set is published once the scan completes.
-                            size_t streamCount = (std::min)(results->size(), (size_t)50000);
-                            auto partial = std::make_shared<std::vector<uint32_t>>(
-                                results->begin(), results->begin() + (std::ptrdiff_t)streamCount);
-                            {
-                                std::lock_guard<std::mutex> lock(m_resultBufferMutex);
-                                m_currentResults = partial;
-                            }
-                            PostMessage(m_hwndNotify, WM_USER_SEARCH_FINISHED, 0, 0);
-                            lastStreamTime = now;
-                        }
-                    };
-
                     if (isSimpleQuery()) {
                         // FAST PATH: tight loop, zero allocation per record.
                         auto fastLoop = [&](uint32_t count, auto getIndex) {
@@ -1424,8 +1435,6 @@ void IndexingEngine::SearchThread() {
                                 // Check for new search request every 64 records.
                                 if ((i & 0x3F) == 0) {
                                     if (m_isSearchRequested.load(std::memory_order_relaxed)) return;
-                                    // Stream partial results every ~50ms.
-                                    if ((i & 0xFFF) == 0 && i > 0) maybeStreamResults();
                                 }
                                 uint32_t idx = getIndex(i);
                                 const auto& rec = m_recordsShared[idx];
@@ -1518,7 +1527,6 @@ void IndexingEngine::SearchThread() {
                                 for (uint32_t i = 0; i < count; ++i) {
                                     if ((i & 0x3F) == 0) {
                                         if (m_isSearchRequested.load(std::memory_order_relaxed)) return;
-                                        if ((i & 0xFFF) == 0 && i > 0) maybeStreamResults();
                                     }
                                     uint32_t idx = getIndex(i);
                                     const auto& rec = m_recordsShared[idx];
@@ -1558,7 +1566,6 @@ void IndexingEngine::SearchThread() {
                                 for (uint32_t i = 0; i < count; ++i) {
                                     if ((i & 0x3F) == 0) {
                                         if (m_isSearchRequested.load(std::memory_order_relaxed)) return;
-                                        if ((i & 0xFFF) == 0 && i > 0) maybeStreamResults();
                                     }
                                     uint32_t idx = getIndex(i);
                                     const auto& rec = m_recordsShared[idx];
@@ -1589,7 +1596,7 @@ void IndexingEngine::SearchThread() {
         {
             std::shared_lock<std::shared_mutex> dataLock(m_dataMutex);
             
-            bool usePreSorted = (sortKey == QuerySortKey::Name && !sortDescending && m_preSortedByName.size() == GetRecordCount());
+            bool usePreSorted = (sortKey == QuerySortKey::Name && !sortDescending && !m_preSortedByName.empty());
             
             if (usePreSorted) {
                 // Already sorted!
@@ -1950,10 +1957,10 @@ void IndexingEngine::MonitorChanges() {
             }
         }
 
-        // Re-arm change notification handles that fired.
-        for (size_t hi = 1; hi < waitHandles.size(); ++hi) {
-            if (WaitForSingleObject(waitHandles[hi], 0) == WAIT_OBJECT_0)
-                FindNextChangeNotification(waitHandles[hi]);
+        // Re-arm ONLY the handle that fired.
+        // Calling FindNextChangeNotification on un-signaled handles causes infinite spin.
+        if (waitRes >= WAIT_OBJECT_0 + 1 && waitRes < WAIT_OBJECT_0 + waitHandles.size()) {
+            FindNextChangeNotification(waitHandles[waitRes - WAIT_OBJECT_0]);
         }
     }
 

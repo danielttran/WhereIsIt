@@ -301,15 +301,17 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
                 std::wstring p2 = nameStr.substr(matchPos, matchLen);
                 std::wstring p3 = nameStr.substr(matchPos + matchLen);
 
+                RECT r1 = rect;
                 SelectObject(pcd->nmcd.hdc, g_FontNormal);
-                DrawTextW(pcd->nmcd.hdc, p1.c_str(), -1, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
+                DrawTextW(pcd->nmcd.hdc, p1.c_str(), -1, &r1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
                 DrawTextW(pcd->nmcd.hdc, p1.c_str(), -1, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                rect.left = rect.right; rect.right = pcd->nmcd.rc.right;
+                rect.left = r1.right;
 
+                RECT r2 = rect;
                 SelectObject(pcd->nmcd.hdc, g_FontBold);
-                DrawTextW(pcd->nmcd.hdc, p2.c_str(), -1, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
+                DrawTextW(pcd->nmcd.hdc, p2.c_str(), -1, &r2, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
                 DrawTextW(pcd->nmcd.hdc, p2.c_str(), -1, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                rect.left = rect.right; rect.right = pcd->nmcd.rc.right;
+                rect.left = r2.right;
 
                 SelectObject(pcd->nmcd.hdc, g_FontNormal);
                 DrawTextW(pcd->nmcd.hdc, p3.c_str(), -1, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
