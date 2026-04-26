@@ -801,10 +801,10 @@ void IndexingEngine::SearchThread() {
         const std::string& low = node->TermLower;
 
         if (low.rfind("ext:", 0) == 0) {
-            const std::string ext = low.substr(4);
-            std::string nameLower = ToLowerAscii(name);
-            size_t dot = nameLower.find_last_of('.');
-            return dot != std::string::npos && dot + 1 < nameLower.size() && nameLower.substr(dot + 1) == ext;
+            // Zero-allocation: use raw pointer into TermLower and scan name directly.
+            const char* extNeedle = node->TermLower.c_str() + 4;
+            const char* dot = strrchr(name.c_str(), '.');
+            return dot && *(dot + 1) && (FastCompareIgnoreCase(dot + 1, extNeedle) == 0);
         }
         if (low.rfind("path:", 0) == 0) return FastContains(getFullPath(), term.substr(5), false);
         if (low.rfind("attr:", 0) == 0 || low.rfind("attrib:", 0) == 0) {
@@ -869,7 +869,12 @@ void IndexingEngine::SearchThread() {
                 if (filePart.find_first_of("*?") != std::string::npos) {
                     matchName = WildcardMatchIAscii(filePart.c_str(), name.c_str());
                 } else {
-                    matchName = FastContains(name, filePart, plan.Config.CaseSensitive);
+                    // Exact filename match: C:\Windows\dd.exe must only match "dd.exe",
+                    // not substrings like "odd.exe". Wildcard form *dd.exe is handled above.
+                    if (plan.Config.CaseSensitive)
+                        matchName = (name == filePart);
+                    else
+                        matchName = (FastCompareIgnoreCase(name.c_str(), filePart.c_str()) == 0);
                 }
                 if (!matchName) return false;
             }
@@ -988,8 +993,13 @@ void IndexingEngine::SearchThread() {
                         if (!m_hwndNotify) return;
                         auto now = std::chrono::steady_clock::now();
                         if (now - lastStreamTime >= streamInterval) {
-                            // Publish a snapshot of current results so far.
-                            auto partial = std::make_shared<std::vector<uint32_t>>(*results);
+                            // Cap partial copy at 50 000 entries so we never memcpy
+                            // megabytes every 50 ms — this would cause visible CPU spikes
+                            // for queries matching hundreds of thousands of files.
+                            // The full result set is published once the scan completes.
+                            size_t streamCount = std::min(results->size(), (size_t)50000);
+                            auto partial = std::make_shared<std::vector<uint32_t>>(
+                                results->begin(), results->begin() + (std::ptrdiff_t)streamCount);
                             {
                                 std::lock_guard<std::mutex> lock(m_resultBufferMutex);
                                 m_currentResults = partial;
@@ -1023,31 +1033,98 @@ void IndexingEngine::SearchThread() {
                         else
                             fastLoop((uint32_t)m_records.size(), [&](uint32_t i) { return i; });
                     } else {
-                        // FULL PATH: complex query with operators/modifiers — uses evaluateTerm.
-                        auto evalLoop = [&](uint32_t count, auto getIndex) {
-                            for (uint32_t i = 0; i < count; ++i) {
-                                if ((i & 0x3F) == 0) {
-                                    if (m_isSearchRequested.load(std::memory_order_relaxed)) return;
-                                    if ((i & 0xFFF) == 0 && i > 0) maybeStreamResults();
-                                }
-                                uint32_t idx = getIndex(i);
-                                const auto& rec = m_records[idx];
-                                if (rec.MftIndex == 0xFFFFFFFF) continue;
-                                const std::string nameStr(m_pool.GetString(rec.NamePoolOffset));
-                                std::string cachedPath;
-                                bool pathCached = false;
-                                auto getPath = [&]() -> std::string {
-                                    if (!pathCached) { cachedPath = WideToUtf8(GetFullPathInternal(idx)); pathCached = true; }
-                                    return cachedPath;
-                                };
-                                if (evaluateTerm(plan.Root.get(), plan, rec, nameStr, getPath))
-                                    results->push_back(idx);
+                        // MEDIUM FAST PATH: single-term path query (e.g. C:\Windows\*.exe).
+                        // Detects queries that contain a slash but no operators, spaces, quotes,
+                        // or operator-colons (drive-letter colon at position 1 is allowed).
+                        // Checks filename via raw pool pointer (zero allocation); builds full
+                        // path lazily only for records whose filename already matched.
+                        auto isPathQuery = [&]() -> bool {
+                            if (plan.Root == nullptr || plan.Root->Type != QueryNodeType::Term) return false;
+                            if (plan.Config.RegexMode || plan.Config.WholeWord) return false;
+                            bool hasSlash = false;
+                            for (size_t ci = 0; ci < query.size(); ++ci) {
+                                char c = query[ci];
+                                if (c == ' ' || c == '\t' || c == '(' || c == ')' || c == '"') return false;
+                                if (c == '\\' || c == '/') { hasSlash = true; continue; }
+                                // Allow colon only as drive-letter separator (position 1)
+                                if (c == ':' && ci != 1) return false;
                             }
+                            return hasSlash;
                         };
-                        if (usePreSorted)
-                            evalLoop((uint32_t)m_preSortedByName.size(), [&](uint32_t i) { return m_preSortedByName[i]; });
-                        else
-                            evalLoop((uint32_t)m_records.size(), [&](uint32_t i) { return i; });
+
+                        if (isPathQuery()) {
+                            const std::string& term = query;
+                            size_t lastSlash = term.find_last_of("\\/");
+                            std::string dirPart  = term.substr(0, lastSlash + 1);
+                            std::string filePart = term.substr(lastSlash + 1);
+                            bool fileHasWildcard = !filePart.empty() && filePart.find_first_of("*?") != std::string::npos;
+                            bool caseSensitive   = plan.Config.CaseSensitive;
+
+                            auto pathLoop = [&](uint32_t count, auto getIndex) {
+                                for (uint32_t i = 0; i < count; ++i) {
+                                    if ((i & 0x3F) == 0) {
+                                        if (m_isSearchRequested.load(std::memory_order_relaxed)) return;
+                                        if ((i & 0xFFF) == 0 && i > 0) maybeStreamResults();
+                                    }
+                                    uint32_t idx = getIndex(i);
+                                    const auto& rec = m_records[idx];
+                                    if (rec.MftIndex == 0xFFFFFFFF) continue;
+
+                                    const char* name = m_pool.GetString(rec.NamePoolOffset);
+
+                                    // 1. Check filename (no allocation, no full-path construction)
+                                    if (!filePart.empty()) {
+                                        bool matchName = false;
+                                        if (fileHasWildcard) {
+                                            matchName = WildcardMatchIAscii(filePart.c_str(), name);
+                                        } else {
+                                            matchName = caseSensitive
+                                                ? (strcmp(name, filePart.c_str()) == 0)
+                                                : (FastCompareIgnoreCase(name, filePart.c_str()) == 0);
+                                        }
+                                        if (!matchName) continue;
+                                    }
+
+                                    // 2. Filename matched — now check dir (lazy, only for hits)
+                                    if (!dirPart.empty()) {
+                                        std::string fullPath = WideToUtf8(GetFullPathInternal(idx));
+                                        if (!FastContains(fullPath, dirPart, caseSensitive)) continue;
+                                    }
+
+                                    results->push_back(idx);
+                                }
+                            };
+                            if (usePreSorted)
+                                pathLoop((uint32_t)m_preSortedByName.size(), [&](uint32_t i) { return m_preSortedByName[i]; });
+                            else
+                                pathLoop((uint32_t)m_records.size(), [&](uint32_t i) { return i; });
+                        } else {
+                            // FULL PATH: complex query with operators/modifiers — uses evaluateTerm.
+                            auto evalLoop = [&](uint32_t count, auto getIndex) {
+                                for (uint32_t i = 0; i < count; ++i) {
+                                    if ((i & 0x3F) == 0) {
+                                        if (m_isSearchRequested.load(std::memory_order_relaxed)) return;
+                                        if ((i & 0xFFF) == 0 && i > 0) maybeStreamResults();
+                                    }
+                                    uint32_t idx = getIndex(i);
+                                    const auto& rec = m_records[idx];
+                                    if (rec.MftIndex == 0xFFFFFFFF) continue;
+                                    const std::string nameStr(m_pool.GetString(rec.NamePoolOffset));
+                                    std::string cachedPath;
+                                    bool pathCached = false;
+                                    auto getPath = [&]() -> std::string {
+                                        if (!pathCached) { cachedPath = WideToUtf8(GetFullPathInternal(idx)); pathCached = true; }
+                                        return cachedPath;
+                                    };
+                                    if (evaluateTerm(plan.Root.get(), plan, rec, nameStr, getPath))
+                                        results->push_back(idx);
+                                }
+                            };
+                            if (usePreSorted)
+                                evalLoop((uint32_t)m_preSortedByName.size(), [&](uint32_t i) { return m_preSortedByName[i]; });
+                            else
+                                evalLoop((uint32_t)m_records.size(), [&](uint32_t i) { return i; });
+                        }
                     }
                 }
             }
@@ -1278,9 +1355,12 @@ void IndexingEngine::MonitorChanges() {
         if (waitRes == WAIT_FAILED) break;
 
         if (hDebounceTimer && waitRes == debounceIdx) {
-            // Debounce timer fired — changes have settled, now trigger the re-search.
+            // Debounce timer fired — changes have settled, now rebuild pre-sorted index
+            // and trigger a re-search. Rebuilding here keeps the keyword fast path valid
+            // after file-system changes and avoids linear scans on empty-query display.
             if (pendingChanges && m_running) {
                 pendingChanges = false;
+                UpdatePreSortedIndex();
                 std::lock_guard<std::mutex> lock(m_searchSyncMutex);
                 m_isSearchRequested = true;
                 m_searchEvent.notify_one();
