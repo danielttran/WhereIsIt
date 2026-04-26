@@ -17,7 +17,8 @@
 #include <windows.h>
 #include <winioctl.h>
 
-#define WM_USER_SEARCH_FINISHED (WM_USER + 1)
+#define WM_USER_SEARCH_FINISHED  (WM_USER + 1)
+#define WM_USER_STATUS_CHANGED   (WM_USER + 2)  // engine posts when status text changes
 
 std::wstring FormatNumberWithCommas(size_t n);
 
@@ -116,6 +117,8 @@ public:
     void SetStatus(const std::wstring& status) {
         std::lock_guard<std::mutex> lock(m_statusMutex);
         m_status = status;
+        // Post event-driven notification — no polling timer needed in the UI.
+        if (m_hwndNotify) PostMessage(m_hwndNotify, WM_USER_STATUS_CHANGED, 0, 0);
     }
     std::wstring GetCurrentStatus() const {
         std::lock_guard<std::mutex> lock(m_statusMutex);
@@ -173,6 +176,7 @@ private:
     mutable std::mutex m_statusMutex;
     std::wstring m_status;
     HWND m_hwndNotify = NULL;
+    HANDLE m_stopEvent = NULL;  // Manual-reset event; set on Stop() to wake MonitorChanges cleanly.
     
     struct DriveContext { 
         std::wstring Letter; 

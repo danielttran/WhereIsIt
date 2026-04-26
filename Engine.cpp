@@ -405,6 +405,8 @@ IndexingEngine::~IndexingEngine() { Stop(); }
 
 void IndexingEngine::Start() {
     if (m_running) return;
+    // Create a manual-reset event used to wake MonitorChanges immediately on Stop().
+    m_stopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
     m_running = true;
     m_mainWorker = std::thread(&IndexingEngine::WorkerThread, this);
     m_searchWorker = std::thread(&IndexingEngine::SearchThread, this);
@@ -421,9 +423,13 @@ void IndexingEngine::CloseAllDriveHandles() {
 
 void IndexingEngine::Stop() {
     m_running = false;
+    // Signal m_stopEvent so MonitorChanges wakes from WaitForMultipleObjects immediately
+    // rather than blocking up to the next timeout.
+    if (m_stopEvent) SetEvent(m_stopEvent);
     m_searchEvent.notify_all();
     if (m_mainWorker.joinable()) m_mainWorker.join();
     if (m_searchWorker.joinable()) m_searchWorker.join();
+    if (m_stopEvent) { CloseHandle(m_stopEvent); m_stopEvent = NULL; }
     CloseAllDriveHandles();
 }
 
@@ -1234,70 +1240,116 @@ void IndexingEngine::HandleUsnJournalRecord(USN_RECORD_V2* r, uint8_t di) {
 
 void IndexingEngine::MonitorChanges() {
     auto buf = std::make_unique<uint8_t[]>(65536);
-    
-    std::vector<HANDLE> events;
+
+    // Build the wait-handle array:
+    // Slot 0 is always m_stopEvent (so Stop() wakes us immediately).
+    // Slots 1..N are FindFirstChangeNotification handles for each NTFS drive.
+    std::vector<HANDLE> waitHandles;
+    waitHandles.push_back(m_stopEvent);  // index 0 = stop signal
+
     for (uint8_t i = 0; i < (uint8_t)m_drives.size(); ++i) {
-        auto& d = m_drives[i]; 
+        auto& d = m_drives[i];
         if (d.VolumeHandle == INVALID_HANDLE_VALUE || d.Type != DriveFileSystem::NTFS) continue;
-        
-        HANDLE hChange = FindFirstChangeNotificationW(d.Letter.c_str(), TRUE, 
-            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | 
-            FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_SIZE | 
+        HANDLE hChange = FindFirstChangeNotificationW(d.Letter.c_str(), TRUE,
+            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
+            FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_SIZE |
             FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_CREATION);
-            
-        if (hChange != INVALID_HANDLE_VALUE) {
-            events.push_back(hChange);
-        }
+        if (hChange != INVALID_HANDLE_VALUE)
+            waitHandles.push_back(hChange);
     }
 
+    // Debounce: accumulate file-system changes for this long before triggering a re-search.
+    // Prevents background apps (AV, build tools, indexers) causing continuous re-scanning.
+    const DWORD kDebounceMs = 300;
+    // Waitable timer used for debounce. NULL until first change detected.
+    HANDLE hDebounceTimer = CreateWaitableTimerW(NULL, TRUE, NULL);
+
+    // If we have a debounce timer, add it to the wait array.
+    bool pendingChanges = false;
+    if (hDebounceTimer) waitHandles.push_back(hDebounceTimer);
+    DWORD debounceIdx = hDebounceTimer ? (DWORD)(waitHandles.size() - 1) : WAIT_FAILED;
+
     while (m_running) {
-        // #5: Use a longer idle timeout (2s) to reduce background CPU.
-        // USN journal is only polled when an actual filesystem change notification fires.
-        DWORD waitRes = events.empty()
-            ? WaitForSingleObject(GetCurrentThread(), 2000)   // pure sleep; USN still polled below
-            : WaitForMultipleObjects((DWORD)events.size(), events.data(), FALSE, 2000);
-        if (!m_running) break;
+        // Fully event-driven: block until one of:
+        //   [0] m_stopEvent   — Stop() was called
+        //   [1..N] change notifications — filesystem changed
+        //   [N+1] debounce timer  — debounce period elapsed, time to trigger search
+        // No polling, no busy loops, no CPU usage while idle.
+        DWORD waitMs = INFINITE;  // block forever until a real event fires
+        DWORD waitRes = WaitForMultipleObjects(
+            (DWORD)waitHandles.size(), waitHandles.data(), FALSE, waitMs);
 
-        // Only read the USN journal if a change was actually signaled (or on fallback timeout
-        // for drives without change-notification handles, e.g. Generic FS drives).
-        bool shouldPollUsn = events.empty() || (waitRes != WAIT_TIMEOUT && waitRes != WAIT_FAILED);
+        if (!m_running || waitRes == WAIT_OBJECT_0) break;  // stop event
+        if (waitRes == WAIT_FAILED) break;
 
-        if (shouldPollUsn) {
-            bool anyChanges = false;
-            for (uint8_t i = 0; i < (uint8_t)m_drives.size(); ++i) {
-                auto& d = m_drives[i]; if (d.VolumeHandle == INVALID_HANDLE_VALUE || d.Type != DriveFileSystem::NTFS) continue;
-                USN_JOURNAL_DATA_V0 uj; DWORD cb; if (!DeviceIoControl(d.VolumeHandle, FSCTL_QUERY_USN_JOURNAL, NULL, 0, &uj, sizeof(uj), &cb, NULL)) continue;
-                READ_USN_JOURNAL_DATA_V0 rd = { (USN)d.LastProcessedUsn, 0xFFFFFFFF, FALSE, 0, 0, uj.UsnJournalID };
-                if (DeviceIoControl(d.VolumeHandle, FSCTL_READ_USN_JOURNAL, &rd, sizeof(rd), buf.get(), 65536, &cb, NULL)) {
-                    if (cb > sizeof(USN)) {
-                        uint8_t* p = buf.get() + sizeof(USN);
-                        while (p < buf.get() + cb) { USN_RECORD_V2* record = (USN_RECORD_V2*)p; HandleUsnJournalRecord(record, i); p += record->RecordLength; }
-                        d.LastProcessedUsn = (uint64_t)(*(USN*)buf.get());
-                        anyChanges = true;
-                    }
-                } else if (GetLastError() == ERROR_JOURNAL_ENTRY_DELETED) {
-                    SetStatus(L"Journal Truncated. Sync lost.");
-                }
+        if (hDebounceTimer && waitRes == debounceIdx) {
+            // Debounce timer fired — changes have settled, now trigger the re-search.
+            if (pendingChanges && m_running) {
+                pendingChanges = false;
+                std::lock_guard<std::mutex> lock(m_searchSyncMutex);
+                m_isSearchRequested = true;
+                m_searchGeneration++;
+                m_searchEvent.notify_one();
             }
-            if (anyChanges) {
+            continue;
+        }
+
+        // A filesystem change notification fired. Poll USN journal to absorb it.
+        bool anyChanges = false;
+        for (uint8_t i = 0; i < (uint8_t)m_drives.size(); ++i) {
+            auto& d = m_drives[i];
+            if (d.VolumeHandle == INVALID_HANDLE_VALUE || d.Type != DriveFileSystem::NTFS) continue;
+            USN_JOURNAL_DATA_V0 uj; DWORD cb;
+            if (!DeviceIoControl(d.VolumeHandle, FSCTL_QUERY_USN_JOURNAL, NULL, 0, &uj, sizeof(uj), &cb, NULL)) continue;
+            READ_USN_JOURNAL_DATA_V0 rd = { (USN)d.LastProcessedUsn, 0xFFFFFFFF, FALSE, 0, 0, uj.UsnJournalID };
+            if (DeviceIoControl(d.VolumeHandle, FSCTL_READ_USN_JOURNAL, &rd, sizeof(rd), buf.get(), 65536, &cb, NULL)) {
+                if (cb > sizeof(USN)) {
+                    uint8_t* p = buf.get() + sizeof(USN);
+                    while (p < buf.get() + cb) {
+                        USN_RECORD_V2* record = (USN_RECORD_V2*)p;
+                        HandleUsnJournalRecord(record, i);
+                        p += record->RecordLength;
+                    }
+                    d.LastProcessedUsn = (uint64_t)(*(USN*)buf.get());
+                    anyChanges = true;
+                }
+            } else if (GetLastError() == ERROR_JOURNAL_ENTRY_DELETED) {
+                SetStatus(L"Journal Truncated. Sync lost.");
+            }
+        }
+
+        // Re-arm change notification handles that fired.
+        for (size_t hi = 1; hi < waitHandles.size(); ++hi) {
+            if (waitHandles[hi] == hDebounceTimer) continue;
+            if (WaitForSingleObject(waitHandles[hi], 0) == WAIT_OBJECT_0)
+                FindNextChangeNotification(waitHandles[hi]);
+        }
+
+        if (anyChanges) {
+            // Start/reset the debounce timer. If more changes come in before it fires,
+            // it gets reset again — search only triggers once changes settle.
+            pendingChanges = true;
+            if (hDebounceTimer) {
+                LARGE_INTEGER due;
+                due.QuadPart = -(LONGLONG)kDebounceMs * 10000LL;  // relative, in 100ns units
+                SetWaitableTimer(hDebounceTimer, &due, 0, NULL, NULL, FALSE);
+            } else {
+                // No timer available: trigger immediately (fallback).
+                pendingChanges = false;
                 std::lock_guard<std::mutex> lock(m_searchSyncMutex);
                 m_isSearchRequested = true;
                 m_searchGeneration++;
                 m_searchEvent.notify_one();
             }
         }
-
-        // Re-arm change notification handles that fired.
-        if (!events.empty() && waitRes != WAIT_TIMEOUT && waitRes != WAIT_FAILED) {
-            for (HANDLE h : events) {
-                if (WaitForSingleObject(h, 0) == WAIT_OBJECT_0) {
-                    FindNextChangeNotification(h);
-                }
-            }
-        }
     }
-    
-    for (HANDLE h : events) FindCloseChangeNotification(h);
+
+    // Cleanup
+    if (hDebounceTimer) CloseHandle(hDebounceTimer);
+    for (size_t hi = 1; hi < waitHandles.size(); ++hi) {
+        if (waitHandles[hi] != hDebounceTimer)
+            FindCloseChangeNotification(waitHandles[hi]);
+    }
 }
 
 bool IndexingEngine::DiscoverAllDrives() {

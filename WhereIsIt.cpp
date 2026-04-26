@@ -353,7 +353,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         lf.lfWeight = FW_BOLD; g_FontBold = CreateFontIndirect(&lf);
         SendMessage(hSearchEdit, WM_SETFONT, (WPARAM)g_FontNormal, TRUE);
         g_Engine.SetNotifyWindow(hWnd);
-        SetTimer(hWnd, 1, 500, NULL);
+        // No polling timer needed — status bar updates are event-driven via WM_USER_STATUS_CHANGED.
         break;
     }
     case WM_CONTEXTMENU: {
@@ -379,12 +379,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         break;
     }
-    case WM_TIMER:
-        if (wParam == 1) {
-            if (g_CurrentQueryW[0] != 0) {
-                std::wstring status = FormatNumberWithCommas(g_ActiveResults ? g_ActiveResults->size() : 0) + L" objects";
-                SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)status.c_str());
-            } else SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)g_Engine.GetCurrentStatus().c_str());
+    case WM_USER_STATUS_CHANGED:
+        // Engine posted this when status changed — update status bar immediately, no polling.
+        if (g_CurrentQueryW[0] != 0) {
+            if (g_ActiveResults) {
+                std::wstring s = FormatNumberWithCommas(g_ActiveResults->size()) + L" objects";
+                SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)s.c_str());
+            }
+        } else {
+            SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)g_Engine.GetCurrentStatus().c_str());
         }
         break;
     case WM_USER_SEARCH_FINISHED:
