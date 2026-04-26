@@ -10,6 +10,8 @@
 #include <condition_variable>
 #include <memory>
 #include <unordered_set>
+#include <unordered_map>
+#include <list>
 #include <chrono>
 
 #define WIN32_LEAN_AND_MEAN
@@ -40,17 +42,21 @@ enum class QuerySortKey { Name, Path, Size, Date };
 
 #pragma pack(push, 1)
 struct FileRecord {
-    uint32_t NamePoolOffset; 
-    uint32_t ParentMftIndex; 
-    uint32_t MftIndex;      
-    uint64_t FileSize;      
-    uint64_t LastModified;  
-    uint16_t FileAttributes;
-    uint16_t MftSequence;   
+    uint32_t NamePoolOffset;
+    uint32_t ParentMftIndex;
+    uint32_t MftIndex;
+    uint32_t LastModifiedEpoch;
+    uint32_t FileSize;
+    uint16_t MftSequence;
     uint16_t ParentSequence;
-    uint8_t  DriveIndex;    
+    uint32_t DriveIndex : 6;
+    uint32_t IsGiantFile : 1;
+    uint32_t FileAttributes : 16;
+    uint32_t Reserved : 9;
+    uint32_t Padding;
 };
 #pragma pack(pop)
+static_assert(sizeof(FileRecord) == 32, "FileRecord MUST be exactly 32 bytes for cache alignment");
 
 // Internal NTFS Direct-Disk Structures
 #pragma pack(push, 1)
@@ -107,6 +113,8 @@ public:
     void SetNotifyWindow(HWND hwnd) { m_hwndNotify = hwnd; }
 
     FileRecord GetRecord(uint32_t recordIndex) const;
+    uint64_t GetRecordFileSize(uint32_t recordIndex) const;
+    uint64_t GetRecordLastModifiedFileTime(uint32_t recordIndex) const;
     std::wstring GetRecordName(uint32_t recordIndex) const;
     // Single-lock fetch of both record and name — use in hot paint paths to halve lock acquisitions.
     std::pair<FileRecord, std::wstring> GetRecordAndName(uint32_t recordIndex) const;
@@ -125,9 +133,23 @@ public:
     std::wstring GetParentPath(uint32_t recordIndex) const;
 
 private:
+    struct PendingUsnDelta {
+        enum class Kind { Upsert, Delete } Type = Kind::Upsert;
+        uint8_t DriveIndex = 0;
+        uint32_t MftIndex = 0;
+        uint16_t MftSequence = 0;
+        uint32_t ParentMftIndex = 0;
+        uint16_t ParentSequence = 0;
+        std::wstring Name;
+        uint64_t FileSize = 0;
+        uint64_t LastModified = 0;
+        uint16_t FileAttributes = 0;
+    };
+
     struct DriveScanContext {
         std::vector<FileRecord> Records;
         std::vector<uint32_t> LookupTable;
+        std::unordered_map<uint32_t, uint64_t> GiantFileSizes;
         StringPool Pool;
         uint8_t DriveIndex;
         std::wstring DriveLetter;
@@ -163,6 +185,12 @@ private:
     static bool WildcardMatchI(const wchar_t* pattern, const wchar_t* text);
     void CloseAllDriveHandles();
     void UpdatePreSortedIndex();
+    void EnqueueUsnDelta(PendingUsnDelta&& delta);
+    void ApplyPendingUsnDeltas();
+    std::wstring GetWideNameFromPoolOffsetCached(uint32_t namePoolOffset) const;
+    uint32_t FileTimeToEpoch(uint64_t fileTime) const;
+    uint64_t EpochToFileTime(uint32_t epoch) const;
+    uint64_t ResolveFileSize(const FileRecord& rec, uint32_t recordIndex) const;
 
     std::thread m_mainWorker;
     std::thread m_searchWorker;
@@ -186,11 +214,20 @@ private:
     std::vector<FileRecord> m_records;
     std::vector<uint32_t> m_preSortedByName;
     std::vector<std::vector<uint32_t>> m_mftLookupTables;
+    std::unordered_map<uint32_t, uint64_t> m_giantFileSizes;
     StringPool m_pool;
     IndexScopeConfig m_scopeConfig;
     mutable std::mutex m_scopeConfigMutex;
 
     mutable std::shared_mutex m_dataMutex;
+    std::mutex m_usnDeltaMutex;
+    std::vector<PendingUsnDelta> m_pendingUsnDeltas;
+    std::chrono::steady_clock::time_point m_lastUsnMerge = std::chrono::steady_clock::now();
+
+    mutable std::mutex m_nameCacheMutex;
+    mutable std::list<uint32_t> m_nameCacheLru;
+    mutable std::unordered_map<uint32_t, std::pair<std::wstring, std::list<uint32_t>::iterator>> m_nameCache;
+    static constexpr size_t kWideNameCacheCapacity = 256;
     std::string m_pendingSearchQuery;
     QuerySortKey m_currentSortKey = QuerySortKey::Name;
     bool m_currentSortDescending = false;
