@@ -180,6 +180,7 @@ public:
     void Search(const std::string& query) override;
     void Sort(QuerySortKey key, bool descending) override;
     std::shared_ptr<std::vector<uint32_t>> GetSearchResults() override;
+    std::shared_ptr<std::vector<uint32_t>> WaitForNewResults(const std::shared_ptr<std::vector<uint32_t>>& prev, int timeoutMs);
     void SetNotifyWindow(HWND hwnd) override { m_hwndNotify = hwnd; }
 
     FileRecord GetRecord(uint32_t recordIndex) const override;
@@ -318,4 +319,5 @@ private:
     std::atomic<bool> m_isSearchRequested;
     std::atomic<bool> m_isSortOnlyRequested;
     std::shared_ptr<std::vector<uint32_t>> m_currentResults;
+    std::condition_variable m_resultCv;
 };

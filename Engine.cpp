@@ -674,7 +674,15 @@ void IndexingEngine::Stop() {
 }
 
 std::shared_ptr<std::vector<uint32_t>> IndexingEngine::GetSearchResults() {
-    std::lock_guard<std::mutex> lock(m_resultBufferMutex);
+    std::unique_lock<std::mutex> lock(m_resultBufferMutex);
+    return m_currentResults;
+}
+
+std::shared_ptr<std::vector<uint32_t>> IndexingEngine::WaitForNewResults(const std::shared_ptr<std::vector<uint32_t>>& prev, int timeoutMs) {
+    std::unique_lock<std::mutex> lock(m_resultBufferMutex);
+    m_resultCv.wait_for(lock, std::chrono::milliseconds(timeoutMs), [this, &prev] {
+        return m_currentResults != prev;
+    });
     return m_currentResults;
 }
 
@@ -1669,6 +1677,8 @@ void IndexingEngine::SearchThread() {
             }
             m_currentResults = std::move(results);
         }
+        
+        m_resultCv.notify_all();
         
         if (m_hwndNotify && changed) {
             PostMessage((HWND)m_hwndNotify, WM_USER_SEARCH_FINISHED, 0, 0);

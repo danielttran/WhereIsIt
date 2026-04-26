@@ -105,16 +105,7 @@ static std::shared_ptr<std::vector<uint32_t>> WaitForNewResults(
     IndexingEngine* engine,
     const std::shared_ptr<std::vector<uint32_t>>& prevResults)
 {
-    auto deadline = std::chrono::steady_clock::now() +
-                    std::chrono::milliseconds(kSearchTimeoutMs);
-
-    while (std::chrono::steady_clock::now() < deadline) {
-        auto r = engine->GetSearchResults();
-        if (r && r != prevResults) return r;
-        Sleep(kSearchPollMs);
-    }
-
-    auto r = engine->GetSearchResults();
+    auto r = engine->WaitForNewResults(prevResults, kSearchTimeoutMs);
     return r ? r : std::make_shared<std::vector<uint32_t>>();
 }
 
