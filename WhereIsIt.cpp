@@ -91,7 +91,7 @@ bool g_iconWorkerRunning = false;
 
 // --- UI FORMATTING HELPERS ---
 
-int GetIconIndex(const std::wstring& filename, uint16_t attributes, uint32_t recordIdx) {
+int GetIconIndex(const std::wstring& /*filename*/, uint16_t attributes, uint32_t recordIdx) {
     if (attributes & FILE_ATTRIBUTE_DIRECTORY) {
         if (g_folderIconIdx != -1) return g_folderIconIdx;
         SHFILEINFOW sfi = { 0 }; 
@@ -451,7 +451,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (g_ActiveResults) {
             size_t count = g_ActiveResults->size();
             ListView_SetItemCount(hFileList, (int)count);
-            InvalidateRect(hFileList, NULL, FALSE);
+            if (count > 0) {
+                int top = ListView_GetTopIndex(hFileList);
+                int bottom = top + ListView_GetCountPerPage(hFileList) + 1;
+                if (bottom > (int)count) bottom = (int)count;
+                if (top <= bottom - 1) {
+                    ListView_RedrawItems(hFileList, top, bottom - 1);
+                }
+            }
             if (g_CurrentQueryW[0] != 0) {
                 std::wstring status = FormatNumberWithCommas(count) + L" objects";
                 SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)status.c_str());

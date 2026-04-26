@@ -1426,12 +1426,18 @@ void IndexingEngine::SearchThread() {
 
         if (m_isSearchRequested) continue;
 
+        bool changed = true;
         {
             std::lock_guard<std::mutex> lock(m_resultBufferMutex);
+            if (m_currentResults && m_currentResults->size() == results->size()) {
+                if (results->empty() || memcmp(m_currentResults->data(), results->data(), results->size() * sizeof(uint32_t)) == 0) {
+                    changed = false;
+                }
+            }
             m_currentResults = std::move(results);
         }
         
-        if (m_hwndNotify) {
+        if (m_hwndNotify && changed) {
             PostMessage((HWND)m_hwndNotify, WM_USER_SEARCH_FINISHED, 0, 0);
         }
     }
@@ -1475,7 +1481,19 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
                     m_records[idx].MftIndex = 0xFFFFFFFF;
                     m_mftLookupTables[di][d.MftIndex] = 0xFFFFFFFF;
                     m_giantFileSizes.erase(idx);
-                    m_preSortedByName.clear();
+                    
+                    if (!m_preSortedByName.empty()) {
+                        auto it = std::lower_bound(m_preSortedByName.begin(), m_preSortedByName.end(), idx, [this](uint32_t a, uint32_t b) {
+                            int cmp = FastCompareIgnoreCase(m_pool.GetString(m_records[a].NamePoolOffset), m_pool.GetString(m_records[b].NamePoolOffset));
+                            return cmp != 0 ? (cmp < 0) : (a < b);
+                        });
+                        if (it != m_preSortedByName.end() && *it == idx) {
+                            m_preSortedByName.erase(it);
+                        } else {
+                            auto lin = std::find(m_preSortedByName.begin(), m_preSortedByName.end(), idx);
+                            if (lin != m_preSortedByName.end()) m_preSortedByName.erase(lin);
+                        }
+                    }
                 }
             }
             continue;
@@ -1515,8 +1533,29 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
         }
         if (existing != 0xFFFFFFFF && existing < m_records.size()) {
             if (m_records[existing].MftSequence <= d.MftSequence) {
-                if (m_records[existing].NamePoolOffset != rec.NamePoolOffset) m_preSortedByName.clear();
+                bool nameChanged = (m_records[existing].NamePoolOffset != rec.NamePoolOffset);
+                if (nameChanged && !m_preSortedByName.empty()) {
+                    auto it = std::lower_bound(m_preSortedByName.begin(), m_preSortedByName.end(), existing, [this](uint32_t a, uint32_t b) {
+                        int cmp = FastCompareIgnoreCase(m_pool.GetString(m_records[a].NamePoolOffset), m_pool.GetString(m_records[b].NamePoolOffset));
+                        return cmp != 0 ? (cmp < 0) : (a < b);
+                    });
+                    if (it != m_preSortedByName.end() && *it == existing) m_preSortedByName.erase(it);
+                    else {
+                        auto lin = std::find(m_preSortedByName.begin(), m_preSortedByName.end(), existing);
+                        if (lin != m_preSortedByName.end()) m_preSortedByName.erase(lin);
+                    }
+                }
+                
                 m_records[existing] = rec;
+                
+                if (nameChanged && !m_preSortedByName.empty()) {
+                    auto it = std::lower_bound(m_preSortedByName.begin(), m_preSortedByName.end(), existing, [this](uint32_t a, uint32_t b) {
+                        int cmp = FastCompareIgnoreCase(m_pool.GetString(m_records[a].NamePoolOffset), m_pool.GetString(m_records[b].NamePoolOffset));
+                        return cmp != 0 ? (cmp < 0) : (a < b);
+                    });
+                    m_preSortedByName.insert(it, existing);
+                }
+                
                 if (rec.IsGiantFile) m_giantFileSizes[existing] = d.FileSize;
                 else m_giantFileSizes.erase(existing);
             }
@@ -1524,7 +1563,13 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
             uint32_t idx = (uint32_t)m_records.size();
             try {
                 m_records.push_back(rec);
-                m_preSortedByName.clear();
+                if (!m_preSortedByName.empty()) {
+                    auto it = std::lower_bound(m_preSortedByName.begin(), m_preSortedByName.end(), idx, [this](uint32_t a, uint32_t b) {
+                        int cmp = FastCompareIgnoreCase(m_pool.GetString(m_records[a].NamePoolOffset), m_pool.GetString(m_records[b].NamePoolOffset));
+                        return cmp != 0 ? (cmp < 0) : (a < b);
+                    });
+                    m_preSortedByName.insert(it, idx);
+                }
             } catch (const std::bad_alloc&) {
                 continue;
             }
@@ -1615,44 +1660,17 @@ void IndexingEngine::MonitorChanges() {
             waitHandles.push_back(hChange);
     }
 
-    // Debounce: accumulate file-system changes for this long before triggering a re-search.
-    // Prevents background apps (AV, build tools, indexers) causing continuous re-scanning.
-    const DWORD kDebounceMs = 300;
-    // Waitable timer used for debounce. NULL until first change detected.
-    HANDLE hDebounceTimer = CreateWaitableTimerW(NULL, TRUE, NULL);
-
-    // If we have a debounce timer, add it to the wait array.
-    bool pendingChanges = false;
-    if (hDebounceTimer) waitHandles.push_back(hDebounceTimer);
-    DWORD debounceIdx = hDebounceTimer ? (DWORD)(waitHandles.size() - 1) : WAIT_FAILED;
-
     while (m_running) {
         // Fully event-driven: block until one of:
         //   [0] m_stopEvent   — Stop() was called
         //   [1..N] change notifications — filesystem changed
-        //   [N+1] debounce timer  — debounce period elapsed, time to trigger search
-        // No polling, no busy loops, no CPU usage while idle.
+        // No polling, no busy loops, no CPU usage while idle, zero debounce delay.
         DWORD waitMs = INFINITE;  // block forever until a real event fires
         DWORD waitRes = WaitForMultipleObjects(
             (DWORD)waitHandles.size(), waitHandles.data(), FALSE, waitMs);
 
         if (!m_running || waitRes == WAIT_OBJECT_0) break;  // stop event
         if (waitRes == WAIT_FAILED) break;
-
-        if (hDebounceTimer && waitRes == debounceIdx) {
-            ApplyPendingUsnDeltas();
-            // Debounce timer fired — changes have settled, now rebuild pre-sorted index
-            // and trigger a re-search. Rebuilding here keeps the keyword fast path valid
-            // after file-system changes and avoids linear scans on empty-query display.
-            if (pendingChanges && m_running) {
-                pendingChanges = false;
-                UpdatePreSortedIndex();
-                std::lock_guard<std::mutex> lock(m_searchSyncMutex);
-                m_isSearchRequested = true;
-                m_searchEvent.notify_one();
-            }
-            continue;
-        }
 
         // A filesystem change notification fired. Poll USN journal to absorb it.
         bool anyChanges = false;
@@ -1678,42 +1696,30 @@ void IndexingEngine::MonitorChanges() {
             }
         }
 
-        auto now = std::chrono::steady_clock::now();
-        if (now - m_lastUsnMerge >= std::chrono::milliseconds(100)) {
+        if (anyChanges) {
             ApplyPendingUsnDeltas();
-            m_lastUsnMerge = now;
+            // UpdatePreSortedIndex() is no longer needed here since ApplyPendingUsnDeltas dynamically maintains the list.
+            
+            // Throttle UI search trigger for background changes to 10Hz to prevent listview flicker.
+            auto now = std::chrono::steady_clock::now();
+            if (now - m_lastUsnMerge >= std::chrono::milliseconds(100)) {
+                std::lock_guard<std::mutex> lock(m_searchSyncMutex);
+                m_isSearchRequested = true;
+                m_searchEvent.notify_one();
+                m_lastUsnMerge = now;
+            }
         }
 
         // Re-arm change notification handles that fired.
         for (size_t hi = 1; hi < waitHandles.size(); ++hi) {
-            if (waitHandles[hi] == hDebounceTimer) continue;
             if (WaitForSingleObject(waitHandles[hi], 0) == WAIT_OBJECT_0)
                 FindNextChangeNotification(waitHandles[hi]);
-        }
-
-        if (anyChanges) {
-            // Start/reset the debounce timer. If more changes come in before it fires,
-            // it gets reset again — search only triggers once changes settle.
-            pendingChanges = true;
-            if (hDebounceTimer) {
-                LARGE_INTEGER due;
-                due.QuadPart = -(LONGLONG)kDebounceMs * 10000LL;  // relative, in 100ns units
-                SetWaitableTimer(hDebounceTimer, &due, 0, NULL, NULL, FALSE);
-            } else {
-                // No timer available: trigger immediately (fallback).
-                ApplyPendingUsnDeltas();
-                pendingChanges = false;
-                std::lock_guard<std::mutex> lock(m_searchSyncMutex);
-                m_isSearchRequested = true;
-                m_searchEvent.notify_one();
-            }
         }
     }
 
     ApplyPendingUsnDeltas();
 
     // Cleanup
-    if (hDebounceTimer) { CloseHandle(hDebounceTimer); hDebounceTimer = nullptr; }
     for (size_t hi = 1; hi < waitHandles.size(); ++hi) {
         if (waitHandles[hi] != nullptr)
             FindCloseChangeNotification(waitHandles[hi]);
