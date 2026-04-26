@@ -214,6 +214,21 @@ static bool ParseDateToFileTime(const std::string& raw, uint64_t& out) {
     return true;
 }
 
+static uint32_t FileTimeToUnixEpochSeconds(uint64_t fileTime) {
+    constexpr uint64_t kFileTimeTicksPerSecond = 10000000ULL;
+    constexpr uint64_t kEpochDiffSeconds = 11644473600ULL;
+    uint64_t seconds = fileTime / kFileTimeTicksPerSecond;
+    if (seconds <= kEpochDiffSeconds) return 0;
+    uint64_t epoch = seconds - kEpochDiffSeconds;
+    return epoch > 0xFFFFFFFFULL ? 0xFFFFFFFFu : (uint32_t)epoch;
+}
+
+static uint64_t UnixEpochSecondsToFileTime(uint32_t epoch) {
+    constexpr uint64_t kFileTimeTicksPerSecond = 10000000ULL;
+    constexpr uint64_t kEpochDiffSeconds = 11644473600ULL;
+    return (uint64_t(epoch) + kEpochDiffSeconds) * kFileTimeTicksPerSecond;
+}
+
 static std::vector<std::string> TokenizeQuery(const std::string& query) {
     std::vector<std::string> tokens;
     std::string current;
@@ -482,7 +497,7 @@ bool IndexingEngine::SaveIndex(const std::wstring& filePath) {
     std::shared_lock<std::shared_mutex> lock(m_dataMutex);
     std::wstring tmpPath = filePath + L".tmp";
     std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc); if (!out) return false;
-    struct IndexHeader { uint32_t Magic, Version, DriveCount, RecordCount, PoolSize; } h = { 0x54494957, 6, (uint32_t)m_drives.size(), (uint32_t)m_records.size(), (uint32_t)m_pool.GetSize() };
+    struct IndexHeader { uint32_t Magic, Version, DriveCount, RecordCount, PoolSize, GiantCount; } h = { 0x54494957, 7, (uint32_t)m_drives.size(), (uint32_t)m_records.size(), (uint32_t)m_pool.GetSize(), (uint32_t)m_giantFileSizes.size() };
     out.write((char*)&h, sizeof(h));
     for (const auto& d : m_drives) {
         struct DriveInfoBin { wchar_t Letter[4]; uint32_t Serial; uint64_t LastUsn; } di = { 0 }; 
@@ -491,6 +506,10 @@ bool IndexingEngine::SaveIndex(const std::wstring& filePath) {
     }
     out.write((char*)m_records.data(), (std::streamsize)(m_records.size() * sizeof(FileRecord)));
     out.write(m_pool.GetString(0), (std::streamsize)m_pool.GetSize());
+    for (const auto& kv : m_giantFileSizes) {
+        out.write((const char*)&kv.first, sizeof(uint32_t));
+        out.write((const char*)&kv.second, sizeof(uint64_t));
+    }
     out.flush(); if (!out.good()) { out.close(); DeleteFileW(tmpPath.c_str()); return false; }
     out.close(); if (!out.good()) { DeleteFileW(tmpPath.c_str()); return false; }
     if (!MoveFileExW(tmpPath.c_str(), filePath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
@@ -501,7 +520,7 @@ bool IndexingEngine::SaveIndex(const std::wstring& filePath) {
 
 bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
     auto clearState = [this]() {
-        m_records.clear(); m_mftLookupTables.clear(); m_pool.Clear();
+        m_records.clear(); m_mftLookupTables.clear(); m_pool.Clear(); m_giantFileSizes.clear();
         std::lock_guard<std::mutex> cacheLock(m_nameCacheMutex);
         m_nameCache.clear();
         m_nameCacheLru.clear();
@@ -516,16 +535,16 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
         Logger::Log(L"[WhereIsIt] index.dat not found or could not be opened.");
         return false;
     }
-    struct IndexHeader { uint32_t Magic, Version, DriveCount, RecordCount, PoolSize; } h; 
+    struct IndexHeader { uint32_t Magic, Version, DriveCount, RecordCount, PoolSize, GiantCount; } h;
     if (!readExact(in, (char*)&h, sizeof(h))) { 
         Logger::Log(L"[WhereIsIt] Failed to read index header.");
         clearState(); return false; 
     }
-    if (h.Magic != 0x54494957 || h.Version != 6) { 
+    if (h.Magic != 0x54494957 || h.Version != 7) {
         Logger::Log(L"[WhereIsIt] Index magic/version mismatch.");
         clearState(); return false; 
     }
-    if (h.DriveCount == 0 || h.DriveCount > 64 || h.RecordCount > 100000000 || h.PoolSize == 0 || h.PoolSize > (512u * 1024u * 1024u)) {
+    if (h.DriveCount == 0 || h.DriveCount > 64 || h.RecordCount > 100000000 || h.PoolSize == 0 || h.PoolSize > (512u * 1024u * 1024u) || h.GiantCount > h.RecordCount) {
         Logger::Log(L"[WhereIsIt] Index header contains invalid values.");
         clearState(); return false;
     }
@@ -572,6 +591,16 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
         clearState(); return false; 
     }
 
+    std::unordered_map<uint32_t, uint64_t> tempGiant;
+    for (uint32_t gi = 0; gi < h.GiantCount; ++gi) {
+        uint32_t idx = 0;
+        uint64_t size = 0;
+        if (!readExact(in, (char*)&idx, sizeof(idx)) || !readExact(in, (char*)&size, sizeof(size))) {
+            clearState(); return false;
+        }
+        tempGiant[idx] = size;
+    }
+
     std::vector<std::vector<uint32_t>> tempLookup(h.DriveCount);
     std::vector<uint32_t> maxMft(h.DriveCount, 0);
 
@@ -603,6 +632,7 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
     m_records = std::move(tempRecords);
     m_pool.LoadRawData(pd.data(), h.PoolSize);
     m_mftLookupTables = std::move(tempLookup);
+    m_giantFileSizes = std::move(tempGiant);
     return true;
 }
 
@@ -671,6 +701,33 @@ FileRecord IndexingEngine::GetRecord(uint32_t recordIdx) const {
     std::shared_lock<std::shared_mutex> lock(m_dataMutex);
     if (recordIdx < m_records.size()) return m_records[recordIdx];
     return {};
+}
+
+uint64_t IndexingEngine::ResolveFileSize(const FileRecord& rec, uint32_t recordIndex) const {
+    if (!rec.IsGiantFile) return rec.FileSize;
+    auto it = m_giantFileSizes.find(recordIndex);
+    if (it != m_giantFileSizes.end()) return it->second;
+    return 0xFFFFFFFFULL;
+}
+
+uint32_t IndexingEngine::FileTimeToEpoch(uint64_t fileTime) const {
+    return FileTimeToUnixEpochSeconds(fileTime);
+}
+
+uint64_t IndexingEngine::EpochToFileTime(uint32_t epoch) const {
+    return UnixEpochSecondsToFileTime(epoch);
+}
+
+uint64_t IndexingEngine::GetRecordFileSize(uint32_t recordIdx) const {
+    std::shared_lock<std::shared_mutex> lock(m_dataMutex);
+    if (recordIdx >= m_records.size()) return 0;
+    return ResolveFileSize(m_records[recordIdx], recordIdx);
+}
+
+uint64_t IndexingEngine::GetRecordLastModifiedFileTime(uint32_t recordIdx) const {
+    std::shared_lock<std::shared_mutex> lock(m_dataMutex);
+    if (recordIdx >= m_records.size()) return 0;
+    return EpochToFileTime(m_records[recordIdx].LastModifiedEpoch);
 }
 
 std::wstring IndexingEngine::GetRecordName(uint32_t recordIdx) const {
@@ -911,12 +968,12 @@ namespace {
 }
 
 void IndexingEngine::SearchThread() {
-    std::function<bool(const QueryNode*, const QueryPlan&, const FileRecord&, const std::string&, const std::function<std::string()>&)> evaluateTerm;
-    evaluateTerm = [this, &evaluateTerm](const QueryNode* node, const QueryPlan& plan, const FileRecord& rec, const std::string& name, const std::function<std::string()>& getFullPath) -> bool {
+    std::function<bool(const QueryNode*, const QueryPlan&, uint32_t, const FileRecord&, const std::string&, const std::function<std::string()>&)> evaluateTerm;
+    evaluateTerm = [this, &evaluateTerm](const QueryNode* node, const QueryPlan& plan, uint32_t recIdx, const FileRecord& rec, const std::string& name, const std::function<std::string()>& getFullPath) -> bool {
         if (!node) return true;
-        if (node->Type == QueryNodeType::And) return evaluateTerm(node->Left.get(), plan, rec, name, getFullPath) && evaluateTerm(node->Right.get(), plan, rec, name, getFullPath);
-        if (node->Type == QueryNodeType::Or) return evaluateTerm(node->Left.get(), plan, rec, name, getFullPath) || evaluateTerm(node->Right.get(), plan, rec, name, getFullPath);
-        if (node->Type == QueryNodeType::Not) return !evaluateTerm(node->Left.get(), plan, rec, name, getFullPath);
+        if (node->Type == QueryNodeType::And) return evaluateTerm(node->Left.get(), plan, recIdx, rec, name, getFullPath) && evaluateTerm(node->Right.get(), plan, recIdx, rec, name, getFullPath);
+        if (node->Type == QueryNodeType::Or) return evaluateTerm(node->Left.get(), plan, recIdx, rec, name, getFullPath) || evaluateTerm(node->Right.get(), plan, recIdx, rec, name, getFullPath);
+        if (node->Type == QueryNodeType::Not) return !evaluateTerm(node->Left.get(), plan, recIdx, rec, name, getFullPath);
 
         const std::string& term = node->Term;
         if (term.empty()) return true;
@@ -950,11 +1007,12 @@ void IndexingEngine::SearchThread() {
             else if (raw.rfind("<", 0) == 0) { cmp = -1; raw = raw.substr(1); }
             else if (raw.rfind("=", 0) == 0) { raw = raw.substr(1); }
             uint64_t value = 0; if (!ParseSizeBytes(raw, value)) return false;
-            if (cmp == 2) return rec.FileSize >= value;
-            if (cmp == -2) return rec.FileSize <= value;
-            if (cmp == 1) return rec.FileSize > value;
-            if (cmp == -1) return rec.FileSize < value;
-            return rec.FileSize == value;
+            const uint64_t sizeValue = ResolveFileSize(rec, recIdx);
+            if (cmp == 2) return sizeValue >= value;
+            if (cmp == -2) return sizeValue <= value;
+            if (cmp == 1) return sizeValue > value;
+            if (cmp == -1) return sizeValue < value;
+            return sizeValue == value;
         }
         if (low.rfind("date:", 0) == 0) {
             std::string raw = term.substr(5);
@@ -965,11 +1023,12 @@ void IndexingEngine::SearchThread() {
             else if (raw.rfind("<", 0) == 0) { cmp = -1; raw = raw.substr(1); }
             else if (raw.rfind("=", 0) == 0) { raw = raw.substr(1); }
             uint64_t value = 0; if (!ParseDateToFileTime(raw, value)) return false;
-            if (cmp == 2) return rec.LastModified >= value;
-            if (cmp == -2) return rec.LastModified <= value;
-            if (cmp == 1) return rec.LastModified > value;
-            if (cmp == -1) return rec.LastModified < value;
-            return rec.LastModified == value;
+            const uint32_t queryEpoch = FileTimeToEpoch(value);
+            if (cmp == 2) return rec.LastModifiedEpoch >= queryEpoch;
+            if (cmp == -2) return rec.LastModifiedEpoch <= queryEpoch;
+            if (cmp == 1) return rec.LastModifiedEpoch > queryEpoch;
+            if (cmp == -1) return rec.LastModifiedEpoch < queryEpoch;
+            return rec.LastModifiedEpoch == queryEpoch;
         }
 
         if (plan.Config.RegexMode && !plan.CompiledRegex.empty()) {
@@ -1285,7 +1344,7 @@ void IndexingEngine::SearchThread() {
                                         if (!pathCached) { cachedPath = WideToUtf8(GetFullPathInternal(idx)); pathCached = true; }
                                         return cachedPath;
                                     };
-                                    if (evaluateTerm(plan.Root.get(), plan, rec, nameStr, getPath))
+                                    if (evaluateTerm(plan.Root.get(), plan, idx, rec, nameStr, getPath))
                                         results->push_back(idx);
                                 }
                             };
@@ -1333,9 +1392,11 @@ void IndexingEngine::SearchThread() {
                         
                         int primary = 0;
                         if (sortKey == QuerySortKey::Size) {
-                            if (ra.FileSize < rb.FileSize) primary = -1; else if (ra.FileSize > rb.FileSize) primary = 1;
+                            uint64_t sa = ResolveFileSize(ra, a);
+                            uint64_t sb = ResolveFileSize(rb, b);
+                            if (sa < sb) primary = -1; else if (sa > sb) primary = 1;
                         } else if (sortKey == QuerySortKey::Date) {
-                            if (ra.LastModified < rb.LastModified) primary = -1; else if (ra.LastModified > rb.LastModified) primary = 1;
+                            if (ra.LastModifiedEpoch < rb.LastModifiedEpoch) primary = -1; else if (ra.LastModifiedEpoch > rb.LastModifiedEpoch) primary = 1;
                         }
 
                         if (primary == 0) {
@@ -1387,6 +1448,7 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
                 if (idx != 0xFFFFFFFF && idx < m_records.size() && m_records[idx].MftSequence == d.MftSequence) {
                     m_records[idx].MftIndex = 0xFFFFFFFF;
                     m_mftLookupTables[di][d.MftIndex] = 0xFFFFFFFF;
+                    m_giantFileSizes.erase(idx);
                     m_preSortedByName.clear();
                 }
             }
@@ -1407,7 +1469,19 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
             catch (const std::bad_alloc&) { continue; }
         }
 
-        FileRecord rec = { nameOffset, d.ParentMftIndex, d.MftIndex, d.FileSize, d.LastModified, d.FileAttributes, d.MftSequence, d.ParentSequence, di };
+        FileRecord rec = {};
+        rec.NamePoolOffset = nameOffset;
+        rec.ParentMftIndex = d.ParentMftIndex;
+        rec.MftIndex = d.MftIndex;
+        rec.LastModifiedEpoch = FileTimeToEpoch(d.LastModified);
+        rec.FileSize = (d.FileSize >= 0xFFFFFFFFULL) ? 0xFFFFFFFFu : (uint32_t)d.FileSize;
+        rec.MftSequence = d.MftSequence;
+        rec.ParentSequence = d.ParentSequence;
+        rec.DriveIndex = di;
+        rec.IsGiantFile = d.FileSize >= 0xFFFFFFFFULL ? 1u : 0u;
+        rec.FileAttributes = d.FileAttributes;
+        rec.Reserved = 0;
+        rec.Padding = 0;
         if (d.MftIndex >= (uint32_t)m_mftLookupTables[di].size()) {
             try { m_mftLookupTables[di].resize(d.MftIndex + 10000, 0xFFFFFFFF); }
             catch (const std::bad_alloc&) { continue; }
@@ -1416,6 +1490,8 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
             if (m_records[existing].MftSequence <= d.MftSequence) {
                 if (m_records[existing].NamePoolOffset != rec.NamePoolOffset) m_preSortedByName.clear();
                 m_records[existing] = rec;
+                if (rec.IsGiantFile) m_giantFileSizes[existing] = d.FileSize;
+                else m_giantFileSizes.erase(existing);
             }
         } else {
             uint32_t idx = (uint32_t)m_records.size();
@@ -1426,6 +1502,7 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
                 continue;
             }
             m_mftLookupTables[di][d.MftIndex] = idx;
+            if (rec.IsGiantFile) m_giantFileSizes[idx] = d.FileSize;
         }
     }
 }
@@ -1710,7 +1787,7 @@ void IndexingEngine::PerformFullDriveScan() {
 
     {
         std::unique_lock<std::shared_mutex> lock(m_dataMutex);
-        m_records.clear(); m_pool.Clear(); m_mftLookupTables.clear();
+        m_records.clear(); m_pool.Clear(); m_mftLookupTables.clear(); m_giantFileSizes.clear();
         {
             std::lock_guard<std::mutex> cacheLock(m_nameCacheMutex);
             m_nameCache.clear();
@@ -1725,7 +1802,13 @@ void IndexingEngine::PerformFullDriveScan() {
 
             m_mftLookupTables[i] = std::move(ctx.LookupTable);
             
-            for (auto& rec : ctx.Records) {
+            for (uint32_t localRecordIdx = 0; localRecordIdx < (uint32_t)ctx.Records.size(); ++localRecordIdx) {
+                auto& rec = ctx.Records[localRecordIdx];
+                uint32_t globalRecordIdx = (uint32_t)m_records.size();
+                if (rec.IsGiantFile) {
+                    auto giantIt = ctx.GiantFileSizes.find(localRecordIdx);
+                    if (giantIt != ctx.GiantFileSizes.end()) m_giantFileSizes[globalRecordIdx] = giantIt->second;
+                }
                 rec.NamePoolOffset += poolOffsetShift;
                 if (ctx.Type != DriveFileSystem::NTFS) {
                     if (rec.ParentMftIndex != 0xFFFFFFFF) rec.ParentMftIndex += recordIndexShift;
@@ -1784,10 +1867,23 @@ void IndexingEngine::ScanGenericDrive(DriveScanContext& ctx, const std::wstring&
             if (!IsPathIncluded(fullPath)) continue;
 
             uint32_t myLocalIdx = (uint32_t)ctx.Records.size();
-            FileRecord rec = { ctx.Pool.AddString(fd.cFileName), current.pIdx, myLocalIdx, ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow, 
-                              ((uint64_t)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime, 
-                              (uint16_t)fd.dwFileAttributes, 0, current.pSeq, ctx.DriveIndex };
+            uint64_t fullSize = ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+            uint64_t fullTime = ((uint64_t)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime;
+            FileRecord rec = {};
+            rec.NamePoolOffset = ctx.Pool.AddString(fd.cFileName);
+            rec.ParentMftIndex = current.pIdx;
+            rec.MftIndex = myLocalIdx;
+            rec.LastModifiedEpoch = FileTimeToUnixEpochSeconds(fullTime);
+            rec.FileSize = fullSize >= 0xFFFFFFFFULL ? 0xFFFFFFFFu : (uint32_t)fullSize;
+            rec.MftSequence = 0;
+            rec.ParentSequence = current.pSeq;
+            rec.DriveIndex = ctx.DriveIndex;
+            rec.IsGiantFile = fullSize >= 0xFFFFFFFFULL ? 1u : 0u;
+            rec.FileAttributes = (uint16_t)fd.dwFileAttributes;
+            rec.Reserved = 0;
+            rec.Padding = 0;
             ctx.Records.push_back(rec);
+            if (rec.IsGiantFile) ctx.GiantFileSizes[myLocalIdx] = fullSize;
 
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
                 if (!cfg.FollowReparsePoints && (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
@@ -1841,9 +1937,22 @@ void IndexingEngine::ScanMftForDrive(DriveScanContext& ctx) {
                             if (aa->Type == 0x30 && !aa->NonResident) {
                                 MFT_FILE_NAME* fn = (MFT_FILE_NAME*)&eb[k+ao+((MFT_RESIDENT_ATTRIBUTE*)aa)->ValueOffset];
                                 if (fn->NameNamespace != 2) {
-                                    FileRecord entry = { ctx.Pool.AddString(fn->Name, fn->NameLength), (uint32_t)(fn->ParentDirectory & 0xFFFFFFFFFFFFLL), tm, fn->DataSize, fn->LastWriteTime, (uint16_t)fn->FileAttributes, rh->SequenceNumber, (uint16_t)(fn->ParentDirectory >> 48), ctx.DriveIndex };
+                                    FileRecord entry = {};
+                                    entry.NamePoolOffset = ctx.Pool.AddString(fn->Name, fn->NameLength);
+                                    entry.ParentMftIndex = (uint32_t)(fn->ParentDirectory & 0xFFFFFFFFFFFFLL);
+                                    entry.MftIndex = tm;
+                                    entry.LastModifiedEpoch = FileTimeToUnixEpochSeconds(fn->LastWriteTime);
+                                    entry.FileSize = fn->DataSize >= 0xFFFFFFFFULL ? 0xFFFFFFFFu : (uint32_t)fn->DataSize;
+                                    entry.MftSequence = rh->SequenceNumber;
+                                    entry.ParentSequence = (uint16_t)(fn->ParentDirectory >> 48);
+                                    entry.DriveIndex = ctx.DriveIndex;
+                                    entry.IsGiantFile = fn->DataSize >= 0xFFFFFFFFULL ? 1u : 0u;
+                                    entry.FileAttributes = (uint16_t)fn->FileAttributes;
+                                    entry.Reserved = 0;
+                                    entry.Padding = 0;
                                     if (rh->Flags & 0x02) entry.FileAttributes |= 0x10;
                                     uint32_t ri = (uint32_t)ctx.Records.size(); ctx.Records.push_back(entry);
+                                    if (entry.IsGiantFile) ctx.GiantFileSizes[ri] = fn->DataSize;
                                     if (tm < (uint32_t)ctx.LookupTable.size()) ctx.LookupTable[tm] = ri;
                                 }
                             }

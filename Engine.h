@@ -42,17 +42,21 @@ enum class QuerySortKey { Name, Path, Size, Date };
 
 #pragma pack(push, 1)
 struct FileRecord {
-    uint32_t NamePoolOffset; 
-    uint32_t ParentMftIndex; 
-    uint32_t MftIndex;      
-    uint64_t FileSize;      
-    uint64_t LastModified;  
-    uint16_t FileAttributes;
-    uint16_t MftSequence;   
+    uint32_t NamePoolOffset;
+    uint32_t ParentMftIndex;
+    uint32_t MftIndex;
+    uint32_t LastModifiedEpoch;
+    uint32_t FileSize;
+    uint16_t MftSequence;
     uint16_t ParentSequence;
-    uint8_t  DriveIndex;    
+    uint32_t DriveIndex : 6;
+    uint32_t IsGiantFile : 1;
+    uint32_t FileAttributes : 16;
+    uint32_t Reserved : 9;
+    uint32_t Padding;
 };
 #pragma pack(pop)
+static_assert(sizeof(FileRecord) == 32, "FileRecord MUST be exactly 32 bytes for cache alignment");
 
 // Internal NTFS Direct-Disk Structures
 #pragma pack(push, 1)
@@ -109,6 +113,8 @@ public:
     void SetNotifyWindow(HWND hwnd) { m_hwndNotify = hwnd; }
 
     FileRecord GetRecord(uint32_t recordIndex) const;
+    uint64_t GetRecordFileSize(uint32_t recordIndex) const;
+    uint64_t GetRecordLastModifiedFileTime(uint32_t recordIndex) const;
     std::wstring GetRecordName(uint32_t recordIndex) const;
     // Single-lock fetch of both record and name — use in hot paint paths to halve lock acquisitions.
     std::pair<FileRecord, std::wstring> GetRecordAndName(uint32_t recordIndex) const;
@@ -143,6 +149,7 @@ private:
     struct DriveScanContext {
         std::vector<FileRecord> Records;
         std::vector<uint32_t> LookupTable;
+        std::unordered_map<uint32_t, uint64_t> GiantFileSizes;
         StringPool Pool;
         uint8_t DriveIndex;
         std::wstring DriveLetter;
@@ -181,6 +188,9 @@ private:
     void EnqueueUsnDelta(PendingUsnDelta&& delta);
     void ApplyPendingUsnDeltas();
     std::wstring GetWideNameFromPoolOffsetCached(uint32_t namePoolOffset) const;
+    uint32_t FileTimeToEpoch(uint64_t fileTime) const;
+    uint64_t EpochToFileTime(uint32_t epoch) const;
+    uint64_t ResolveFileSize(const FileRecord& rec, uint32_t recordIndex) const;
 
     std::thread m_mainWorker;
     std::thread m_searchWorker;
@@ -204,6 +214,7 @@ private:
     std::vector<FileRecord> m_records;
     std::vector<uint32_t> m_preSortedByName;
     std::vector<std::vector<uint32_t>> m_mftLookupTables;
+    std::unordered_map<uint32_t, uint64_t> m_giantFileSizes;
     StringPool m_pool;
     IndexScopeConfig m_scopeConfig;
     mutable std::mutex m_scopeConfigMutex;

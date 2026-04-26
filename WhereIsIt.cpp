@@ -327,8 +327,8 @@ void OnDisplayInfo(NMLVDISPINFO* pdi) {
         uint32_t rIdx = (*g_ActiveResults)[pdi->item.iItem];
         switch (pdi->item.iSubItem) {
             case 1: wcsncpy_s(pdi->item.pszText, pdi->item.cchTextMax, g_Engine.GetParentPath(rIdx).c_str(), _TRUNCATE); break;
-            case 2: { FileRecord r = g_Engine.GetRecord(rIdx); FormatFileSize(pdi->item.pszText, pdi->item.cchTextMax, r.FileSize, r.FileAttributes); break; }
-            case 3: { FileRecord r = g_Engine.GetRecord(rIdx); FormatFileTime(pdi->item.pszText, pdi->item.cchTextMax, r.LastModified); break; }
+            case 2: { FileRecord r = g_Engine.GetRecord(rIdx); FormatFileSize(pdi->item.pszText, pdi->item.cchTextMax, g_Engine.GetRecordFileSize(rIdx), r.FileAttributes); break; }
+            case 3: { FormatFileTime(pdi->item.pszText, pdi->item.cchTextMax, g_Engine.GetRecordLastModifiedFileTime(rIdx)); break; }
         }
     }
 }
