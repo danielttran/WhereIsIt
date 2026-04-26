@@ -1491,6 +1491,7 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
             if (existingNameUtf8 && incomingNameUtf8 == existingNameUtf8) nameOffset = m_records[existing].NamePoolOffset;
         }
         if (nameOffset == 0) {
+            if (incomingNameUtf8.empty()) continue;  // guard matches AddString's bytesNeeded<=1 path
             try { nameOffset = m_pool.AddRawData(incomingNameUtf8.c_str(), incomingNameUtf8.size() + 1); }
             catch (const std::bad_alloc&) { continue; }
         }
@@ -2015,7 +2016,10 @@ void IndexingEngine::ScanMftForDrive(DriveScanContext& ctx) {
                 if (rhFlags & 0x02) entry.FileAttributes |= 0x10;
                 uint32_t ri = (uint32_t)ctx.Records.size(); ctx.Records.push_back(entry);
                 if (entry.IsGiantFile) ctx.GiantFileSizes[ri] = fn->DataSize;
-                if (effectiveMftIdx < (uint32_t)ctx.LookupTable.size()) ctx.LookupTable[effectiveMftIdx] = ri;
+                // Only set if vacant: base-record 0x30 is processed before extension records
+                // (lower MFT index first), so a later extension must not overwrite it.
+                if (effectiveMftIdx < (uint32_t)ctx.LookupTable.size() && ctx.LookupTable[effectiveMftIdx] == 0xFFFFFFFF)
+                    ctx.LookupTable[effectiveMftIdx] = ri;
             };
 
             // Maps extension MFT index -> (base MFT index, base sequence number).
