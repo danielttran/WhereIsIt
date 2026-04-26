@@ -312,10 +312,8 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
     // --- Commit under exclusive write lock ---
     std::unique_lock<std::shared_mutex> dataLock(m_dataMutex);
     if (m_recordsCount) m_recordsCount->store(0, std::memory_order_relaxed);
-    if (tempRecords.size() <= 20000000ULL) {
-        m_recordPool.LoadFromVector(tempRecords);
-        if (m_recordsCount) m_recordsCount->store((uint32_t)tempRecords.size(), std::memory_order_release);
-    }
+    m_recordPool.LoadFromVector(tempRecords);
+    if (m_recordsCount) m_recordsCount->store((uint32_t)tempRecords.size(), std::memory_order_release);
     m_mftLookupTables = std::move(tempLookup);
     m_giantFileSizes  = std::move(tempGiant);
     return true;
@@ -1120,6 +1118,11 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
     constexpr size_t kEpochSize = 256;
     std::unique_lock<std::shared_mutex> lock(m_dataMutex);
     if (m_hDataMutex) WaitForSingleObject(m_hDataMutex, INFINITE);
+    
+    // Pre-reserve memory to prevent OOB chunk access during rapid fetch_add index generation
+    uint32_t currentCount = m_recordsCount ? m_recordsCount->load(std::memory_order_relaxed) : 0;
+    m_recordPool.Reserve(currentCount + deltas.size());
+
     for (size_t i = 0; i < deltas.size(); ++i) {
         const auto& d = deltas[i];
         const uint8_t di = d.DriveIndex;
@@ -1520,6 +1523,10 @@ void IndexingEngine::PerformFullDriveScan() {
 
             m_mftLookupTables[i] = std::move(ctx.LookupTable);
             
+            // Pre-reserve memory for all incoming records from this drive
+            uint32_t currentCount = m_recordsCount ? m_recordsCount->load(std::memory_order_relaxed) : 0;
+            m_recordPool.Reserve(currentCount + ctx.Records.size());
+
             for (uint32_t localRecordIdx = 0; localRecordIdx < (uint32_t)ctx.Records.size(); ++localRecordIdx) {
                 auto& rec = ctx.Records[localRecordIdx];
                 uint32_t globalRecordIdx = (uint32_t)GetRecordCount();
