@@ -348,6 +348,10 @@ void NamedPipeEngine::Start()
     // Phase 2: Attach to Shared Memory instead of running local scan
     m_hDataMutex = OpenMutexW(MUTEX_ALL_ACCESS, FALSE, L"Global\\WhereIsIt_DataMutex");
     m_hRecordsMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\WhereIsIt_Records");
+    m_hDrivesMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\WhereIsIt_Drives");
+    if (m_hDrivesMapping) {
+        m_driveLettersShared = (wchar_t(*)[4])MapViewOfFile(m_hDrivesMapping, FILE_MAP_READ, 0, 0, 0);
+    }
     if (m_hRecordsMapping) {
         uint8_t* base = (uint8_t*)MapViewOfFile(m_hRecordsMapping, FILE_MAP_READ, 0, 0, 0);
         if (base) {
@@ -588,22 +592,34 @@ const char* NamedPipeEngine::GetString(uint32_t offset) const {
 
 FileRecord NamedPipeEngine::GetRecord(uint32_t recordIdx) const {
     if (!m_recordsShared || !m_recordsCount || recordIdx >= m_recordsCount->load(std::memory_order_acquire)) return {};
-    return m_recordsShared[recordIdx];
+    if (m_hDataMutex) WaitForSingleObject(m_hDataMutex, INFINITE);
+    FileRecord rec = m_recordsShared[recordIdx];
+    if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
+    return rec;
 }
 
 uint64_t NamedPipeEngine::GetRecordFileSize(uint32_t recordIdx) const {
     if (!m_recordsShared || !m_recordsCount || recordIdx >= m_recordsCount->load(std::memory_order_acquire)) return 0;
-    return m_recordsShared[recordIdx].FileSize; 
+    if (m_hDataMutex) WaitForSingleObject(m_hDataMutex, INFINITE);
+    uint64_t sz = m_recordsShared[recordIdx].FileSize; 
+    if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
+    return sz;
 }
 
 uint64_t NamedPipeEngine::GetRecordLastModifiedFileTime(uint32_t recordIdx) const {
     if (!m_recordsShared || !m_recordsCount || recordIdx >= m_recordsCount->load(std::memory_order_acquire)) return 0;
-    return UnixEpochSecondsToFileTime(m_recordsShared[recordIdx].LastModifiedEpoch);
+    if (m_hDataMutex) WaitForSingleObject(m_hDataMutex, INFINITE);
+    uint32_t epoch = m_recordsShared[recordIdx].LastModifiedEpoch;
+    if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
+    return UnixEpochSecondsToFileTime(epoch);
 }
 
 std::wstring NamedPipeEngine::GetRecordName(uint32_t recordIdx) const {
     if (!m_recordsShared || !m_recordsCount || recordIdx >= m_recordsCount->load(std::memory_order_acquire)) return L"";
-    const char* nameA = GetString(m_recordsShared[recordIdx].NamePoolOffset);
+    if (m_hDataMutex) WaitForSingleObject(m_hDataMutex, INFINITE);
+    uint32_t offset = m_recordsShared[recordIdx].NamePoolOffset;
+    if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
+    const char* nameA = GetString(offset);
     if (!nameA || !nameA[0]) return L"";
     int sz = MultiByteToWideChar(CP_UTF8, 0, nameA, -1, NULL, 0);
     if (sz <= 1) return L"";
@@ -614,8 +630,19 @@ std::wstring NamedPipeEngine::GetRecordName(uint32_t recordIdx) const {
 
 std::pair<FileRecord, std::wstring> NamedPipeEngine::GetRecordAndName(uint32_t recordIdx) const {
     if (!m_recordsShared || !m_recordsCount || recordIdx >= m_recordsCount->load(std::memory_order_acquire)) return { {}, L"" };
+    if (m_hDataMutex) WaitForSingleObject(m_hDataMutex, INFINITE);
     FileRecord rec = m_recordsShared[recordIdx];
-    return { rec, GetRecordName(recordIdx) };
+    if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
+    const char* nameA = GetString(rec.NamePoolOffset);
+    std::wstring converted;
+    if (nameA && nameA[0]) {
+        int sz = MultiByteToWideChar(CP_UTF8, 0, nameA, -1, NULL, 0);
+        if (sz > 1) {
+            converted.resize(sz - 1);
+            MultiByteToWideChar(CP_UTF8, 0, nameA, -1, &converted[0], sz);
+        }
+    }
+    return { rec, converted };
 }
 
 std::wstring NamedPipeEngine::GetCurrentStatus() const {
@@ -632,6 +659,7 @@ std::wstring NamedPipeEngine::GetFullPath(uint32_t recordIdx) const {
     int visitedCount = 0;
     
     uint32_t cur = recordIdx;
+    uint8_t rootDriveIndex = 0;
     
     while (partsCount < 4096 && visitedCount < 4096) {
         bool cycle = false;
@@ -641,7 +669,11 @@ std::wstring NamedPipeEngine::GetFullPath(uint32_t recordIdx) const {
         if (cycle) break;
         visited[visitedCount++] = cur;
 
-        const FileRecord& r = m_recordsShared[cur]; 
+        if (m_hDataMutex) WaitForSingleObject(m_hDataMutex, INFINITE);
+        FileRecord r = m_recordsShared[cur]; 
+        if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
+        rootDriveIndex = r.DriveIndex;
+
         const char* name = GetString(r.NamePoolOffset);
         if (name[0] != '.' || name[1] != '\0') {
             parts[partsCount++] = name;
@@ -657,7 +689,7 @@ std::wstring NamedPipeEngine::GetFullPath(uint32_t recordIdx) const {
         pa += parts[i];
     }
     int sz = MultiByteToWideChar(CP_UTF8, 0, pa.c_str(), -1, NULL, 0);
-    std::wstring drive = (m_driveLettersShared && m_recordsShared[recordIdx].DriveIndex < 64) ? m_driveLettersShared[m_recordsShared[recordIdx].DriveIndex] : L"X:\\";
+    std::wstring drive = (m_driveLettersShared && rootDriveIndex < 64) ? m_driveLettersShared[rootDriveIndex] : L"X:\\";
     if (sz > 0) { 
         std::wstring pw(sz - 1, L'\0'); 
         MultiByteToWideChar(CP_UTF8, 0, pa.c_str(), -1, &pw[0], sz); 
@@ -668,9 +700,13 @@ std::wstring NamedPipeEngine::GetFullPath(uint32_t recordIdx) const {
 
 std::wstring NamedPipeEngine::GetParentPath(uint32_t recordIdx) const {
     if (!m_recordsShared || !m_recordsCount || recordIdx >= m_recordsCount->load(std::memory_order_acquire)) return L"";
+    if (m_hDataMutex) WaitForSingleObject(m_hDataMutex, INFINITE);
     uint32_t pi = m_recordsShared[recordIdx].ParentRecordIndex;
+    uint8_t di = m_recordsShared[recordIdx].DriveIndex;
+    if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
+
     if (pi == 0xFFFFFFFF || pi >= m_recordsCount->load(std::memory_order_acquire)) {
-        return (m_driveLettersShared && m_recordsShared[recordIdx].DriveIndex < 64) ? m_driveLettersShared[m_recordsShared[recordIdx].DriveIndex] : L"X:\\";
+        return (m_driveLettersShared && di < 64) ? m_driveLettersShared[di] : L"X:\\";
     }
     return GetFullPath(pi);
 }
