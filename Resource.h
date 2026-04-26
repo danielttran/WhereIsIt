@@ -23,6 +23,29 @@
 #define IDM_VIEW_LARGE          131
 #define IDM_VIEW_MEDIUM         132
 #define IDM_VIEW_DETAILS        133
+
+// Search menu toggles
+#define IDM_SEARCH_MATCHCASE    115
+#define IDM_SEARCH_WHOLEWORD    150
+#define IDM_SEARCH_MATCHPATH    151
+#define IDM_SEARCH_DIACRITICS   152
+#define IDM_SEARCH_REGEX        153
+#define IDM_SEARCH_ADVANCED     154
+#define IDM_SEARCH_ADDFILTER    155
+#define IDM_SEARCH_ORGANIZEFILTER 156
+
+// File-type quick filters
+#define IDM_FILTER_EVERYTHING   160
+#define IDM_FILTER_AUDIO        161
+#define IDM_FILTER_COMPRESSED   162
+#define IDM_FILTER_DOCUMENT     163
+#define IDM_FILTER_EXECUTABLE   164
+#define IDM_FILTER_FOLDER       165
+#define IDM_FILTER_PICTURE      166
+#define IDM_FILTER_VIDEO        167
+
+// Advanced search dialog
+#define IDD_ADVANCED_SEARCH     170
 #define IDI_WHEREISIT			107
 #define IDC_WHEREISIT			109
 #define IDC_MYICON				2

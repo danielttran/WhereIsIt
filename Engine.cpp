@@ -762,11 +762,18 @@ void IndexingEngine::SearchThread() {
             return WildcardMatchIAscii(term.c_str(), name.c_str());
         }
         
-        if (plan.Config.WholeWord) return ContainsWholeWord(name, term, plan.Config.CaseSensitive);
-        return FastContains(name, term, plan.Config.CaseSensitive);
+        if (plan.Config.WholeWord) {
+            if (ContainsWholeWord(name, term, plan.Config.CaseSensitive)) return true;
+            if (plan.Config.MatchPath && ContainsWholeWord(getFullPath(), term, plan.Config.CaseSensitive)) return true;
+            return false;
+        }
+        if (FastContains(name, term, plan.Config.CaseSensitive)) return true;
+        if (plan.Config.MatchPath && FastContains(getFullPath(), term, plan.Config.CaseSensitive)) return true;
+        return false;
     };
 
-    auto queryNeedsPath = [](const QueryNode* node) -> bool {
+    auto queryNeedsPath = [](const QueryNode* node, const QueryConfig& cfg) -> bool {
+        if (cfg.MatchPath) return true;  // MatchPath flag forces full-path eval for every term
         std::function<bool(const QueryNode*)> check = [&](const QueryNode* n) -> bool {
             if (!n) return false;
             if (n->Type == QueryNodeType::Term) {
@@ -824,17 +831,45 @@ void IndexingEngine::SearchThread() {
                 results->reserve(GetRecordCount());
                 bool usePreSorted = (sortKey == QuerySortKey::Name && !sortDescending && !m_preSortedByName.empty());
 
-                if (query.empty()) {
+                // Inline ext/folder gate used in every loop below.
+                // Zero allocation: strrchr on raw pool pointer + table scan.
+                const bool hasExtFilter = plan.Config.ExtWhitelist != nullptr || plan.Config.FolderOnly;
+                auto passesFilter = [&](const FileRecord& rec, const char* name) -> bool {
+                    if (plan.Config.FolderOnly)
+                        return (rec.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                    const char* dot = strrchr(name, '.');
+                    if (!dot || !dot[1]) return false;
+                    const char* ext = dot + 1;
+                    for (int ei = 0; plan.Config.ExtWhitelist[ei]; ++ei)
+                        if (FastCompareIgnoreCase(ext, plan.Config.ExtWhitelist[ei]) == 0) return true;
+                    return false;
+                };
+
+                // plan.Tokens holds only the expression terms (config tokens stripped).
+                // Empty means "enumerate all" (optionally with ext/folder filter).
+                if (plan.Tokens.empty()) {
                     if (usePreSorted) {
                         for (size_t i = 0; i < m_preSortedByName.size(); ++i) {
                             if ((i & 0x3F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) break;
                             uint32_t idx = m_preSortedByName[i];
-                            if (m_recordPool.GetRecord(idx).MftIndex != 0xFFFFFFFF) results->push_back(idx);
+                            const auto& rec = m_recordPool.GetRecord(idx);
+                            if (rec.MftIndex == 0xFFFFFFFF) continue;
+                            if (hasExtFilter) {
+                                const char* name = m_pool.GetString(rec.NamePoolOffset);
+                                if (!passesFilter(rec, name)) continue;
+                            }
+                            results->push_back(idx);
                         }
                     } else {
                         for (uint32_t i = 0; i < (uint32_t)GetRecordCount(); ++i) {
                             if ((i & 0x3F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) break;
-                            if (m_recordPool.GetRecord(i).MftIndex != 0xFFFFFFFF) results->push_back(i);
+                            const auto& rec = m_recordPool.GetRecord(i);
+                            if (rec.MftIndex == 0xFFFFFFFF) continue;
+                            if (hasExtFilter) {
+                                const char* name = m_pool.GetString(rec.NamePoolOffset);
+                                if (!passesFilter(rec, name)) continue;
+                            }
+                            results->push_back(i);
                         }
                     }
                 } else {
@@ -842,19 +877,25 @@ void IndexingEngine::SearchThread() {
                     // Detects single-term queries with no operators, colons, wildcards, or spaces.
                     // Avoids ALL heap allocations per record: no std::string, no std::function.
                     // Covers ~95% of real-world usage patterns (e.g. typing "1", "foo", "report").
+                    // FAST PATH detection: single-term, no modifiers, no special chars.
+                    // Checks plan.Tokens (config tokens already stripped) — so extfilt:/case:/etc.
+                    // no longer disqualify the fast path on every keystroke.
                     auto isSimpleQuery = [&]() -> bool {
-                        if (query.empty()) return false;
-                        for (char c : query) {
+                        if (plan.Tokens.size() != 1) return false;
+                        if (plan.Config.MatchPath || plan.Config.CaseSensitive || plan.Config.WholeWord || plan.Config.RegexMode) return false;
+                        const std::string& t = plan.Tokens[0];
+                        for (char c : t) {
                             if (c == ' ' || c == '\t' || c == ':' || c == '*' || c == '?' ||
                                 c == '(' || c == ')' || c == '"') return false;
                         }
-                        // No operators as standalone tokens
-                        std::string qLow = ToLowerAscii(query);
-                        return qLow != "and" && qLow != "or" && qLow != "not";
+                        std::string tLow = ToLowerAscii(t);
+                        return tLow != "and" && tLow != "or" && tLow != "not";
                     };
 
-                    // Precompute lowercase needle once (not per-record)
-                    const std::string needleLow = ToLowerAscii(query);
+                    // Precompute lowercase needle from the expression token (not the raw query
+                    // which may start with "extfilt:audio case:true" etc.)
+                    const std::string needleLow = (plan.Tokens.size() == 1)
+                        ? ToLowerAscii(plan.Tokens[0]) : ToLowerAscii(query);
                     const char* needlePtr = needleLow.c_str();
                     const size_t needleLen = needleLow.size();
 
@@ -871,8 +912,9 @@ void IndexingEngine::SearchThread() {
                                 if (rec.MftIndex == 0xFFFFFFFF) continue;
                                 // Zero allocation: use const char* directly from pool.
                                 const char* name = m_pool.GetString(rec.NamePoolOffset);
-                                if (FastContainsCIPtr(name, needlePtr, needleLen))
-                                    results->push_back(idx);
+                                if (!FastContainsCIPtr(name, needlePtr, needleLen)) continue;
+                                if (hasExtFilter && !passesFilter(rec, name)) continue;
+                                results->push_back(idx);
                             }
                         };
                         auto parallelFastLoop = [&](uint32_t count, auto getIndex) {
@@ -896,7 +938,9 @@ void IndexingEngine::SearchThread() {
                                     const auto& rec = m_recordPool.GetRecord(idx);
                                     if (rec.MftIndex == 0xFFFFFFFF) continue;
                                     const char* name = m_pool.GetString(rec.NamePoolOffset);
-                                    if (FastContainsCIPtr(name, needlePtr, needleLen)) local.push_back(idx);
+                                    if (!FastContainsCIPtr(name, needlePtr, needleLen)) continue;
+                                    if (hasExtFilter && !passesFilter(rec, name)) continue;
+                                    local.push_back(idx);
                                 }
                             };
 
@@ -932,21 +976,21 @@ void IndexingEngine::SearchThread() {
                         // Checks filename via raw pool pointer (zero allocation); builds full
                         // path lazily only for records whose filename already matched.
                         auto isPathQuery = [&]() -> bool {
-                            if (plan.Root == nullptr || plan.Root->Type != QueryNodeType::Term) return false;
-                            if (plan.Config.RegexMode || plan.Config.WholeWord) return false;
+                            if (plan.Tokens.size() != 1 || plan.Root == nullptr || plan.Root->Type != QueryNodeType::Term) return false;
+                            if (plan.Config.RegexMode || plan.Config.WholeWord || plan.Config.MatchPath) return false;
                             bool hasSlash = false;
-                            for (size_t ci = 0; ci < query.size(); ++ci) {
-                                char c = query[ci];
+                            const std::string& exprTerm = plan.Tokens[0];
+                            for (size_t ci = 0; ci < exprTerm.size(); ++ci) {
+                                char c = exprTerm[ci];
                                 if (c == ' ' || c == '\t' || c == '(' || c == ')' || c == '"') return false;
                                 if (c == '\\' || c == '/') { hasSlash = true; continue; }
-                                // Allow colon only as drive-letter separator (position 1)
                                 if (c == ':' && ci != 1) return false;
                             }
                             return hasSlash;
                         };
 
                         if (isPathQuery()) {
-                            const std::string& term = query;
+                            const std::string& term = plan.Tokens[0];
                             size_t lastSlash = term.find_last_of("\\/");
                             std::string dirPart  = term.substr(0, lastSlash + 1);
                             std::string filePart = term.substr(lastSlash + 1);
@@ -983,6 +1027,7 @@ void IndexingEngine::SearchThread() {
                                         if (!FastContains(fullPath, dirPart, caseSensitive)) continue;
                                     }
 
+                                    if (hasExtFilter && !passesFilter(rec, name)) continue;
                                     results->push_back(idx);
                                 }
                             };
@@ -1007,8 +1052,9 @@ void IndexingEngine::SearchThread() {
                                         if (!pathCached) { cachedPath = WideToUtf8(GetFullPathInternal(idx)); pathCached = true; }
                                         return cachedPath;
                                     };
-                                    if (evaluateTerm(plan.Root.get(), plan, idx, rec, nameStr, getPath))
-                                        results->push_back(idx);
+                                    if (!evaluateTerm(plan.Root.get(), plan, idx, rec, nameStr, getPath)) continue;
+                                    if (hasExtFilter && !passesFilter(rec, nameStr.c_str())) continue;
+                                    results->push_back(idx);
                                 }
                             };
                             if (usePreSorted)

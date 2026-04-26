@@ -6,6 +6,16 @@
 #include <intrin.h>
 #include <windows.h>
 
+// Extension whitelists for file-type quick-filters.
+// Defined here so BuildQueryPlan can populate QueryConfig.ExtWhitelist
+// without exposing them to the UI layer. TriggerSearch emits "extfilt:audio" etc.
+static const char* s_audioExts[]      = {"mp3","flac","aac","wav","ogg","m4a","wma","opus","aiff","alac",nullptr};
+static const char* s_compressedExts[] = {"zip","7z","rar","tar","gz","xz","bz2","zst","cab","iso",nullptr};
+static const char* s_documentExts[]   = {"doc","docx","xls","xlsx","ppt","pptx","pdf","txt","rtf","odt","ods","odp","md","csv",nullptr};
+static const char* s_executableExts[] = {"exe","dll","msi","bat","cmd","ps1","com","scr","vbs","wsf",nullptr};
+static const char* s_pictureExts[]    = {"jpg","jpeg","png","gif","bmp","tif","tiff","webp","heic","svg","ico","raw","cr2","nef","arw",nullptr};
+static const char* s_videoExts[]      = {"mp4","mkv","avi","mov","wmv","flv","webm","m4v","mpg","mpeg","ts",nullptr};
+
 const unsigned char g_ToLowerLookup[256] = {
     0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,
     32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,
@@ -271,6 +281,22 @@ QueryPlan BuildQueryPlan(const std::string& rawQuery) {
         if (low.rfind("case:", 0) == 0) { plan.Config.CaseSensitive = ParseBool(token.substr(5)); continue; }
         if (low.rfind("regex:", 0) == 0) { plan.Config.RegexMode = ParseBool(token.substr(6)); continue; }
         if (low.rfind("word:", 0) == 0) { plan.Config.WholeWord = ParseBool(token.substr(5)); continue; }
+        if (low.rfind("matchpath:", 0) == 0) { plan.Config.MatchPath = ParseBool(token.substr(10)); continue; }
+        if (low.rfind("diacritics:", 0) == 0) { plan.Config.MatchDiacritics = ParseBool(token.substr(11)); continue; }
+        if (low.rfind("extfilt:", 0) == 0) {
+            // File-type quick-filter token emitted by TriggerSearch().
+            // Sets ExtWhitelist or FolderOnly on QueryConfig so the engine's fast loops
+            // can apply the filter inline without constructing an OR-clause AST.
+            std::string filt = low.substr(8);
+            if      (filt == "audio")      plan.Config.ExtWhitelist = s_audioExts;
+            else if (filt == "compressed") plan.Config.ExtWhitelist = s_compressedExts;
+            else if (filt == "document")   plan.Config.ExtWhitelist = s_documentExts;
+            else if (filt == "executable") plan.Config.ExtWhitelist = s_executableExts;
+            else if (filt == "picture")    plan.Config.ExtWhitelist = s_pictureExts;
+            else if (filt == "video")      plan.Config.ExtWhitelist = s_videoExts;
+            else if (filt == "folder")     plan.Config.FolderOnly = true;
+            continue;
+        }
         if (low.rfind("sort:", 0) == 0) {
             std::string key = low.substr(5);
             if (key == "path") plan.Config.SortKey = QuerySortKey::Path;

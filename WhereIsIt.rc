@@ -59,7 +59,25 @@ BEGIN
     END
     POPUP "&Search"
     BEGIN
-        MENUITEM "&Match Case",          IDM_SEARCH_MATCHCASE
+        MENUITEM "Match &Case\tCtrl+I",          IDM_SEARCH_MATCHCASE
+        MENUITEM "Match &Whole Word\tCtrl+B",    IDM_SEARCH_WHOLEWORD
+        MENUITEM "Match &Path\tCtrl+U",          IDM_SEARCH_MATCHPATH
+        MENUITEM "Match &Diacritics\tCtrl+M",   IDM_SEARCH_DIACRITICS
+        MENUITEM SEPARATOR
+        MENUITEM "Enable &Regex\tCtrl+R",        IDM_SEARCH_REGEX
+        MENUITEM SEPARATOR
+        MENUITEM "&Advanced Search...",          IDM_SEARCH_ADVANCED
+        MENUITEM "Add to &Filters...",           IDM_SEARCH_ADDFILTER
+        MENUITEM "&Organize Filters...\tCtrl+Shift+F", IDM_SEARCH_ORGANIZEFILTER
+        MENUITEM SEPARATOR
+        MENUITEM "&Everything",                  IDM_FILTER_EVERYTHING
+        MENUITEM "&Audio",                       IDM_FILTER_AUDIO
+        MENUITEM "C&ompressed",                  IDM_FILTER_COMPRESSED
+        MENUITEM "&Document",                    IDM_FILTER_DOCUMENT
+        MENUITEM "E&xecutable",                  IDM_FILTER_EXECUTABLE
+        MENUITEM "&Folder",                      IDM_FILTER_FOLDER
+        MENUITEM "&Picture",                     IDM_FILTER_PICTURE
+        MENUITEM "&Video",                       IDM_FILTER_VIDEO
     END
     POPUP "&Bookmarks"
     BEGIN
@@ -83,12 +101,18 @@ END
 
 IDC_WHEREISIT ACCELERATORS
 BEGIN
-    "1",            IDM_VIEW_EXTRALARGE,    VIRTKEY, CONTROL, SHIFT, NOINVERT
-    "2",            IDM_VIEW_LARGE,         VIRTKEY, CONTROL, SHIFT, NOINVERT
-    "3",            IDM_VIEW_MEDIUM,        VIRTKEY, CONTROL, SHIFT, NOINVERT
-    "6",            IDM_VIEW_DETAILS,       VIRTKEY, CONTROL, SHIFT, NOINVERT
-    "?",            IDM_ABOUT,              ASCII,  ALT
-    "/",            IDM_ABOUT,              ASCII,  ALT
+    "1",            IDM_VIEW_EXTRALARGE,          VIRTKEY, CONTROL, SHIFT, NOINVERT
+    "2",            IDM_VIEW_LARGE,               VIRTKEY, CONTROL, SHIFT, NOINVERT
+    "3",            IDM_VIEW_MEDIUM,              VIRTKEY, CONTROL, SHIFT, NOINVERT
+    "6",            IDM_VIEW_DETAILS,             VIRTKEY, CONTROL, SHIFT, NOINVERT
+    "I",            IDM_SEARCH_MATCHCASE,         VIRTKEY, CONTROL, NOINVERT
+    "B",            IDM_SEARCH_WHOLEWORD,         VIRTKEY, CONTROL, NOINVERT
+    "U",            IDM_SEARCH_MATCHPATH,         VIRTKEY, CONTROL, NOINVERT
+    "M",            IDM_SEARCH_DIACRITICS,        VIRTKEY, CONTROL, NOINVERT
+    "R",            IDM_SEARCH_REGEX,             VIRTKEY, CONTROL, NOINVERT
+    "F",            IDM_SEARCH_ORGANIZEFILTER,    VIRTKEY, CONTROL, SHIFT, NOINVERT
+    "?",            IDM_ABOUT,                    ASCII,   ALT
+    "/",            IDM_ABOUT,                    ASCII,   ALT
 END
 
 

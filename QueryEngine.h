@@ -19,11 +19,15 @@ bool ParseSizeBytes(const std::string& raw, uint64_t& out);
 bool ParseDateToFileTime(const std::string& raw, uint64_t& out);
 
 struct QueryConfig {
-    bool CaseSensitive = false;
-    bool RegexMode = false;
-    bool WholeWord = false;
-    bool SortDescending = false;
-    QuerySortKey SortKey = QuerySortKey::Name;
+    bool CaseSensitive   = false;
+    bool RegexMode       = false;
+    bool WholeWord       = false;
+    bool MatchPath       = false;   // apply every term against full path as well as filename
+    bool MatchDiacritics = false;   // accent-sensitive (reserved for future Unicode fold)
+    bool SortDescending  = false;
+    bool FolderOnly      = false;   // show only directories
+    QuerySortKey SortKey         = QuerySortKey::Name;
+    const char* const* ExtWhitelist = nullptr;  // null-terminated list of allowed lowercase exts; null=no filter
 };
 
 struct CompiledPattern {

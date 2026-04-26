@@ -53,6 +53,43 @@ std::vector<std::wstring> g_HighlightTokens;
 // Global UI Context
 std::wstring g_InitialSearchPath;
 
+// --- Search option state ---
+bool g_MatchCase       = false;
+bool g_MatchWholeWord  = false;
+bool g_MatchPath       = false;
+bool g_MatchDiacritics = false;
+bool g_EnableRegex     = false;
+int  g_FileTypeFilter  = IDM_FILTER_EVERYTHING;
+
+
+
+// --- TriggerSearch ---
+// Centralises every search trigger. Prepends inline flag tokens based on
+// the current UI option flags, then sends the combined query to the engine.
+static void TriggerSearch() {
+    std::string q = WideToUtf8(g_CurrentQueryW);
+    // Prepend option flags as inline query tokens.
+    // The QueryEngine's BuildQueryPlan already parses these natively.
+    if (g_MatchDiacritics) q = "diacritics:true " + q;
+    if (g_MatchPath)       q = "matchpath:true " + q;
+    if (g_EnableRegex)     q = "regex:true " + q;
+    if (g_MatchWholeWord)  q = "word:true " + q;
+    if (g_MatchCase)       q = "case:true " + q;
+    // File-type filter: prepend a single "extfilt:X" token.
+    // BuildQueryPlan strips this into QueryConfig.ExtWhitelist / FolderOnly,
+    // so the engine's AVX2 fast loops apply the filter inline with zero AST overhead.
+    const char* extFiltName = nullptr;
+    if      (g_FileTypeFilter == IDM_FILTER_AUDIO)      extFiltName = "extfilt:audio";
+    else if (g_FileTypeFilter == IDM_FILTER_COMPRESSED)  extFiltName = "extfilt:compressed";
+    else if (g_FileTypeFilter == IDM_FILTER_DOCUMENT)    extFiltName = "extfilt:document";
+    else if (g_FileTypeFilter == IDM_FILTER_EXECUTABLE)  extFiltName = "extfilt:executable";
+    else if (g_FileTypeFilter == IDM_FILTER_FOLDER)      extFiltName = "extfilt:folder";
+    else if (g_FileTypeFilter == IDM_FILTER_PICTURE)     extFiltName = "extfilt:picture";
+    else if (g_FileTypeFilter == IDM_FILTER_VIDEO)       extFiltName = "extfilt:video";
+    if (extFiltName) q = std::string(extFiltName) + (q.empty() ? "" : " ") + q;
+    g_Engine->Search(q);
+}
+
 void UpdateHighlightTokens() {
     g_HighlightTokens.clear();
     std::wstring searchStr = g_CurrentQueryW;
@@ -642,7 +679,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
     }
     case WM_USER_STATUS_CHANGED:
-        if (g_CurrentQueryW[0] != 0) {
+        // Show object count when a query OR active filter is shaping results.
+        if (g_CurrentQueryW[0] != 0 || g_FileTypeFilter != IDM_FILTER_EVERYTHING) {
             std::wstring status = FormatNumberWithCommas(g_ActiveResults ? g_ActiveResults->size() : 0) + L" objects";
             SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)status.c_str());
         } else SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)g_Engine->GetCurrentStatus().c_str());
@@ -662,7 +700,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     ListView_RedrawItems(hFileList, top, bottom - 1);
                 }
             }
-            if (g_CurrentQueryW[0] != 0) {
+            if (g_CurrentQueryW[0] != 0 || g_FileTypeFilter != IDM_FILTER_EVERYTHING) {
                 std::wstring status = FormatNumberWithCommas(count) + L" objects";
                 SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)status.c_str());
             } else {
@@ -706,13 +744,58 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_COMMAND:
         if (LOWORD(wParam) == IDC_SEARCH_EDIT && HIWORD(wParam) == EN_CHANGE) {
             GetWindowText(hSearchEdit, g_CurrentQueryW, 256);
-            std::string queryA = WideToUtf8(g_CurrentQueryW);
             UpdateHighlightTokens();
-            g_Engine->Search(queryA);
+            TriggerSearch();
         } else {
             int wmId = LOWORD(wParam);
+            // View mode
             if (wmId >= IDM_VIEW_EXTRALARGE && wmId <= IDM_VIEW_DETAILS) {
                 SetViewMode(hWnd, wmId);
+                break;
+            }
+            // Search toggles
+            auto ToggleSearchFlag = [&](bool& flag) {
+                flag = !flag;
+                TriggerSearch();
+            };
+            switch (wmId) {
+            case IDM_SEARCH_MATCHCASE:  ToggleSearchFlag(g_MatchCase);       break;
+            case IDM_SEARCH_WHOLEWORD:  ToggleSearchFlag(g_MatchWholeWord);  break;
+            case IDM_SEARCH_MATCHPATH:  ToggleSearchFlag(g_MatchPath);       break;
+            case IDM_SEARCH_DIACRITICS: ToggleSearchFlag(g_MatchDiacritics); break;
+            case IDM_SEARCH_REGEX:      ToggleSearchFlag(g_EnableRegex);     break;
+            // File-type filter radio group
+            case IDM_FILTER_EVERYTHING:
+            case IDM_FILTER_AUDIO:
+            case IDM_FILTER_COMPRESSED:
+            case IDM_FILTER_DOCUMENT:
+            case IDM_FILTER_EXECUTABLE:
+            case IDM_FILTER_FOLDER:
+            case IDM_FILTER_PICTURE:
+            case IDM_FILTER_VIDEO:
+                g_FileTypeFilter = wmId;
+                TriggerSearch();
+                break;
+            // Stub dialogs
+            case IDM_SEARCH_ADVANCED:
+                MessageBoxW(hWnd, L"Advanced Search — Coming soon.", L"WhereIsIt", MB_OK | MB_ICONINFORMATION);
+                break;
+            case IDM_SEARCH_ADDFILTER:
+                MessageBoxW(hWnd, L"Add to Filters — Coming soon.", L"WhereIsIt", MB_OK | MB_ICONINFORMATION);
+                break;
+            case IDM_SEARCH_ORGANIZEFILTER:
+                MessageBoxW(hWnd, L"Organize Filters — Coming soon.", L"WhereIsIt", MB_OK | MB_ICONINFORMATION);
+                break;
+            case IDM_ABOUT:
+                DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, [](HWND hD, UINT m, WPARAM w, LPARAM) -> INT_PTR {
+                    if (m == WM_INITDIALOG) return TRUE;
+                    if (m == WM_COMMAND && (LOWORD(w) == IDOK || LOWORD(w) == IDCANCEL)) { EndDialog(hD, 0); return TRUE; }
+                    return FALSE;
+                });
+                break;
+            case IDM_EXIT:
+                DestroyWindow(hWnd);
+                break;
             }
         }
         break;
@@ -752,10 +835,24 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         break;
     }
-    case WM_INITMENUPOPUP:
+    case WM_INITMENUPOPUP: {
+        // Sync checkmarks and radio bullet for the Search popup before it opens.
+        HMENU hPopup = (HMENU)wParam;
+        if (GetMenuItemID(hPopup, 0) == IDM_SEARCH_MATCHCASE) {
+            // Toggle checkmarks
+            CheckMenuItem(hPopup, IDM_SEARCH_MATCHCASE,  g_MatchCase       ? MF_CHECKED : MF_UNCHECKED);
+            CheckMenuItem(hPopup, IDM_SEARCH_WHOLEWORD,  g_MatchWholeWord  ? MF_CHECKED : MF_UNCHECKED);
+            CheckMenuItem(hPopup, IDM_SEARCH_MATCHPATH,  g_MatchPath       ? MF_CHECKED : MF_UNCHECKED);
+            CheckMenuItem(hPopup, IDM_SEARCH_DIACRITICS, g_MatchDiacritics ? MF_CHECKED : MF_UNCHECKED);
+            CheckMenuItem(hPopup, IDM_SEARCH_REGEX,      g_EnableRegex     ? MF_CHECKED : MF_UNCHECKED);
+            // Radio bullet for active file-type filter
+            CheckMenuRadioItem(hPopup, IDM_FILTER_EVERYTHING, IDM_FILTER_VIDEO, g_FileTypeFilter, MF_BYCOMMAND);
+            return 0;
+        }
         if (g_pCtxMenu3) { g_pCtxMenu3->HandleMenuMsg(WM_INITMENUPOPUP, wParam, lParam); return 0; }
         if (g_pCtxMenu2) { g_pCtxMenu2->HandleMenuMsg(WM_INITMENUPOPUP, wParam, lParam); return 0; }
         break;
+    }
     case WM_MENUCHAR:
         if (g_pCtxMenu3) { LRESULT r = 0; g_pCtxMenu3->HandleMenuMsg2(WM_MENUCHAR, wParam, lParam, &r); return r; }
         break;
