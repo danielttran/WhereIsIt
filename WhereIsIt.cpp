@@ -5,9 +5,14 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <objbase.h>
-#include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <queue>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -71,26 +76,44 @@ HFONT g_FontNormal = NULL;
 HFONT g_FontBold = NULL;
 
 #define IDC_STATUS_BAR 122
-std::map<std::wstring, int> g_iconCache;
+#define WM_USER_ICON_LOADED (WM_USER + 3)
 int g_folderIconIdx = -1;
+int g_fileIconIdx = -1;
+std::unordered_map<uint32_t, int> g_recordIconCache;
+std::unordered_set<uint32_t> g_pendingIconRecords;
+std::queue<uint32_t> g_iconRequestQueue;
+std::mutex g_iconMutex;
+std::condition_variable g_iconCv;
+std::thread g_iconWorker;
+bool g_iconWorkerRunning = false;
 
 // --- UI FORMATTING HELPERS ---
 
-int GetIconIndex(const std::wstring& filename, uint16_t attributes) {
+int GetIconIndex(const std::wstring& filename, uint16_t attributes, uint32_t recordIdx) {
     if (attributes & FILE_ATTRIBUTE_DIRECTORY) {
         if (g_folderIconIdx != -1) return g_folderIconIdx;
         SHFILEINFOW sfi = { 0 }; 
         SHGetFileInfoW(L"C:\\Windows", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi), SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
         return g_folderIconIdx = sfi.iIcon;
     }
-    size_t dotPos = filename.find_last_of(L'.'); 
-    std::wstring extension = (dotPos == std::wstring::npos) ? L"" : filename.substr(dotPos);
-    auto cached = g_iconCache.find(extension);
-    if (cached != g_iconCache.end()) return cached->second;
-    SHFILEINFOW sfi = { 0 };
-    SHGetFileInfoW(filename.c_str(), FILE_ATTRIBUTE_NORMAL, &sfi, sizeof(sfi), SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
-    if (g_iconCache.size() >= 512) g_iconCache.clear();
-    return g_iconCache[extension] = sfi.iIcon;
+    {
+        std::lock_guard<std::mutex> lock(g_iconMutex);
+        auto it = g_recordIconCache.find(recordIdx);
+        if (it != g_recordIconCache.end()) return it->second;
+    }
+    if (g_fileIconIdx == -1) {
+        SHFILEINFOW sfi = { 0 };
+        SHGetFileInfoW(L".txt", FILE_ATTRIBUTE_NORMAL, &sfi, sizeof(sfi), SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+        g_fileIconIdx = sfi.iIcon;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_iconMutex);
+        if (g_pendingIconRecords.insert(recordIdx).second) {
+            g_iconRequestQueue.push(recordIdx);
+            g_iconCv.notify_one();
+        }
+    }
+    return g_fileIconIdx;
 }
 
 void FormatFileSize(wchar_t* buffer, size_t bufferLen, uint64_t bytes, uint16_t attributes) {
@@ -249,7 +272,7 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
             SetTextColor(pcd->nmcd.hdc, GetSysColor(isSelected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT));
 
             HIMAGELIST hSIL = ListView_GetImageList(hFileList, LVSIL_SMALL);
-            int iconIdx = GetIconIndex(nameStr, rec.FileAttributes);
+            int iconIdx = GetIconIndex(nameStr, rec.FileAttributes, recordIdx);
             ImageList_Draw(hSIL, iconIdx, pcd->nmcd.hdc, rect.left + 2, rect.top + (rect.bottom - rect.top - 16)/2, ILD_TRANSPARENT);
             rect.left += 20; 
 
@@ -352,6 +375,33 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         lf.lfWeight = FW_BOLD; g_FontBold = CreateFontIndirect(&lf);
         SendMessage(hSearchEdit, WM_SETFONT, (WPARAM)g_FontNormal, TRUE);
         g_Engine.SetNotifyWindow(hWnd);
+        g_iconWorkerRunning = true;
+        g_iconWorker = std::thread([hWnd]() {
+            while (true) {
+                uint32_t recordIdx = 0;
+                {
+                    std::unique_lock<std::mutex> lock(g_iconMutex);
+                    g_iconCv.wait(lock, [] { return !g_iconWorkerRunning || !g_iconRequestQueue.empty(); });
+                    if (!g_iconWorkerRunning && g_iconRequestQueue.empty()) return;
+                    recordIdx = g_iconRequestQueue.front();
+                    g_iconRequestQueue.pop();
+                }
+                std::wstring path = g_Engine.GetFullPath(recordIdx);
+                int iconIdx = g_fileIconIdx;
+                if (!path.empty()) {
+                    SHFILEINFOW sfi = { 0 };
+                    if (SHGetFileInfoW(path.c_str(), 0, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON)) {
+                        iconIdx = sfi.iIcon;
+                    }
+                }
+                {
+                    std::lock_guard<std::mutex> lock(g_iconMutex);
+                    g_recordIconCache[recordIdx] = iconIdx;
+                    g_pendingIconRecords.erase(recordIdx);
+                }
+                PostMessage(hWnd, WM_USER_ICON_LOADED, (WPARAM)recordIdx, 0);
+            }
+        });
 
         // Cache font height once for vertical centering performance in WM_SIZE.
         HDC hdc = GetDC(hSearchEdit);
@@ -407,6 +457,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)status.c_str());
             } else {
                 SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)g_Engine.GetCurrentStatus().c_str());
+            }
+        }
+        break;
+    case WM_USER_ICON_LOADED:
+        if (g_ActiveResults) {
+            uint32_t recordIdx = (uint32_t)wParam;
+            for (int i = 0; i < (int)g_ActiveResults->size(); ++i) {
+                if ((*g_ActiveResults)[i] == recordIdx) {
+                    ListView_RedrawItems(hFileList, i, i);
+                    break;
+                }
             }
         }
         break;
@@ -497,6 +558,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
     }
     case WM_DESTROY: 
+        {
+            std::lock_guard<std::mutex> lock(g_iconMutex);
+            g_iconWorkerRunning = false;
+        }
+        g_iconCv.notify_all();
+        if (g_iconWorker.joinable()) g_iconWorker.join();
         if (g_FontBold) DeleteObject(g_FontBold); 
         PostQuitMessage(0); 
         break;
