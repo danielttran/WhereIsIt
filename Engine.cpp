@@ -92,9 +92,8 @@ static bool FastContainsCIPtr(const char* haystack, const char* needleLow, size_
 #endif
     const char* p = haystack;
 #if defined(__AVX2__)
-    while (*p) {
-        size_t remaining = strlen(p);
-        if (remaining < 32) break;
+    size_t remaining = strlen(haystack);  // pre-calculated once — avoids O(N²) strlen-in-loop
+    while (remaining >= 32) {
         __m256i v = _mm256_loadu_si256((const __m256i*)p);
         __m256i eqLower = _mm256_cmpeq_epi8(v, vLower);
         __m256i eqUpper = _mm256_cmpeq_epi8(v, vUpper);
@@ -110,6 +109,7 @@ static bool FastContainsCIPtr(const char* haystack, const char* needleLow, size_
             mask &= (mask - 1);
         }
         p += 32;
+        remaining -= 32;
     }
 #endif
     for (; *p; ++p) {
@@ -1368,19 +1368,31 @@ void IndexingEngine::SearchThread() {
             if (usePreSorted) {
                 // Already sorted!
             } else if (sortKey == QuerySortKey::Path) {
-                std::vector<std::string> driveLetters;
-                driveLetters.reserve(m_drives.size());
-                for (const auto& d : m_drives) driveLetters.push_back(d.LetterUTF8);
-                try {
-                    int cmpCount = 0;
-                    std::sort(results->begin(), results->end(), [this, &driveLetters, sortDescending, &cmpCount](uint32_t a, uint32_t b) {
-                        if ((++cmpCount & 0x3F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) throw SortAbortedException();
-                        int primary = ComparePathByHierarchy(a, b, m_records, driveLetters, m_mftLookupTables, m_pool);
-                        if (primary == 0) primary = (a < b ? -1 : 1);
-                        return sortDescending ? (primary > 0) : (primary < 0);
-                    });
-                } catch (const SortAbortedException&) {
-                    // Sort aborted
+                // O(N) pre-pass: resolve and cache full paths once, then O(N log N) sort on
+                // plain strings.  Avoids the O(N log N × depth) MFT ancestor-chain traversal
+                // that ComparePathByHierarchy performs on every comparator call.
+                const size_t n = results->size();
+                struct PathEntry { std::string path; uint32_t recIdx; };
+                std::vector<PathEntry> pathEntries;
+                pathEntries.reserve(n);
+                bool aborted = false;
+                for (size_t pi = 0; pi < n; ++pi) {
+                    if ((pi & 0xFF) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) { aborted = true; break; }
+                    pathEntries.push_back({WideToUtf8(GetFullPathInternal((*results)[pi])), (*results)[pi]});
+                }
+                if (!aborted) {
+                    try {
+                        int cmpCount = 0;
+                        std::sort(pathEntries.begin(), pathEntries.end(),
+                            [sortDescending, &cmpCount, this](const PathEntry& a, const PathEntry& b) {
+                                if ((++cmpCount & 0x3F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) throw SortAbortedException();
+                                int cmp = FastCompareIgnoreCase(a.path.c_str(), b.path.c_str());
+                                if (cmp == 0) cmp = (a.recIdx < b.recIdx) ? -1 : 1;
+                                return sortDescending ? (cmp > 0) : (cmp < 0);
+                            });
+                        results->clear();
+                        for (const auto& pe : pathEntries) results->push_back(pe.recIdx);
+                    } catch (const SortAbortedException&) {}
                 }
             } else {
                 try {
@@ -1438,8 +1450,22 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
         deltas.swap(m_pendingUsnDeltas);
     }
 
+    // Phase 1 (no lock): pre-convert all incoming names to UTF-8.
+    // WideCharToMultiByte can be slow under heavy load; doing it here avoids tying up
+    // the exclusive write lock during CPU-bound string conversion.
+    std::vector<std::string> utf8Names(deltas.size());
+    for (size_t i = 0; i < deltas.size(); ++i)
+        if (deltas[i].Type == PendingUsnDelta::Kind::Upsert)
+            utf8Names[i] = WideToUtf8(deltas[i].Name);
+
+    // Phase 2: apply under exclusive lock in epochs of 256 to keep lock windows bounded.
+    // Yielding between epochs allows SearchThread and UI reads to proceed during
+    // massive file-system events (e.g., node_modules installs creating tens of thousands
+    // of files at once).
+    constexpr size_t kEpochSize = 256;
     std::unique_lock<std::shared_mutex> lock(m_dataMutex);
-    for (const auto& d : deltas) {
+    for (size_t i = 0; i < deltas.size(); ++i) {
+        const auto& d = deltas[i];
         const uint8_t di = d.DriveIndex;
         if (di >= m_mftLookupTables.size()) continue;
         if (d.Type == PendingUsnDelta::Kind::Delete) {
@@ -1455,17 +1481,17 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
             continue;
         }
 
+        const std::string& incomingNameUtf8 = utf8Names[i];
         uint32_t existing = 0xFFFFFFFF;
         if (d.MftIndex < (uint32_t)m_mftLookupTables[di].size()) existing = m_mftLookupTables[di][d.MftIndex];
 
         uint32_t nameOffset = 0;
         if (existing != 0xFFFFFFFF && existing < m_records.size()) {
             const char* existingNameUtf8 = m_pool.GetString(m_records[existing].NamePoolOffset);
-            std::string incomingNameUtf8 = WideToUtf8(d.Name);
             if (existingNameUtf8 && incomingNameUtf8 == existingNameUtf8) nameOffset = m_records[existing].NamePoolOffset;
         }
         if (nameOffset == 0) {
-            try { nameOffset = m_pool.AddString(d.Name); }
+            try { nameOffset = m_pool.AddRawData(incomingNameUtf8.c_str(), incomingNameUtf8.size() + 1); }
             catch (const std::bad_alloc&) { continue; }
         }
 
@@ -1503,6 +1529,12 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
             }
             m_mftLookupTables[di][d.MftIndex] = idx;
             if (rec.IsGiantFile) m_giantFileSizes[idx] = d.FileSize;
+        }
+
+        // Yield the exclusive lock every kEpochSize operations so readers can proceed.
+        if ((i & (kEpochSize - 1)) == (kEpochSize - 1) && i + 1 < deltas.size()) {
+            lock.unlock();
+            lock.lock();
         }
     }
 }
@@ -1895,7 +1927,7 @@ void IndexingEngine::ScanGenericDrive(DriveScanContext& ctx, const std::wstring&
 }
 
 void IndexingEngine::ScanMftForDrive(DriveScanContext& ctx) {
-    NTFS_VOLUME_DATA_BUFFER nt; DWORD cb; 
+    NTFS_VOLUME_DATA_BUFFER nt; DWORD cb;
     if (!DeviceIoControl(ctx.VolumeHandle, FSCTL_GET_NTFS_VOLUME_DATA, NULL, 0, &nt, sizeof(nt), &cb, NULL)) return;
     USN_JOURNAL_DATA_V0 uj; if (DeviceIoControl(ctx.VolumeHandle, FSCTL_QUERY_USN_JOURNAL, NULL, 0, &uj, sizeof(uj), &cb, NULL)) ctx.LastProcessedUsn = uj.NextUsn;
     uint64_t maxMft = nt.MftValidDataLength.QuadPart / nt.BytesPerFileRecordSegment;
@@ -1906,9 +1938,96 @@ void IndexingEngine::ScanMftForDrive(DriveScanContext& ctx) {
     while (ao0 + sizeof(MFT_ATTRIBUTE) < nt.BytesPerFileRecordSegment) {
         MFT_ATTRIBUTE* a = (MFT_ATTRIBUTE*)&r0[ao0];
         if (a->Type == 0x80) {
+            // $ATTRIBUTE_LIST entry — each entry lists an attribute and which MFT record holds it.
+            #pragma pack(push, 1)
+            struct AttrListEntry {
+                uint32_t Type; uint16_t Length; uint8_t NameLength; uint8_t NameOffset;
+                uint64_t LowestVcn; uint64_t MftRef; uint16_t AttributeId;
+            };
+            #pragma pack(pop)
+
             struct MFT_NR { MFT_ATTRIBUTE h; uint64_t startVcn, lastVcn; uint16_t runOffset; }* nr = (MFT_NR*)a;
-            uint8_t* rl = (uint8_t*)a + nr->runOffset; int64_t curLcn = 0; uint32_t mftCounter = 0;
-            std::vector<uint8_t> eb(1024*1024);
+            uint8_t* rlBase = (uint8_t*)a + nr->runOffset;
+
+            // Store the MFT run list for targeted random-access reads during the post-scan pass.
+            struct MftRun { uint64_t vcnStart; int64_t lcnStart; uint64_t length; };
+            std::vector<MftRun> mftRuns;
+            {
+                uint8_t* rl2 = rlBase; uint64_t vcn = 0; int64_t lcn = 0;
+                while (*rl2) {
+                    uint8_t hb = *rl2++; int ls = hb & 0xF, os = hb >> 4;
+                    uint64_t len = 0; for (int j = 0; j < ls; j++) len |= (uint64_t)(*rl2++) << (j * 8);
+                    int64_t runOff = 0; for (int j = 0; j < os; j++) runOff |= (int64_t)(*rl2++) << (j * 8);
+                    if (os > 0 && (runOff >> (os * 8 - 1)) & 1) for (int j = os; j < 8; j++) runOff |= (int64_t)0xFF << (j * 8);
+                    lcn += runOff; mftRuns.push_back({vcn, lcn, len}); vcn += len;
+                }
+            }
+
+            // Read a single MFT record by its logical index into a pre-allocated buffer.
+            auto readMftRecord = [&](uint32_t mftIdx, std::vector<uint8_t>& buf) -> bool {
+                uint64_t byteOff = (uint64_t)mftIdx * nt.BytesPerFileRecordSegment;
+                uint64_t vcn = byteOff / nt.BytesPerCluster;
+                uint64_t vcnOff = byteOff % nt.BytesPerCluster;
+                for (const auto& run : mftRuns) {
+                    if (vcn >= run.vcnStart && vcn < run.vcnStart + run.length) {
+                        int64_t lcn = run.lcnStart + (int64_t)(vcn - run.vcnStart);
+                        LARGE_INTEGER seekPos; seekPos.QuadPart = lcn * nt.BytesPerCluster + (int64_t)vcnOff;
+                        DWORD br2 = 0;
+                        if (!SetFilePointerEx(ctx.VolumeHandle, seekPos, NULL, FILE_BEGIN)) return false;
+                        if (!ReadFile(ctx.VolumeHandle, buf.data(), nt.BytesPerFileRecordSegment, &br2, NULL)) return false;
+                        return br2 == (DWORD)nt.BytesPerFileRecordSegment;
+                    }
+                }
+                return false;
+            };
+
+            // Apply NTFS update-sequence-array fixup to a record buffer in place.
+            auto applyFixup = [&](uint8_t* recBuf) {
+                MFT_RECORD_HEADER* rh = (MFT_RECORD_HEADER*)recBuf;
+                if (rh->UpdateSeqOffset + rh->UpdateSeqSize * (uint32_t)sizeof(uint16_t) <= nt.BytesPerFileRecordSegment) {
+                    uint16_t* usa = (uint16_t*)(recBuf + rh->UpdateSeqOffset);
+                    for (uint16_t s = 1; s < rh->UpdateSeqSize; s++) {
+                        if (s * 512u > nt.BytesPerFileRecordSegment) break;
+                        uint16_t* sectorEnd = (uint16_t*)(recBuf + s * 512 - 2);
+                        if (*sectorEnd == usa[0]) *sectorEnd = usa[s];
+                    }
+                }
+            };
+
+            // Commit a 0x30 $FILE_NAME attribute to ctx.Records under effectiveMftIdx.
+            auto commitFileName = [&](uint8_t* recBuf, uint32_t attrOff, uint32_t effectiveMftIdx, uint16_t seq, uint16_t rhFlags) {
+                MFT_ATTRIBUTE* aa = (MFT_ATTRIBUTE*)(recBuf + attrOff);
+                if (aa->Type != 0x30 || aa->NonResident) return;
+                MFT_FILE_NAME* fn = (MFT_FILE_NAME*)(recBuf + attrOff + ((MFT_RESIDENT_ATTRIBUTE*)aa)->ValueOffset);
+                if (fn->NameNamespace == 2) return;  // skip DOS-only short names
+                FileRecord entry = {};
+                entry.NamePoolOffset   = ctx.Pool.AddString(fn->Name, fn->NameLength);
+                entry.ParentMftIndex   = (uint32_t)(fn->ParentDirectory & 0xFFFFFFFFFFFFLL);
+                entry.MftIndex         = effectiveMftIdx;
+                entry.LastModifiedEpoch = FileTimeToUnixEpochSeconds(fn->LastWriteTime);
+                entry.FileSize         = fn->DataSize >= 0xFFFFFFFFULL ? 0xFFFFFFFFu : (uint32_t)fn->DataSize;
+                entry.MftSequence      = seq;
+                entry.ParentSequence   = (uint16_t)(fn->ParentDirectory >> 48);
+                entry.DriveIndex       = ctx.DriveIndex;
+                entry.IsGiantFile      = fn->DataSize >= 0xFFFFFFFFULL ? 1u : 0u;
+                entry.FileAttributes   = (uint16_t)fn->FileAttributes;
+                entry.Reserved = 0; entry.Padding = 0;
+                if (rhFlags & 0x02) entry.FileAttributes |= 0x10;
+                uint32_t ri = (uint32_t)ctx.Records.size(); ctx.Records.push_back(entry);
+                if (entry.IsGiantFile) ctx.GiantFileSizes[ri] = fn->DataSize;
+                if (effectiveMftIdx < (uint32_t)ctx.LookupTable.size()) ctx.LookupTable[effectiveMftIdx] = ri;
+            };
+
+            // Maps extension MFT index -> (base MFT index, base sequence number).
+            // Populated while parsing 0x20 attribute lists in base records.
+            std::unordered_map<uint32_t, std::pair<uint32_t, uint16_t>> pendingExtensions;
+            // Extension records whose 0x30 was already committed during the linear scan.
+            std::unordered_set<uint32_t> processedExtensions;
+
+            uint8_t* rl = rlBase; int64_t curLcn = 0; uint32_t mftCounter = 0;
+            std::vector<uint8_t> eb(1024 * 1024);
+            std::vector<uint8_t> extBuf(nt.BytesPerFileRecordSegment);
+
             while (*rl) {
                 uint8_t hb = *rl++; int ls = hb & 0xF, os = hb >> 4;
                 uint64_t len = 0; for (int j=0; j<ls; j++) len |= (uint64_t)(*rl++) << (j*8);
@@ -1917,48 +2036,70 @@ void IndexingEngine::ScanMftForDrive(DriveScanContext& ctx) {
                 curLcn += runOff; LARGE_INTEGER eo; eo.QuadPart = curLcn * nt.BytesPerCluster;
                 SetFilePointerEx(ctx.VolumeHandle, eo, NULL, FILE_BEGIN); uint64_t bt = len * nt.BytesPerCluster;
                 DWORD br;
-                for (uint64_t r=0; r<bt; r+=br) {
-                    if (!ReadFile(ctx.VolumeHandle, eb.data(), (DWORD)min(bt-r, 1024*1024ULL), &br, NULL) || !br) break;
-                    for (uint32_t k=0; k+nt.BytesPerFileRecordSegment <= br; k+=nt.BytesPerFileRecordSegment) {
+                for (uint64_t r = 0; r < bt; r += br) {
+                    if (!ReadFile(ctx.VolumeHandle, eb.data(), (DWORD)min(bt - r, 1024 * 1024ULL), &br, NULL) || !br) break;
+                    for (uint32_t k = 0; k + nt.BytesPerFileRecordSegment <= br; k += nt.BytesPerFileRecordSegment) {
                         uint32_t tm = mftCounter++; MFT_RECORD_HEADER* rh = (MFT_RECORD_HEADER*)&eb[k];
                         if (rh->Magic != 0x454C4946 || !(rh->Flags & 0x01)) continue;
-                        if (rh->UpdateSeqOffset + rh->UpdateSeqSize * (uint32_t)sizeof(uint16_t) <= nt.BytesPerFileRecordSegment) {
-                            uint16_t* usa = (uint16_t*)((uint8_t*)rh + rh->UpdateSeqOffset);
-                            for (uint16_t s = 1; s < rh->UpdateSeqSize; s++) {
-                                if (s * 512u > nt.BytesPerFileRecordSegment) break;
-                                uint16_t* sectorEnd = (uint16_t*)((uint8_t*)rh + s * 512 - 2);
-                                if (*sectorEnd == usa[0]) *sectorEnd = usa[s];
-                            }
-                        }
+                        applyFixup(&eb[k]);
+
+                        // Extension records carry their base record's MFT reference in BaseRecord.
+                        // Use the base MFT index so parent-chain lookups resolve correctly.
+                        bool isExtension = (rh->BaseRecord != 0);
+                        uint32_t effectiveMftIdx = isExtension
+                            ? (uint32_t)(rh->BaseRecord & 0xFFFFFFFFFFFFLL)
+                            : tm;
+                        uint16_t effectiveSeq = isExtension
+                            ? (uint16_t)(rh->BaseRecord >> 48)
+                            : rh->SequenceNumber;
+
                         uint32_t ao = rh->AttributeOffset;
                         while (ao + sizeof(MFT_ATTRIBUTE) < nt.BytesPerFileRecordSegment) {
-                            MFT_ATTRIBUTE* aa = (MFT_ATTRIBUTE*)&eb[k+ao];
-                            if (aa->Type == 0xFFFFFFFF) break; 
+                            MFT_ATTRIBUTE* aa = (MFT_ATTRIBUTE*)&eb[k + ao];
+                            if (aa->Type == 0xFFFFFFFF) break;
+
                             if (aa->Type == 0x30 && !aa->NonResident) {
-                                MFT_FILE_NAME* fn = (MFT_FILE_NAME*)&eb[k+ao+((MFT_RESIDENT_ATTRIBUTE*)aa)->ValueOffset];
-                                if (fn->NameNamespace != 2) {
-                                    FileRecord entry = {};
-                                    entry.NamePoolOffset = ctx.Pool.AddString(fn->Name, fn->NameLength);
-                                    entry.ParentMftIndex = (uint32_t)(fn->ParentDirectory & 0xFFFFFFFFFFFFLL);
-                                    entry.MftIndex = tm;
-                                    entry.LastModifiedEpoch = FileTimeToUnixEpochSeconds(fn->LastWriteTime);
-                                    entry.FileSize = fn->DataSize >= 0xFFFFFFFFULL ? 0xFFFFFFFFu : (uint32_t)fn->DataSize;
-                                    entry.MftSequence = rh->SequenceNumber;
-                                    entry.ParentSequence = (uint16_t)(fn->ParentDirectory >> 48);
-                                    entry.DriveIndex = ctx.DriveIndex;
-                                    entry.IsGiantFile = fn->DataSize >= 0xFFFFFFFFULL ? 1u : 0u;
-                                    entry.FileAttributes = (uint16_t)fn->FileAttributes;
-                                    entry.Reserved = 0;
-                                    entry.Padding = 0;
-                                    if (rh->Flags & 0x02) entry.FileAttributes |= 0x10;
-                                    uint32_t ri = (uint32_t)ctx.Records.size(); ctx.Records.push_back(entry);
-                                    if (entry.IsGiantFile) ctx.GiantFileSizes[ri] = fn->DataSize;
-                                    if (tm < (uint32_t)ctx.LookupTable.size()) ctx.LookupTable[tm] = ri;
+                                commitFileName(&eb[k], ao, effectiveMftIdx, effectiveSeq, rh->Flags);
+                                if (isExtension) processedExtensions.insert(tm);
+                            } else if (aa->Type == 0x20 && !isExtension && !aa->NonResident) {
+                                // Parse $ATTRIBUTE_LIST: collect 0x30 attributes hosted in extension records
+                                // so we can fetch any that the linear scan may miss.
+                                MFT_RESIDENT_ATTRIBUTE* ra = (MFT_RESIDENT_ATTRIBUTE*)aa;
+                                const uint8_t* le = &eb[k + ao + ra->ValueOffset];
+                                const uint8_t* leEnd = le + ra->ValueLength;
+                                while (le + sizeof(AttrListEntry) <= leEnd) {
+                                    const AttrListEntry* ale = (const AttrListEntry*)le;
+                                    if (ale->Length < sizeof(AttrListEntry)) break;
+                                    if (ale->Type == 0x30) {
+                                        uint32_t extMftIdx = (uint32_t)(ale->MftRef & 0xFFFFFFFFFFFFLL);
+                                        if (extMftIdx != tm)  // attribute lives in an extension record
+                                            pendingExtensions.try_emplace(extMftIdx, tm, rh->SequenceNumber);
+                                    }
+                                    le += ale->Length;
                                 }
                             }
                             if (!aa->Length) break; ao += aa->Length;
                         }
                     }
+                }
+            }
+
+            // Post-scan pass: fetch extension records whose 0x30 was not encountered during
+            // the sequential read (e.g., extension record index precedes its base record).
+            for (const auto& [extMftIdx, baseInfo] : pendingExtensions) {
+                if (processedExtensions.count(extMftIdx)) continue;
+                auto [baseMftIdx, baseSeq] = baseInfo;
+                if (!readMftRecord(extMftIdx, extBuf)) continue;
+                MFT_RECORD_HEADER* rh = (MFT_RECORD_HEADER*)extBuf.data();
+                if (rh->Magic != 0x454C4946 || !(rh->Flags & 0x01)) continue;
+                applyFixup(extBuf.data());
+                uint32_t ao = rh->AttributeOffset;
+                while (ao + sizeof(MFT_ATTRIBUTE) < nt.BytesPerFileRecordSegment) {
+                    MFT_ATTRIBUTE* aa = (MFT_ATTRIBUTE*)&extBuf[ao];
+                    if (aa->Type == 0xFFFFFFFF) break;
+                    if (aa->Type == 0x30 && !aa->NonResident)
+                        commitFileName(extBuf.data(), ao, baseMftIdx, baseSeq, rh->Flags);
+                    if (!aa->Length) break; ao += aa->Length;
                 }
             }
             break;

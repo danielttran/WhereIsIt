@@ -4,7 +4,9 @@
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shlwapi.h>
 #include <objbase.h>
+#pragma comment(lib, "shlwapi.lib")
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -277,23 +279,21 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
             rect.left += 20; 
 
             size_t matchPos = std::wstring::npos;
-            std::wstring matchedTerm;
+            size_t matchLen = 0;
 
             if (!g_HighlightTokens.empty()) {
-                // Lower-case name for highlight matching. Only for visible rows, so towlower loop is cheap.
-                std::wstring nameLower = nameStr;
-                for (auto& c : nameLower) c = towlower(c);
+                // StrStrIW: zero-allocation, case-insensitive search directly on the original string.
                 for (const auto& token : g_HighlightTokens) {
-                    size_t pos = nameLower.find(token);
-                    if (pos != std::wstring::npos) { matchPos = pos; matchedTerm = token; break; }
+                    const wchar_t* found = StrStrIW(nameStr.c_str(), token.c_str());
+                    if (found) { matchPos = (size_t)(found - nameStr.c_str()); matchLen = token.size(); break; }
                 }
             }
 
             SetBkMode(pcd->nmcd.hdc, TRANSPARENT);
-            if (matchPos != std::wstring::npos && !matchedTerm.empty()) {
+            if (matchPos != std::wstring::npos && matchLen > 0) {
                 std::wstring p1 = nameStr.substr(0, matchPos);
-                std::wstring p2 = nameStr.substr(matchPos, matchedTerm.length());
-                std::wstring p3 = nameStr.substr(matchPos + matchedTerm.length());
+                std::wstring p2 = nameStr.substr(matchPos, matchLen);
+                std::wstring p3 = nameStr.substr(matchPos + matchLen);
 
                 SelectObject(pcd->nmcd.hdc, g_FontNormal);
                 DrawTextW(pcd->nmcd.hdc, p1.c_str(), -1, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
