@@ -85,10 +85,11 @@ int GetIconIndex(const std::wstring& filename, uint16_t attributes) {
     }
     size_t dotPos = filename.find_last_of(L'.'); 
     std::wstring extension = (dotPos == std::wstring::npos) ? L"" : filename.substr(dotPos);
-    auto cached = g_iconCache.find(extension); 
+    auto cached = g_iconCache.find(extension);
     if (cached != g_iconCache.end()) return cached->second;
-    SHFILEINFOW sfi = { 0 }; 
+    SHFILEINFOW sfi = { 0 };
     SHGetFileInfoW(filename.c_str(), FILE_ATTRIBUTE_NORMAL, &sfi, sizeof(sfi), SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+    if (g_iconCache.size() >= 512) g_iconCache.clear();
     return g_iconCache[extension] = sfi.iIcon;
 }
 
