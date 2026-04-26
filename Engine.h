@@ -49,10 +49,11 @@ struct FileRecord {
     uint32_t FileSize;
     uint16_t MftSequence;
     uint16_t ParentSequence;
-    uint32_t DriveIndex : 6;
-    uint32_t IsGiantFile : 1;
-    uint32_t FileAttributes : 16;
-    uint32_t Reserved : 9;
+    uint32_t DriveIndex       : 6;
+    uint32_t IsGiantFile      : 1;
+    uint32_t FileAttributes   : 16;
+    uint32_t DirSizeComputed  : 1;   // set after directory sizes have been propagated
+    uint32_t Reserved         : 8;
     uint32_t Padding;
 };
 #pragma pack(pop)
@@ -79,58 +80,121 @@ struct MFT_FILE_NAME {
 
 class StringPool {
 public:
-    StringPool(size_t initialCapacity = 20 * 1024 * 1024);
+    static constexpr size_t kChunkSize = 16 * 1024 * 1024;  // 16 MB per chunk
+
+    StringPool(size_t /*ignored*/ = 0);
     uint32_t AddString(const std::wstring& text);
     uint32_t AddString(const wchar_t* text, size_t length);
     const char* GetString(uint32_t offset) const;
-    const char* GetRawData() const { return m_pool.data(); }
-    size_t GetSize() const { return m_pool.size(); }
+    size_t GetSize() const { return m_totalSize; }
     void Clear();
     void LoadRawData(const char* data, size_t size);
     uint32_t AddRawData(const char* data, size_t size);
+    // Write all chunks contiguously into a pre-allocated destination buffer (used by SaveIndex).
+    void WriteRawTo(uint8_t* dest) const;
+    // Iterate each contiguous chunk: calls fn(data, bytes) per chunk in order.
+    template<typename Fn>
+    void ForEachChunk(Fn fn) const {
+        for (size_t ci = 0; ci < m_chunks.size(); ++ci) {
+            bool isLast  = (ci == m_chunks.size() - 1);
+            size_t bytes = isLast ? m_chunkUsed : kChunkSize;
+            if (bytes > 0) fn(m_chunks[ci].get(), bytes);
+        }
+    }
 private:
-    std::vector<char> m_pool;
+    std::vector<std::unique_ptr<char[]>> m_chunks;
+    size_t m_chunkUsed = 0;  // bytes used in the current (last) chunk
+    size_t m_totalSize = 0;  // total bytes across all chunks
+
+    // Ensure there is room for `needed` bytes in the current chunk,
+    // allocating a new chunk if necessary.
+    char* Reserve(size_t needed);
 };
 
-class IndexingEngine {
-public:
+// ---------------------------------------------------------------------------
+// IIndexEngine — pure-virtual interface
+// Decouples the UI layer from the engine implementation.
+// IndexingEngine is the in-process implementation; a future NamedPipeClient
+// can implement the same interface to transparently move the engine to a
+// background service (bypassing UAC prompts for raw-disk NTFS access).
+// ---------------------------------------------------------------------------
+struct IIndexEngine {
+    // Lifecycle
+    virtual void Start() = 0;
+    virtual void Stop()  = 0;
+
+    // Search & sort
+    virtual void Search(const std::string& query) = 0;
+    virtual void Sort(QuerySortKey key, bool descending) = 0;
+    virtual std::shared_ptr<std::vector<uint32_t>> GetSearchResults() = 0;
+
+    // UI notification hook
+    virtual void SetNotifyWindow(HWND hwnd) = 0;
+
+    // Record accessors
+    virtual FileRecord                           GetRecord(uint32_t recordIndex) const = 0;
+    virtual uint64_t                             GetRecordFileSize(uint32_t recordIndex) const = 0;
+    virtual uint64_t                             GetRecordLastModifiedFileTime(uint32_t recordIndex) const = 0;
+    virtual std::wstring                         GetRecordName(uint32_t recordIndex) const = 0;
+    virtual std::pair<FileRecord, std::wstring>  GetRecordAndName(uint32_t recordIndex) const = 0;
+
+    // Status
+    virtual std::wstring GetCurrentStatus() const = 0;
+
+    // Path helpers
+    virtual std::wstring GetFullPath(uint32_t recordIndex) const = 0;
+    virtual std::wstring GetParentPath(uint32_t recordIndex) const = 0;
+
+    // Configuration
     struct IndexScopeConfig {
         bool IndexNetworkDrives = false;
         bool FollowReparsePoints = false;
         std::vector<std::wstring> IncludeRoots;
         std::vector<std::wstring> ExcludePathPatterns;
     };
+    virtual void             SetIndexScopeConfig(const IndexScopeConfig& config) = 0;
+    virtual IndexScopeConfig GetIndexScopeConfig() const = 0;
+
+    virtual ~IIndexEngine() = default;
+};
+
+class IndexingEngine : public IIndexEngine {
+public:
+    using IndexScopeConfig = IIndexEngine::IndexScopeConfig;
 
     IndexingEngine();
-    ~IndexingEngine();
+    ~IndexingEngine() override;
 
-    void Start();
-    void Stop();
+    void Start() override;
+    void Stop()  override;
     
-    void Search(const std::string& query);
-    void Sort(QuerySortKey key, bool descending);
-    std::shared_ptr<std::vector<uint32_t>> GetSearchResults();
-    void SetNotifyWindow(HWND hwnd) { m_hwndNotify = hwnd; }
+    void Search(const std::string& query) override;
+    void Sort(QuerySortKey key, bool descending) override;
+    std::shared_ptr<std::vector<uint32_t>> GetSearchResults() override;
+    void SetNotifyWindow(HWND hwnd) override { m_hwndNotify = hwnd; }
 
-    FileRecord GetRecord(uint32_t recordIndex) const;
-    uint64_t GetRecordFileSize(uint32_t recordIndex) const;
-    uint64_t GetRecordLastModifiedFileTime(uint32_t recordIndex) const;
-    std::wstring GetRecordName(uint32_t recordIndex) const;
+    FileRecord GetRecord(uint32_t recordIndex) const override;
+    uint64_t GetRecordFileSize(uint32_t recordIndex) const override;
+    uint64_t GetRecordLastModifiedFileTime(uint32_t recordIndex) const override;
+    std::wstring GetRecordName(uint32_t recordIndex) const override;
     // Single-lock fetch of both record and name — use in hot paint paths to halve lock acquisitions.
-    std::pair<FileRecord, std::wstring> GetRecordAndName(uint32_t recordIndex) const;
+    std::pair<FileRecord, std::wstring> GetRecordAndName(uint32_t recordIndex) const override;
     void SetStatus(const std::wstring& status) {
         std::lock_guard<std::mutex> lock(m_statusMutex);
         m_status = status;
         // Post event-driven notification — no polling timer needed in the UI.
         if (m_hwndNotify) PostMessage(m_hwndNotify, WM_USER_STATUS_CHANGED, 0, 0);
     }
-    std::wstring GetCurrentStatus() const {
+    std::wstring GetCurrentStatus() const override {
         std::lock_guard<std::mutex> lock(m_statusMutex);
         return m_status;
     }
 
-    std::wstring GetFullPath(uint32_t recordIndex) const;
-    std::wstring GetParentPath(uint32_t recordIndex) const;
+    std::wstring GetFullPath(uint32_t recordIndex) const override;
+    std::wstring GetParentPath(uint32_t recordIndex) const override;
+
+    void             SetIndexScopeConfig(const IndexScopeConfig& config) override;
+    IndexScopeConfig GetIndexScopeConfig() const override;
 
 private:
     struct PendingUsnDelta {
@@ -163,8 +227,6 @@ private:
 
     bool SaveIndex(const std::wstring& filePath);
     bool LoadIndex(const std::wstring& filePath);
-    void SetIndexScopeConfig(const IndexScopeConfig& config);
-    IndexScopeConfig GetIndexScopeConfig() const;
 
 private:
     void WorkerThread();
@@ -187,6 +249,7 @@ private:
     void UpdatePreSortedIndex();
     void EnqueueUsnDelta(PendingUsnDelta&& delta);
     void ApplyPendingUsnDeltas();
+    void PropagateDirectorySizes(); // bottom-up directory size accumulation
     std::wstring GetWideNameFromPoolOffsetCached(uint32_t namePoolOffset) const;
     uint32_t FileTimeToEpoch(uint64_t fileTime) const;
     uint64_t EpochToFileTime(uint32_t epoch) const;

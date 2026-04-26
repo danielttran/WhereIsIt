@@ -31,7 +31,10 @@ constexpr int SEARCH_BAR_MARGIN = 5;
 HINSTANCE hInst;
 WCHAR szTitle[MAX_LOADSTRING], szWindowClass[MAX_LOADSTRING];
 HWND hSearchEdit, hFileList, hStatusBar;
-IndexingEngine g_Engine;
+// g_EngineImpl is the concrete in-process engine.
+// g_Engine is the interface pointer — future Named Pipe proxy only needs to swap this.
+static IndexingEngine g_EngineImpl;
+IIndexEngine* g_Engine = &g_EngineImpl;
 std::shared_ptr<std::vector<uint32_t>> g_ActiveResults;
 
 int g_SortColumn = 0;
@@ -153,14 +156,14 @@ static int GetFirstSelectedIndex() {
 
 static void OpenFile(HWND hwnd, int listIdx) {
     if (!g_ActiveResults || listIdx < 0 || listIdx >= (int)g_ActiveResults->size()) return;
-    std::wstring path = g_Engine.GetFullPath((*g_ActiveResults)[listIdx]);
+    std::wstring path = g_Engine->GetFullPath((*g_ActiveResults)[listIdx]);
     if (!path.empty()) ShellExecuteW(hwnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
 static void OpenContainingFolder(HWND hwnd, int listIdx) {
     UNREFERENCED_PARAMETER(hwnd);
     if (!g_ActiveResults || listIdx < 0 || listIdx >= (int)g_ActiveResults->size()) return;
-    std::wstring path = g_Engine.GetFullPath((*g_ActiveResults)[listIdx]);
+    std::wstring path = g_Engine->GetFullPath((*g_ActiveResults)[listIdx]);
     if (path.empty()) return;
     LPITEMIDLIST pidl = nullptr;
     if (SUCCEEDED(SHParseDisplayName(path.c_str(), nullptr, &pidl, 0, nullptr))) {
@@ -171,7 +174,7 @@ static void OpenContainingFolder(HWND hwnd, int listIdx) {
 
 static void ShowShellContextMenu(HWND hwnd, int listIdx, POINT screenPt) {
     if (!g_ActiveResults || listIdx < 0 || listIdx >= (int)g_ActiveResults->size()) return;
-    std::wstring path = g_Engine.GetFullPath((*g_ActiveResults)[listIdx]);
+    std::wstring path = g_Engine->GetFullPath((*g_ActiveResults)[listIdx]);
     
     wchar_t debugBuf[512];
     swprintf_s(debugBuf, L"[WhereIsIt] ShowContextMenu for path: %s\n", path.c_str());
@@ -264,7 +267,7 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
             uint32_t recordIdx = (*g_ActiveResults)[listIdx];
             // GetRecordAndName: single shared_lock acquisition for both record and name.
             // Only called for ~30 visible rows, not all results.
-            auto [rec, nameStr] = g_Engine.GetRecordAndName(recordIdx);
+            auto [rec, nameStr] = g_Engine->GetRecordAndName(recordIdx);
 
             RECT rect;
             ListView_GetSubItemRect(hFileList, (int)listIdx, 0, LVIR_BOUNDS, &rect);
@@ -326,9 +329,9 @@ void OnDisplayInfo(NMLVDISPINFO* pdi) {
         // On-demand lookup — only called for ~30 visible rows at a time, never for the whole result set.
         uint32_t rIdx = (*g_ActiveResults)[pdi->item.iItem];
         switch (pdi->item.iSubItem) {
-            case 1: wcsncpy_s(pdi->item.pszText, pdi->item.cchTextMax, g_Engine.GetParentPath(rIdx).c_str(), _TRUNCATE); break;
-            case 2: { FileRecord r = g_Engine.GetRecord(rIdx); FormatFileSize(pdi->item.pszText, pdi->item.cchTextMax, g_Engine.GetRecordFileSize(rIdx), r.FileAttributes); break; }
-            case 3: { FormatFileTime(pdi->item.pszText, pdi->item.cchTextMax, g_Engine.GetRecordLastModifiedFileTime(rIdx)); break; }
+            case 1: wcsncpy_s(pdi->item.pszText, pdi->item.cchTextMax, g_Engine->GetParentPath(rIdx).c_str(), _TRUNCATE); break;
+            case 2: { FileRecord r = g_Engine->GetRecord(rIdx); FormatFileSize(pdi->item.pszText, pdi->item.cchTextMax, g_Engine->GetRecordFileSize(rIdx), r.FileAttributes); break; }
+            case 3: { FormatFileTime(pdi->item.pszText, pdi->item.cchTextMax, g_Engine->GetRecordLastModifiedFileTime(rIdx)); break; }
         }
     }
 }
@@ -374,7 +377,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         LOGFONT lf; GetObject(g_FontNormal, sizeof(lf), &lf);
         lf.lfWeight = FW_BOLD; g_FontBold = CreateFontIndirect(&lf);
         SendMessage(hSearchEdit, WM_SETFONT, (WPARAM)g_FontNormal, TRUE);
-        g_Engine.SetNotifyWindow(hWnd);
+        g_Engine->SetNotifyWindow(hWnd);
         g_iconWorkerRunning = true;
         g_iconWorker = std::thread([hWnd]() {
             while (true) {
@@ -386,7 +389,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     recordIdx = g_iconRequestQueue.front();
                     g_iconRequestQueue.pop();
                 }
-                std::wstring path = g_Engine.GetFullPath(recordIdx);
+                std::wstring path = g_Engine->GetFullPath(recordIdx);
                 int iconIdx = g_fileIconIdx;
                 if (!path.empty()) {
                     SHFILEINFOW sfi = { 0 };
@@ -442,12 +445,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (g_CurrentQueryW[0] != 0) {
             std::wstring status = FormatNumberWithCommas(g_ActiveResults ? g_ActiveResults->size() : 0) + L" objects";
             SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)status.c_str());
-        } else SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)g_Engine.GetCurrentStatus().c_str());
+        } else SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)g_Engine->GetCurrentStatus().c_str());
         break;
     case WM_USER_SEARCH_FINISHED:
         // CRITICAL: This handler must be O(1) — it runs on the UI thread and blocks keystroke processing.
         // Do NOT iterate over results here. Only swap the pointer and tell the list view the new count.
-        g_ActiveResults = g_Engine.GetSearchResults();
+        g_ActiveResults = g_Engine->GetSearchResults();
         if (g_ActiveResults) {
             size_t count = g_ActiveResults->size();
             ListView_SetItemCount(hFileList, (int)count);
@@ -463,7 +466,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 std::wstring status = FormatNumberWithCommas(count) + L" objects";
                 SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)status.c_str());
             } else {
-                SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)g_Engine.GetCurrentStatus().c_str());
+                SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)g_Engine->GetCurrentStatus().c_str());
             }
         }
         break;
@@ -483,7 +486,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             GetWindowText(hSearchEdit, g_CurrentQueryW, 256); char queryA[256];
             UpdateHighlightTokens();
             WideCharToMultiByte(CP_UTF8, 0, g_CurrentQueryW, -1, queryA, 256, NULL, NULL); 
-            g_Engine.Search(queryA);
+            g_Engine->Search(queryA);
         }
         break;
     case WM_NOTIFY: {
@@ -507,7 +510,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 else if (g_SortColumn == 2) key = QuerySortKey::Size;
                 else if (g_SortColumn == 3) key = QuerySortKey::Date;
                 
-                g_Engine.Sort(key, g_SortDescending);
+                g_Engine->Sort(key, g_SortDescending);
             }
             else if (header->code == LVN_KEYDOWN) {
                 NMLVKEYDOWN* pnkd = (NMLVKEYDOWN*)lParam;
@@ -592,7 +595,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     RegisterClassExW(&wcex);
     INITCOMMONCONTROLSEX icex = { sizeof(INITCOMMONCONTROLSEX), ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES };
     InitCommonControlsEx(&icex);
-    g_Engine.Start(); hInst = hInstance;
+    g_Engine->Start(); hInst = hInstance;
     int windowX = (GetSystemMetrics(SM_CXSCREEN) - WINDOW_WIDTH) / 2;
     int windowY = (GetSystemMetrics(SM_CYSCREEN) - WINDOW_HEIGHT) / 2;
     HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW, windowX, windowY, WINDOW_WIDTH, WINDOW_HEIGHT, nullptr, nullptr, hInstance, nullptr);
@@ -600,7 +603,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     ShowWindow(hWnd, nCmdShow); UpdateWindow(hWnd);
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0)) { TranslateMessage(&msg); DispatchMessage(&msg); }
-    g_Engine.Stop();
+    g_Engine->Stop();
     CoUninitialize();
     return (int)msg.wParam;
 }

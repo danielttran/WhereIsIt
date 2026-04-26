@@ -177,11 +177,26 @@ struct QueryConfig {
     QuerySortKey SortKey = QuerySortKey::Name;
 };
 
+// ---------------------------------------------------------------------------
+// Regex abstraction layer
+// Phase A: wraps std::regex behind CompiledPattern::match() so that the
+// implementation can be swapped for PCRE2/RE2 in Phase B without touching
+// any call sites outside this struct.
+// ---------------------------------------------------------------------------
+struct CompiledPattern {
+    std::regex re;
+    CompiledPattern() = default;
+    CompiledPattern(const std::string& pattern, std::regex_constants::syntax_option_type opts)
+        : re(pattern, opts) {}
+    // Returns true if the pattern matches anywhere in `text`.
+    bool match(const std::string& text) const { return std::regex_search(text, re); }
+};
+
 struct QueryPlan {
     QueryConfig Config;
     std::vector<std::string> Tokens;
     std::unique_ptr<QueryNode> Root;
-    std::vector<std::regex> CompiledRegex;
+    std::vector<CompiledPattern> CompiledRegex;  // abstracted; swap internals for PCRE2 in Phase B
     bool Success = true;
     std::wstring ErrorMessage;
 };
@@ -370,9 +385,9 @@ static QueryPlan BuildQueryPlan(const std::string& rawQuery) {
         for (const auto& token : exprTokens) {
             std::string low = ToLowerAscii(token);
             if (low == "and" || low == "or" || low == "not" || low == "(" || low == ")" || token.find(':') != std::string::npos) continue;
-            try { 
+            try {
                 if (token.length() > 1000) throw std::runtime_error("Regex too long");
-                plan.CompiledRegex.emplace_back(token, options); 
+                plan.CompiledRegex.emplace_back(token, options);
             }
             catch (const std::regex_error& e) {
                 plan.Success = false;
@@ -391,53 +406,118 @@ static QueryPlan BuildQueryPlan(const std::string& rawQuery) {
     return plan;
 }
 
-// --- StringPool: Minimal RAM for Filenames ---
 
-StringPool::StringPool(size_t initialCapacity) { 
-    if (initialCapacity > 0) m_pool.reserve(initialCapacity); 
-    m_pool.push_back('\0'); 
+// --- StringPool: Chunked Arena — O(1) alloc, zero realloc ---
+
+// Reserve `needed` bytes in the current chunk; allocate a new chunk if full.
+// Returns a pointer to the start of the reserved space.
+char* StringPool::Reserve(size_t needed) {
+    if (m_chunks.empty() || m_chunkUsed + needed > kChunkSize) {
+        size_t allocSize = (needed > kChunkSize) ? needed : kChunkSize;
+        m_chunks.push_back(std::make_unique<char[]>(allocSize));
+        m_chunkUsed = 0;
+    }
+    char* ptr = m_chunks.back().get() + m_chunkUsed;
+    m_chunkUsed  += needed;
+    m_totalSize  += needed;
+    return ptr;
 }
 
-void StringPool::Clear() { 
-    m_pool.clear(); 
-    m_pool.push_back('\0'); 
+StringPool::StringPool(size_t /*ignored*/) {
+    // Seed chunk 0 with a single null byte so offset 0 == empty string.
+    Reserve(1)[0] = '\0';
 }
 
-void StringPool::LoadRawData(const char* data, size_t size) { 
-    m_pool.assign(data, data + size); 
+void StringPool::Clear() {
+    m_chunks.clear();
+    m_chunkUsed = 0;
+    m_totalSize = 0;
+    // Re-seed the null terminator at offset 0.
+    Reserve(1)[0] = '\0';
+}
+
+// Decode a flat offset into (chunk, position) and return a pointer.
+// Offsets are assigned sequentially: chunk 0 owns [0, kChunkSize), chunk 1
+// owns [kChunkSize, 2*kChunkSize), etc.  Strings never straddle chunk boundaries
+// because Reserve() opens a fresh chunk when there isn't enough room.
+const char* StringPool::GetString(uint32_t offset) const {
+    if (m_chunks.empty()) return "";
+    size_t chunk = offset / kChunkSize;
+    size_t pos   = offset % kChunkSize;
+    if (chunk >= m_chunks.size()) return "";
+    return m_chunks[chunk].get() + pos;
+}
+
+void StringPool::LoadRawData(const char* data, size_t size) {
+    Clear();
+    if (size == 0) return;
+    // Flat import: split the incoming buffer into kChunkSize pages.
+    size_t remaining = size;
+    const char* src  = data;
+    while (remaining > 0) {
+        size_t take = (remaining > kChunkSize) ? kChunkSize : remaining;
+        char* dst = Reserve(take);
+        memcpy(dst, src, take);
+        src       += take;
+        remaining -= take;
+    }
 }
 
 uint32_t StringPool::AddRawData(const char* data, size_t size) {
     if (size == 0) return 0;
-    uint32_t offset = (uint32_t)m_pool.size();
-    m_pool.insert(m_pool.end(), data, data + size);
+    uint32_t offset = (uint32_t)m_totalSize;
+    // If the data fits in the remaining space of the current chunk, a single
+    // Reserve call suffices.  Otherwise it is split across chunks, which means
+    // GetString(offset) would straddle a chunk boundary — so force a new chunk.
+    if (!m_chunks.empty() && m_chunkUsed + size > kChunkSize) {
+        // Pad current chunk to boundary so offsets stay chunk-aligned.
+        size_t pad = kChunkSize - m_chunkUsed;
+        if (pad > 0) { Reserve(pad); offset = (uint32_t)m_totalSize; }
+    }
+    char* dst = Reserve(size);
+    memcpy(dst, data, size);
     return offset;
 }
 
 uint32_t StringPool::AddString(const std::wstring& text) {
-    int bytesNeeded = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, NULL, 0, NULL, NULL);
-    if (bytesNeeded <= 1) return 0;
-    uint32_t offset = (uint32_t)m_pool.size();
-    m_pool.resize(offset + bytesNeeded);
-    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, &m_pool[offset], bytesNeeded, NULL, NULL);
+    int bytes = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, NULL, 0, NULL, NULL);
+    if (bytes <= 1) return 0;
+    uint32_t offset = (uint32_t)m_totalSize;
+    if (!m_chunks.empty() && m_chunkUsed + (size_t)bytes > kChunkSize) {
+        size_t pad = kChunkSize - m_chunkUsed;
+        if (pad > 0) { Reserve(pad); offset = (uint32_t)m_totalSize; }
+    }
+    char* dst = Reserve((size_t)bytes);
+    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, dst, bytes, NULL, NULL);
     return offset;
 }
 
 uint32_t StringPool::AddString(const wchar_t* text, size_t length) {
     if (!text || length == 0) return 0;
-    int bytesNeeded = WideCharToMultiByte(CP_UTF8, 0, text, (int)length, NULL, 0, NULL, NULL);
-    if (bytesNeeded <= 0) return 0;
-    uint32_t offset = (uint32_t)m_pool.size();
-    m_pool.resize(offset + bytesNeeded + 1);
-    WideCharToMultiByte(CP_UTF8, 0, text, (int)length, &m_pool[offset], bytesNeeded, NULL, NULL);
-    m_pool[offset + bytesNeeded] = '\0';
+    int bytes = WideCharToMultiByte(CP_UTF8, 0, text, (int)length, NULL, 0, NULL, NULL);
+    if (bytes <= 0) return 0;
+    size_t total = (size_t)bytes + 1;  // +1 for null terminator
+    uint32_t offset = (uint32_t)m_totalSize;
+    if (!m_chunks.empty() && m_chunkUsed + total > kChunkSize) {
+        size_t pad = kChunkSize - m_chunkUsed;
+        if (pad > 0) { Reserve(pad); offset = (uint32_t)m_totalSize; }
+    }
+    char* dst = Reserve(total);
+    WideCharToMultiByte(CP_UTF8, 0, text, (int)length, dst, bytes, NULL, NULL);
+    dst[bytes] = '\0';
     return offset;
 }
 
-const char* StringPool::GetString(uint32_t offset) const { 
-    if (offset >= (uint32_t)m_pool.size()) return ""; 
-    return &m_pool[offset]; 
+void StringPool::WriteRawTo(uint8_t* dest) const {
+    size_t written = 0;
+    for (size_t ci = 0; ci < m_chunks.size(); ++ci) {
+        bool isLast   = (ci == m_chunks.size() - 1);
+        size_t bytes  = isLast ? m_chunkUsed : kChunkSize;
+        memcpy(dest + written, m_chunks[ci].get(), bytes);
+        written += bytes;
+    }
 }
+
 
 // --- IndexingEngine Implementation ---
 
@@ -496,22 +576,75 @@ std::wstring IndexingEngine::ResolveIndexSavePath() {
 bool IndexingEngine::SaveIndex(const std::wstring& filePath) {
     std::shared_lock<std::shared_mutex> lock(m_dataMutex);
     std::wstring tmpPath = filePath + L".tmp";
-    std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc); if (!out) return false;
-    struct IndexHeader { uint32_t Magic, Version, DriveCount, RecordCount, PoolSize, GiantCount; } h = { 0x54494957, 7, (uint32_t)m_drives.size(), (uint32_t)m_records.size(), (uint32_t)m_pool.GetSize(), (uint32_t)m_giantFileSizes.size() };
-    out.write((char*)&h, sizeof(h));
+
+    struct IndexHeader  { uint32_t Magic, Version, DriveCount, RecordCount, PoolSize, GiantCount; };
+    struct DriveInfoBin { wchar_t Letter[4]; uint32_t Serial; uint64_t LastUsn; };
+
+    const uint32_t driveCount  = (uint32_t)m_drives.size();
+    const uint32_t recordCount = (uint32_t)m_records.size();
+    const uint32_t poolSize    = (uint32_t)m_pool.GetSize();
+    const uint32_t giantCount  = (uint32_t)m_giantFileSizes.size();
+
+    const uint64_t fileSize =
+        sizeof(IndexHeader) +
+        (uint64_t)driveCount  * sizeof(DriveInfoBin) +
+        (uint64_t)recordCount * sizeof(FileRecord) +
+        poolSize +
+        (uint64_t)giantCount  * (sizeof(uint32_t) + sizeof(uint64_t));
+
+    struct Handle {
+        HANDLE h = INVALID_HANDLE_VALUE;
+        Handle() = default;
+        explicit Handle(HANDLE h_) : h(h_) {}
+        ~Handle() { if (h != INVALID_HANDLE_VALUE && h != NULL) CloseHandle(h); }
+        Handle(const Handle&) = delete;
+        Handle& operator=(const Handle&) = delete;
+    };
+
+    Handle hFile(CreateFileW(tmpPath.c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL));
+    if (hFile.h == INVALID_HANDLE_VALUE) return false;
+
+    LARGE_INTEGER li; li.QuadPart = (LONGLONG)fileSize;
+    if (!SetFilePointerEx(hFile.h, li, NULL, FILE_BEGIN) || !SetEndOfFile(hFile.h)) {
+        DeleteFileW(tmpPath.c_str()); return false;
+    }
+
+    Handle hMap(CreateFileMappingW(hFile.h, NULL, PAGE_READWRITE, 0, 0, NULL));
+    if (!hMap.h) { DeleteFileW(tmpPath.c_str()); return false; }
+
+    uint8_t* base = (uint8_t*)MapViewOfFile(hMap.h, FILE_MAP_WRITE, 0, 0, 0);
+    if (!base) { DeleteFileW(tmpPath.c_str()); return false; }
+
+    uint8_t* p = base;
+
+    IndexHeader hdr = { 0x54494957, 8, driveCount, recordCount, poolSize, giantCount };
+    memcpy(p, &hdr, sizeof(hdr)); p += sizeof(hdr);
+
     for (const auto& d : m_drives) {
-        struct DriveInfoBin { wchar_t Letter[4]; uint32_t Serial; uint64_t LastUsn; } di = { 0 }; 
-        wcscpy_s(di.Letter, d.Letter.c_str()); di.Serial = d.SerialNumber; di.LastUsn = d.LastProcessedUsn;
-        out.write((char*)&di, sizeof(di));
+        DriveInfoBin di = {};
+        wcscpy_s(di.Letter, d.Letter.c_str());
+        di.Serial  = d.SerialNumber;
+        di.LastUsn = d.LastProcessedUsn;
+        memcpy(p, &di, sizeof(di)); p += sizeof(di);
     }
-    out.write((char*)m_records.data(), (std::streamsize)(m_records.size() * sizeof(FileRecord)));
-    out.write(m_pool.GetString(0), (std::streamsize)m_pool.GetSize());
+
+    memcpy(p, m_records.data(), (size_t)recordCount * sizeof(FileRecord));
+    p += (size_t)recordCount * sizeof(FileRecord);
+
+    m_pool.WriteRawTo(p);
+    p += poolSize;
+
     for (const auto& kv : m_giantFileSizes) {
-        out.write((const char*)&kv.first, sizeof(uint32_t));
-        out.write((const char*)&kv.second, sizeof(uint64_t));
+        memcpy(p, &kv.first,  sizeof(uint32_t)); p += sizeof(uint32_t);
+        memcpy(p, &kv.second, sizeof(uint64_t)); p += sizeof(uint64_t);
     }
-    out.flush(); if (!out.good()) { out.close(); DeleteFileW(tmpPath.c_str()); return false; }
-    out.close(); if (!out.good()) { DeleteFileW(tmpPath.c_str()); return false; }
+
+    FlushViewOfFile(base, 0);
+    UnmapViewOfFile(base);
+    CloseHandle(hMap.h);  hMap.h  = NULL;
+    CloseHandle(hFile.h); hFile.h = INVALID_HANDLE_VALUE;
+
     if (!MoveFileExW(tmpPath.c_str(), filePath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         DeleteFileW(tmpPath.c_str()); return false;
     }
@@ -525,114 +658,123 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
         m_nameCache.clear();
         m_nameCacheLru.clear();
     };
-    auto readExact = [](std::ifstream& stream, char* buffer, size_t bytes) {
-        stream.read(buffer, (std::streamsize)bytes);
-        return stream.good() || (stream.eof() && stream.gcount() == (std::streamsize)bytes);
+
+    struct Handle {
+        HANDLE h = INVALID_HANDLE_VALUE;
+        Handle() = default;
+        explicit Handle(HANDLE h_) : h(h_) {}
+        ~Handle() { if (h != INVALID_HANDLE_VALUE && h != NULL) CloseHandle(h); }
+        Handle(const Handle&) = delete;
+        Handle& operator=(const Handle&) = delete;
     };
 
-    std::ifstream in(filePath, std::ios::binary); 
-    if (!in) {
+    Handle hFile(CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
+                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL));
+    if (hFile.h == INVALID_HANDLE_VALUE) {
         Logger::Log(L"[WhereIsIt] index.dat not found or could not be opened.");
         return false;
     }
-    struct IndexHeader { uint32_t Magic, Version, DriveCount, RecordCount, PoolSize, GiantCount; } h;
-    if (!readExact(in, (char*)&h, sizeof(h))) { 
-        Logger::Log(L"[WhereIsIt] Failed to read index header.");
-        clearState(); return false; 
+
+    LARGE_INTEGER fileSize = {};
+    if (!GetFileSizeEx(hFile.h, &fileSize) || fileSize.QuadPart < (LONGLONG)(sizeof(uint32_t) * 6)) {
+        Logger::Log(L"[WhereIsIt] index.dat too small.");
+        return false;
     }
-    if (h.Magic != 0x54494957 || h.Version != 7) {
+
+    Handle hMap(CreateFileMappingW(hFile.h, NULL, PAGE_READONLY, 0, 0, NULL));
+    if (!hMap.h) {
+        Logger::Log(L"[WhereIsIt] Failed to create file mapping.");
+        return false;
+    }
+
+    const uint8_t* base = (const uint8_t*)MapViewOfFile(hMap.h, FILE_MAP_READ, 0, 0, 0);
+    if (!base) {
+        Logger::Log(L"[WhereIsIt] Failed to map index view.");
+        return false;
+    }
+    struct ViewGuard { const uint8_t* p; ~ViewGuard() { if (p) UnmapViewOfFile(p); } } vg{ base };
+
+    const uint8_t* const end = base + (size_t)fileSize.QuadPart;
+    const uint8_t* p = base;
+
+    struct IndexHeader  { uint32_t Magic, Version, DriveCount, RecordCount, PoolSize, GiantCount; };
+    struct DriveInfoBin { wchar_t Letter[4]; uint32_t Serial; uint64_t LastUsn; };
+
+    if (p + sizeof(IndexHeader) > end) { Logger::Log(L"[WhereIsIt] Index too small for header."); return false; }
+    const IndexHeader& h = *(const IndexHeader*)p; p += sizeof(IndexHeader);
+
+    if (h.Magic != 0x54494957 || h.Version != 8) {
         Logger::Log(L"[WhereIsIt] Index magic/version mismatch.");
-        clearState(); return false; 
+        return false;
     }
-    if (h.DriveCount == 0 || h.DriveCount > 64 || h.RecordCount > 100000000 || h.PoolSize == 0 || h.PoolSize > (512u * 1024u * 1024u) || h.GiantCount > h.RecordCount) {
+    if (h.DriveCount == 0 || h.DriveCount > 64 ||
+        h.RecordCount > 100000000 ||
+        h.PoolSize == 0 || h.PoolSize > (512u * 1024u * 1024u) ||
+        h.GiantCount > h.RecordCount) {
         Logger::Log(L"[WhereIsIt] Index header contains invalid values.");
-        clearState(); return false;
+        return false;
     }
-
-    if (h.DriveCount != m_drives.size()) {
+    if (h.DriveCount != (uint32_t)m_drives.size()) {
         Logger::Log(L"[WhereIsIt] Drive count mismatch. Need full scan.");
-        clearState(); return false;
+        return false;
     }
 
+    // --- Drive table ---
+    if (p + (size_t)h.DriveCount * sizeof(DriveInfoBin) > end) { clearState(); return false; }
     for (uint32_t i = 0; i < h.DriveCount; ++i) {
-        struct DriveInfoBin { wchar_t Letter[4]; uint32_t Serial; uint64_t LastUsn; } di; 
-        if (!readExact(in, (char*)&di, sizeof(di))) { 
-            Logger::Log(L"[WhereIsIt] Failed to read drive info from index.");
-            clearState(); return false; 
-        }
-        if (m_drives[i].SerialNumber != di.Serial || wcscmp(m_drives[i].Letter.c_str(), di.Letter) != 0) { 
+        const DriveInfoBin& di = *(const DriveInfoBin*)p; p += sizeof(DriveInfoBin);
+        if (m_drives[i].SerialNumber != di.Serial || wcscmp(m_drives[i].Letter.c_str(), di.Letter) != 0) {
             Logger::Log(L"[WhereIsIt] Drive configuration changed. Need full scan.");
-            clearState(); return false; 
+            clearState(); return false;
         }
         m_drives[i].LastProcessedUsn = di.LastUsn;
     }
-    
+
+    // --- File records — single memcpy from mapped view ---
+    const size_t recBytes = (size_t)h.RecordCount * sizeof(FileRecord);
+    if (p + recBytes > end) { Logger::Log(L"[WhereIsIt] Index truncated at records."); clearState(); return false; }
     std::vector<FileRecord> tempRecords;
-    try {
-        tempRecords.resize(h.RecordCount);
-    } catch (const std::bad_alloc&) {
-        Logger::Log(L"[WhereIsIt] Memory allocation failed for file records.");
-        clearState(); return false;
-    }
-    if (!readExact(in, (char*)tempRecords.data(), (size_t)h.RecordCount * sizeof(FileRecord))) { 
-        Logger::Log(L"[WhereIsIt] Failed to read file records from index.");
-        clearState(); return false; 
-    }
+    try { tempRecords.resize(h.RecordCount); } catch (...) { clearState(); return false; }
+    memcpy(tempRecords.data(), p, recBytes); p += recBytes;
 
-    std::vector<char> pd;
-    try {
-        pd.resize(h.PoolSize);
-    } catch (const std::bad_alloc&) {
-        Logger::Log(L"[WhereIsIt] Memory allocation failed for string pool.");
-        clearState(); return false;
-    }
-    if (!readExact(in, pd.data(), h.PoolSize)) { 
-        Logger::Log(L"[WhereIsIt] Failed to read string pool from index.");
-        clearState(); return false; 
-    }
+    // --- String pool — single LoadRawData into arena ---
+    if (p + h.PoolSize > end) { Logger::Log(L"[WhereIsIt] Index truncated at pool."); clearState(); return false; }
+    m_pool.Clear();
+    m_pool.LoadRawData((const char*)p, h.PoolSize); p += h.PoolSize;
 
+    // --- Giant-file size entries ---
     std::unordered_map<uint32_t, uint64_t> tempGiant;
+    const size_t giantEntry = sizeof(uint32_t) + sizeof(uint64_t);
+    if (p + (size_t)h.GiantCount * giantEntry > end) { clearState(); return false; }
     for (uint32_t gi = 0; gi < h.GiantCount; ++gi) {
-        uint32_t idx = 0;
-        uint64_t size = 0;
-        if (!readExact(in, (char*)&idx, sizeof(idx)) || !readExact(in, (char*)&size, sizeof(size))) {
-            clearState(); return false;
-        }
-        tempGiant[idx] = size;
+        uint32_t idx;  memcpy(&idx,  p, sizeof(uint32_t)); p += sizeof(uint32_t);
+        uint64_t sz;   memcpy(&sz,   p, sizeof(uint64_t)); p += sizeof(uint64_t);
+        tempGiant[idx] = sz;
     }
 
+    // --- Rebuild MFT lookup tables ---
     std::vector<std::vector<uint32_t>> tempLookup(h.DriveCount);
     std::vector<uint32_t> maxMft(h.DriveCount, 0);
-
     for (const auto& rec : tempRecords) {
-        if (rec.DriveIndex >= h.DriveCount) { clearState(); return false; }
-        if (rec.NamePoolOffset >= h.PoolSize) { clearState(); return false; }
-        if (rec.MftIndex != 0xFFFFFFFF && rec.MftIndex > maxMft[rec.DriveIndex]) {
+        if (rec.DriveIndex >= h.DriveCount || rec.NamePoolOffset >= h.PoolSize) { clearState(); return false; }
+        if (rec.MftIndex != 0xFFFFFFFF && rec.MftIndex > maxMft[rec.DriveIndex])
             maxMft[rec.DriveIndex] = rec.MftIndex;
-        }
     }
-
     for (uint32_t i = 0; i < h.DriveCount; ++i) {
-        try {
-            tempLookup[i].assign((size_t)maxMft[i] + 1, 0xFFFFFFFF);
-        } catch (const std::bad_alloc&) {
-            Logger::Log(L"[WhereIsIt] Memory allocation failed for MFT lookup table (possibly corrupted index).");
-            clearState(); return false;
-        }
+        try { tempLookup[i].assign((size_t)maxMft[i] + 1, 0xFFFFFFFF); }
+        catch (...) { Logger::Log(L"[WhereIsIt] MFT lookup allocation failed."); clearState(); return false; }
     }
-
     for (uint32_t i = 0; i < (uint32_t)tempRecords.size(); ++i) {
         const auto& rec = tempRecords[i];
-        if (rec.MftIndex != 0xFFFFFFFF) {
+        if (rec.MftIndex != 0xFFFFFFFF)
             tempLookup[rec.DriveIndex][rec.MftIndex] = i;
-        }
     }
 
+    // --- Commit under exclusive write lock ---
     std::unique_lock<std::shared_mutex> dataLock(m_dataMutex);
-    m_records = std::move(tempRecords);
-    m_pool.LoadRawData(pd.data(), h.PoolSize);
+    m_records         = std::move(tempRecords);
     m_mftLookupTables = std::move(tempLookup);
-    m_giantFileSizes = std::move(tempGiant);
+    m_giantFileSizes  = std::move(tempGiant);
     return true;
 }
 
@@ -1033,8 +1175,8 @@ void IndexingEngine::SearchThread() {
 
         if (plan.Config.RegexMode && !plan.CompiledRegex.empty()) {
             for (const auto& rx : plan.CompiledRegex) {
-                if (std::regex_search(name, rx)) return true;
-                if (std::regex_search(getFullPath(), rx)) return true;
+                if (rx.match(name)) return true;
+                if (rx.match(getFullPath())) return true;
             }
             return false;
         }
@@ -1836,7 +1978,15 @@ void IndexingEngine::PerformFullDriveScan() {
 
         for (uint8_t i = 0; i < (uint8_t)m_drives.size(); ++i) {
             auto& ctx = contexts[i];
-            uint32_t poolOffsetShift = m_pool.AddRawData(ctx.Pool.GetRawData(), ctx.Pool.GetSize());
+            // Merge per-drive string pool into the global pool, chunk-by-chunk.
+            // The first AddRawData call returns the offset of the start of this
+            // drive's strings within the global pool — that's the shift to apply.
+            uint32_t poolOffsetShift = 0;
+            bool firstChunk = true;
+            ctx.Pool.ForEachChunk([&](const char* data, size_t bytes) {
+                uint32_t off = m_pool.AddRawData(data, bytes);
+                if (firstChunk) { poolOffsetShift = off; firstChunk = false; }
+            });
             uint32_t recordIndexShift = (uint32_t)m_records.size();
 
             m_mftLookupTables[i] = std::move(ctx.LookupTable);
@@ -1868,6 +2018,52 @@ void IndexingEngine::PerformFullDriveScan() {
         }
     }
     Logger::Log(L"[WhereIsIt] Parallel drive scan and merge complete.\n");
+    PropagateDirectorySizes();
+}
+void IndexingEngine::PropagateDirectorySizes() {
+    // Bottom-up accumulation: iterate records in reverse-index order (which is
+    // approximately reverse-MFT order — children tend to have higher MFT indices
+    // than their parents).  For each file, add its resolved size to the FileSize
+    // field of its parent directory record.  Giant directories (accumulated size
+    // >= 4 GB) are promoted to m_giantFileSizes.
+    //
+    // Called while m_dataMutex is already held exclusively from PerformFullDriveScan.
+    for (int64_t i = (int64_t)m_records.size() - 1; i >= 0; --i) {
+        const FileRecord& child = m_records[(uint32_t)i];
+        if (child.MftIndex == 0xFFFFFFFF) continue;        // deleted record slot
+        if (child.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue; // dirs themselves
+
+        uint8_t di = (uint8_t)child.DriveIndex;
+        if (di >= (uint8_t)m_mftLookupTables.size()) continue;
+        if (child.ParentMftIndex >= (uint32_t)m_mftLookupTables[di].size()) continue;
+
+        uint32_t parentIdx = m_mftLookupTables[di][child.ParentMftIndex];
+        if (parentIdx == 0xFFFFFFFF || parentIdx >= m_records.size()) continue;
+
+        FileRecord& parent = m_records[parentIdx];
+        if (!(parent.FileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+
+        // Resolve the child's actual file size (giant files stored separately).
+        uint64_t childSize = ResolveFileSize(child, (uint32_t)i);
+
+        // Accumulate into parent directory size.
+        uint64_t parentSize = ResolveFileSize(parent, parentIdx);
+        uint64_t newSize    = parentSize + childSize;
+
+        if (newSize >= 0xFFFFFFFFULL) {
+            parent.FileSize  = 0xFFFFFFFFu;
+            parent.IsGiantFile = 1;
+            m_giantFileSizes[parentIdx] = newSize;
+        } else {
+            parent.FileSize = (uint32_t)newSize;
+            // If it was previously a giant but accumulated size dropped below, clean up.
+            if (parent.IsGiantFile && m_giantFileSizes.count(parentIdx)) {
+                m_giantFileSizes.erase(parentIdx);
+                parent.IsGiantFile = 0;
+            }
+        }
+        parent.DirSizeComputed = 1;
+    }
 }
 
 void IndexingEngine::ScanGenericDrive(DriveScanContext& ctx, const std::wstring& rootPath, uint32_t pIdx, uint16_t pSeq, std::unordered_set<uint64_t>& visitedDirs) {
