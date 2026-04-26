@@ -11,7 +11,6 @@ static constexpr DWORD kMaxResultBytes  = 4u * 1024u * 1024u + sizeof(uint32_t);
 static constexpr DWORD kMaxResultCount  = (kMaxResultBytes - sizeof(uint32_t)) / sizeof(uint32_t);
 static constexpr DWORD kPipeCallTimeout = 5000;  // ms, passed to CallNamedPipeW
 static constexpr int   kSearchTimeoutMs = 5000;  // ms, server polls for engine results
-static constexpr int   kSearchPollMs    = 10;    // ms between result-ready polls
 
 // ---------------------------------------------------------------------------
 // Availability check
@@ -348,7 +347,6 @@ NamedPipeEngine::~NamedPipeEngine() { Stop(); }
 void NamedPipeEngine::Start()
 {
     if (m_running.exchange(true)) return;
-    m_rxBuf.resize(kMaxResultBytes);   // allocate once; reused every search
 
     // Phase 2: Attach to Shared Memory instead of running local scan
     m_hDataMutex = OpenMutexW(MUTEX_ALL_ACCESS, FALSE, L"Global\\WhereIsIt_DataMutex");

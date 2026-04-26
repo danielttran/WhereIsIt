@@ -114,7 +114,4 @@ private:
     mutable std::mutex                     m_resultsMutex;
     std::shared_ptr<std::vector<uint32_t>> m_results;
 
-    // Persistent 4 MB receive buffer — avoids a heap alloc on every search.
-    // Accessed only from SearchWorker; no locking needed.
-    std::vector<char>        m_rxBuf;
 };
