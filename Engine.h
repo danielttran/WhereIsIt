@@ -94,6 +94,7 @@ public:
     void Clear();
     void LoadRawData(const char* data, size_t size);
     uint32_t AddRawData(const char* data, size_t size);
+    uint32_t AdoptChunksFrom(StringPool& other);
     // Write all chunks contiguously into a pre-allocated destination buffer (used by SaveIndex).
     void WriteRawTo(uint8_t* dest) const;
     // Iterate each contiguous chunk: calls fn(data, bytes) per chunk in order.

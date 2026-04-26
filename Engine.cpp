@@ -453,9 +453,9 @@ char* StringPool::Reserve(size_t needed) {
         }
 
         HANDLE hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, GetPermissiveSA(), PAGE_READWRITE,
-            (DWORD)(allocSize >> 32), (DWORD)(allocSize & 0xFFFFFFFF), pMapName);        char* view = nullptr;
+            (DWORD)((allocSize + 32) >> 32), (DWORD)((allocSize + 32) & 0xFFFFFFFF), pMapName);        char* view = nullptr;
         if (hMap) {
-            view = (char*)MapViewOfFile(hMap, FILE_MAP_WRITE, 0, 0, allocSize);
+            view = (char*)MapViewOfFile(hMap, FILE_MAP_WRITE, 0, 0, allocSize + 32);
             if (!view) {
                 CloseHandle(hMap);
                 hMap = NULL;
@@ -463,7 +463,7 @@ char* StringPool::Reserve(size_t needed) {
         }
         if (!view) {
             // Fallback (shouldn't happen in practice)
-            view = new char[allocSize];
+            view = new char[allocSize + 32];
         }
         m_chunks.push_back({ hMap, view });
         m_chunkUsed = 0;
@@ -565,6 +565,24 @@ uint32_t StringPool::AddRawData(const char* data, size_t size) {
     char* dst = Reserve(size);
     memcpy(dst, data, size);
     return offset;
+}
+
+uint32_t StringPool::AdoptChunksFrom(StringPool& other) {
+    if (other.m_chunks.empty()) return (uint32_t)m_totalSize;
+    size_t startChunkIdx = m_chunks.size();
+    uint32_t shift = (uint32_t)(startChunkIdx * kChunkSize);
+    
+    for (auto& chunk : other.m_chunks) {
+        m_chunks.push_back(chunk);
+    }
+    other.m_chunks.clear();
+    
+    m_chunkUsed = other.m_chunkUsed;
+    other.m_chunkUsed = 0;
+    m_totalSize = m_chunks.size() > 0 ? ((m_chunks.size() - 1) * kChunkSize + m_chunkUsed) : 0;
+    other.m_totalSize = 0;
+    
+    return shift;
 }
 
 uint32_t StringPool::AddString(const std::wstring& text) {
@@ -2093,15 +2111,8 @@ void IndexingEngine::PerformFullDriveScan() {
 
         for (uint8_t i = 0; i < (uint8_t)m_drives.size(); ++i) {
             auto& ctx = contexts[i];
-            // Merge per-drive string pool into the global pool, chunk-by-chunk.
-            // The first AddRawData call returns the offset of the start of this
-            // drive's strings within the global pool — that's the shift to apply.
-            uint32_t poolOffsetShift = 0;
-            bool firstChunk = true;
-            ctx.Pool.ForEachChunk([&](const char* data, size_t bytes) {
-                uint32_t off = m_pool.AddRawData(data, bytes);
-                if (firstChunk) { poolOffsetShift = off; firstChunk = false; }
-            });
+            // Merge per-drive string pool into the global pool by adopting chunks directly.
+            uint32_t poolOffsetShift = m_pool.AdoptChunksFrom(ctx.Pool);
             uint32_t recordIndexShift = (uint32_t)GetRecordCount();
 
             m_mftLookupTables[i] = std::move(ctx.LookupTable);

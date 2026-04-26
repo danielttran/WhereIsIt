@@ -458,7 +458,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         g_ActiveResults = g_Engine->GetSearchResults();
         if (g_ActiveResults) {
             size_t count = g_ActiveResults->size();
-            ListView_SetItemCount(hFileList, (int)count);
+            ListView_SetItemCountEx(hFileList, (int)count, LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
             if (count > 0) {
                 int top = ListView_GetTopIndex(hFileList);
                 int bottom = top + ListView_GetCountPerPage(hFileList) + 1;
@@ -575,10 +575,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_DESTROY: 
         {
             std::lock_guard<std::mutex> lock(g_iconMutex);
+            std::queue<uint32_t>().swap(g_iconRequestQueue);
             g_iconWorkerRunning = false;
         }
         g_iconCv.notify_all();
         if (g_iconWorker.joinable()) g_iconWorker.join();
+        if (g_FontNormal) DeleteObject(g_FontNormal);
         if (g_FontBold) DeleteObject(g_FontBold); 
         PostQuitMessage(0); 
         break;

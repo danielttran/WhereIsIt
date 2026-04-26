@@ -111,8 +111,9 @@ static std::shared_ptr<std::vector<uint32_t>> WaitForNewResults(
 
 void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
 {
+    HANDLE hResultsMap = NULL;
     for (;;) {
-        if (WaitForSingleObject(hStopEvent, 0) == WAIT_OBJECT_0) return;
+        if (WaitForSingleObject(hStopEvent, 0) == WAIT_OBJECT_0) break;
 
         HANDLE hPipe = CreateNamedPipeW(
             WHEREISIT_PIPE_NAME,
@@ -175,8 +176,12 @@ void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
             }
 
             BOOL ok = ReadFile(hPipe, readBuf, sizeof(readBuf), &bytesRead, &rdOv);
-            if (!ok && GetLastError() == ERROR_IO_PENDING)
+            if (!ok && GetLastError() == ERROR_IO_PENDING) {
                 ok = GetOverlappedResult(hPipe, &rdOv, &bytesRead, TRUE);
+                if (!ok) CancelIo(hPipe);
+            } else if (!ok) {
+                CancelIo(hPipe);
+            }
 
             CloseHandle(rdOv.hEvent);
 
@@ -202,27 +207,35 @@ void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
         engine->Search(query);
         auto results = WaitForNewResults(engine, prevResults);
 
-        // ---- Write response: [uint32_t count][uint32_t indices...] ----
-        // Cap count so responseSize never exceeds kMaxResultBytes.
+        // ---- Write response: [uint32_t count] ----
         uint32_t count = static_cast<uint32_t>(
             (std::min)(results->size(), static_cast<size_t>(kMaxResultCount)));
 
-        DWORD responseSize = sizeof(uint32_t) + count * sizeof(uint32_t);
-        std::vector<uint8_t> writeBuf(responseSize);
-        memcpy(writeBuf.data(), &count, sizeof(count));
-        if (count > 0)
-            memcpy(writeBuf.data() + sizeof(uint32_t),
-                   results->data(), count * sizeof(uint32_t));
+        if (count > 0) {
+            if (hResultsMap) CloseHandle(hResultsMap);
+            hResultsMap = CreateFileMappingW(INVALID_HANDLE_VALUE, GetPermissiveSA(), PAGE_READWRITE, 0, count * sizeof(uint32_t), L"Global\\WhereIsIt_Results");
+            if (hResultsMap) {
+                void* pView = MapViewOfFile(hResultsMap, FILE_MAP_WRITE, 0, 0, count * sizeof(uint32_t));
+                if (pView) {
+                    memcpy(pView, results->data(), count * sizeof(uint32_t));
+                    UnmapViewOfFile(pView);
+                }
+            }
+        }
 
+        DWORD responseSize = sizeof(uint32_t);
         {
             OVERLAPPED wrOv{};
             wrOv.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
             if (wrOv.hEvent) {
                 DWORD written = 0;
-                BOOL  ok = WriteFile(
-                    hPipe, writeBuf.data(), responseSize, &written, &wrOv);
-                if (!ok && GetLastError() == ERROR_IO_PENDING)
-                    GetOverlappedResult(hPipe, &wrOv, &written, TRUE);
+                BOOL  ok = WriteFile(hPipe, &count, responseSize, &written, &wrOv);
+                if (!ok && GetLastError() == ERROR_IO_PENDING) {
+                    ok = GetOverlappedResult(hPipe, &wrOv, &written, TRUE);
+                    if (!ok) CancelIo(hPipe);
+                } else if (!ok) {
+                    CancelIo(hPipe);
+                }
                 CloseHandle(wrOv.hEvent);
             }
         }
@@ -231,6 +244,7 @@ void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
         DisconnectNamedPipe(hPipe);
         CloseHandle(hPipe);
     }
+    if (hResultsMap) CloseHandle(hResultsMap);
 }
 
 // ---------------------------------------------------------------------------
@@ -377,7 +391,7 @@ void NamedPipeEngine::Stop()
     std::lock_guard<std::mutex> lock(m_chunkMutex);
     for (auto& c : m_uiChunks) {
         char* ptr = c.load(std::memory_order_relaxed);
-        if (ptr) UnmapViewOfFile(ptr);
+        if (ptr) { UnmapViewOfFile(ptr); c.store(nullptr, std::memory_order_relaxed); }
     }
 
 }
@@ -499,23 +513,35 @@ void NamedPipeEngine::SearchWorker()
             if (queryLen)
                 memcpy(writeBuf.data() + sizeof(uint32_t), query.data(), queryLen);
 
+            uint32_t count = 0;
             DWORD bytesRead = 0;
             BOOL  ok = CallNamedPipeW(
                 WHEREISIT_PIPE_NAME,
                 writeBuf.data(), static_cast<DWORD>(writeBuf.size()),
-                m_rxBuf.data(),  kMaxResultBytes,
+                &count,          sizeof(count),
                 &bytesRead,      kPipeCallTimeout);
+
+            if (!ok) {
+                std::lock_guard<std::mutex> lock(m_chunkMutex);
+                for (auto& c : m_uiChunks) {
+                    char* ptr = c.load(std::memory_order_relaxed);
+                    if (ptr) { UnmapViewOfFile(ptr); c.store(nullptr, std::memory_order_relaxed); }
+                }
+            }
 
             auto results = std::make_shared<std::vector<uint32_t>>();
             if (ok && bytesRead >= sizeof(uint32_t)) {
-                uint32_t count = 0;
-                memcpy(&count, m_rxBuf.data(), sizeof(count));
-                DWORD expectedBytes = sizeof(uint32_t) + count * sizeof(uint32_t);
-                if (count > 0 && bytesRead >= expectedBytes) {
+                if (count > 0) {
                     results->resize(count);
-                    memcpy(results->data(),
-                           m_rxBuf.data() + sizeof(uint32_t),
-                           count * sizeof(uint32_t));
+                    HANDLE hMap = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\WhereIsIt_Results");
+                    if (hMap) {
+                        void* pView = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, count * sizeof(uint32_t));
+                        if (pView) {
+                            memcpy(results->data(), pView, count * sizeof(uint32_t));
+                            UnmapViewOfFile(pView);
+                        }
+                        CloseHandle(hMap);
+                    }
                 }
             }
 
