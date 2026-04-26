@@ -651,6 +651,17 @@ std::pair<FileRecord, std::wstring> NamedPipeEngine::GetRecordAndName(uint32_t r
     return { rec, name };
 }
 
+IIndexEngine::RowDisplayData NamedPipeEngine::GetRowDisplayData(uint32_t recordIdx) const {
+    RowDisplayData d;
+    auto [rec, name] = GetRecordAndName(recordIdx);
+    d.Name       = std::move(name);
+    d.Attributes = rec.FileAttributes;
+    d.FileSize   = GetRecordFileSize(recordIdx);
+    d.FileTime   = GetRecordLastModifiedFileTime(recordIdx);
+    d.ParentPath = GetParentPath(recordIdx);
+    return d;
+}
+
 std::wstring NamedPipeEngine::GetFullPath(uint32_t recordIdx) const {
     return GetParentPath(recordIdx) + L"\\" + GetRecordName(recordIdx);
 }

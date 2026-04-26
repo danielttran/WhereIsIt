@@ -21,6 +21,7 @@
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "Msimg32.lib")
 #pragma comment(linker,"\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 #define MAX_LOADSTRING 100
@@ -87,43 +88,67 @@ HFONT g_FontBold = NULL;
 
 #define IDC_STATUS_BAR 122
 #define WM_USER_ICON_LOADED (WM_USER + 3)
+#define WM_USER_THUMBNAIL_LOADED (WM_USER + 4)
+int g_CurrentViewMode = LV_VIEW_DETAILS;
+int g_CurrentIconSize = 16;
+HIMAGELIST g_hCustomImageList = NULL;
+
 int g_folderIconIdx = -1;
 int g_fileIconIdx = -1;
 std::unordered_map<uint32_t, int> g_recordIconCache;
 std::unordered_set<uint32_t> g_pendingIconRecords;
-std::queue<uint32_t> g_iconRequestQueue;
+std::deque<uint32_t> g_iconRequestQueue;  // deque so visible items can push_front
 std::mutex g_iconMutex;
 std::condition_variable g_iconCv;
-std::thread g_iconWorker;
+std::vector<std::thread> g_iconWorkers;
 bool g_iconWorkerRunning = false;
+HIMAGELIST g_hSIL_SmallCached = NULL;  // cached in CDDS_PREPAINT, valid for one paint pass
 
 // --- UI FORMATTING HELPERS ---
 
-int GetIconIndex(const std::wstring& /*filename*/, uint16_t attributes, uint32_t recordIdx) {
-    if (attributes & FILE_ATTRIBUTE_DIRECTORY) {
-        if (g_folderIconIdx != -1) return g_folderIconIdx;
-        SHFILEINFOW sfi = { 0 }; 
-        SHGetFileInfoW(L"C:\\Windows", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi), SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
-        return g_folderIconIdx = sfi.iIcon;
+// priority=true  => push_front (visible item, load ASAP)
+// priority=false => push_back  (prefetch, load when idle)
+static void EnqueueIconRequest(uint32_t recordIdx, bool priority) {
+    // Caller must NOT hold g_iconMutex.
+    std::lock_guard<std::mutex> lock(g_iconMutex);
+    if (g_pendingIconRecords.insert(recordIdx).second) {
+        if (priority) g_iconRequestQueue.push_front(recordIdx);
+        else          g_iconRequestQueue.push_back(recordIdx);
+        g_iconCv.notify_one();
     }
-    {
+}
+
+int GetIconIndex(const std::wstring& /*filename*/, uint16_t attributes, uint32_t recordIdx) {
+    if (g_CurrentViewMode == LV_VIEW_DETAILS) {
+        if (attributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (g_folderIconIdx != -1) return g_folderIconIdx;
+            SHFILEINFOW sfi = { 0 };
+            SHGetFileInfoW(L"C:\\Windows", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi), SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+            return g_folderIconIdx = sfi.iIcon;
+        }
+        // Single lock: check cache and enqueue atomically.
+        {
+            std::lock_guard<std::mutex> lock(g_iconMutex);
+            auto it = g_recordIconCache.find(recordIdx);
+            if (it != g_recordIconCache.end()) return it->second;
+            if (g_fileIconIdx == -1) {
+                // Unlock scope so SHGetFileInfoW isn't called under the mutex.
+            }
+        }
+        if (g_fileIconIdx == -1) {
+            SHFILEINFOW sfi = { 0 };
+            SHGetFileInfoW(L".txt", FILE_ATTRIBUTE_NORMAL, &sfi, sizeof(sfi), SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+            g_fileIconIdx = sfi.iIcon;
+        }
+    } else {
         std::lock_guard<std::mutex> lock(g_iconMutex);
         auto it = g_recordIconCache.find(recordIdx);
         if (it != g_recordIconCache.end()) return it->second;
     }
-    if (g_fileIconIdx == -1) {
-        SHFILEINFOW sfi = { 0 };
-        SHGetFileInfoW(L".txt", FILE_ATTRIBUTE_NORMAL, &sfi, sizeof(sfi), SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
-        g_fileIconIdx = sfi.iIcon;
-    }
-    {
-        std::lock_guard<std::mutex> lock(g_iconMutex);
-        if (g_pendingIconRecords.insert(recordIdx).second) {
-            g_iconRequestQueue.push(recordIdx);
-            g_iconCv.notify_one();
-        }
-    }
-    return g_fileIconIdx;
+
+    // Visible item: priority = true so it jumps to the front of the queue.
+    EnqueueIconRequest(recordIdx, /*priority=*/true);
+    return g_CurrentViewMode == LV_VIEW_DETAILS ? g_fileIconIdx : -1;
 }
 
 void FormatFileSize(wchar_t* buffer, size_t bufferLen, uint64_t bytes, uint16_t attributes) {
@@ -149,7 +174,61 @@ void FormatFileTime(wchar_t* buffer, size_t bufferLen, uint64_t filetime) {
         displayHour, localTime.wMinute, (localTime.wHour >= 12 ? L"PM" : L"AM"));
 }
 
-// --- FILE INTERACTION ---
+// Composites a premultiplied-ARGB HBITMAP (from IShellItemImageFactory) onto an
+// opaque white background and returns a new DDB suitable for ImageList_Add.
+// The caller is responsible for deleting the returned HBITMAP.
+static HBITMAP AlphaCompositeThumbnail(HBITMAP hSrc, int size) {
+    if (!hSrc) return nullptr;
+
+    // Query ACTUAL source dimensions — SIIGBF_BIGGERSIZEOK may return a bitmap
+    // larger than requested, so we must not assume size x size.
+    BITMAP srcInfo = {};
+    if (!GetObject(hSrc, sizeof(BITMAP), &srcInfo) || srcInfo.bmWidth <= 0 || srcInfo.bmHeight <= 0)
+        return nullptr;
+
+    // Destination must be a 32-bit DIB section; CreateCompatibleBitmap produces a
+    // DDB which causes AlphaBlend(AC_SRC_ALPHA) to composite incorrectly on some drivers.
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth       = size;
+    bi.bmiHeader.biHeight      = -size;   // top-down so row 0 is the top
+    bi.bmiHeader.biPlanes      = 1;
+    bi.bmiHeader.biBitCount    = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    void* pBits = nullptr;
+    HDC hdcScreen = GetDC(NULL);
+    HDC hdcSrc    = CreateCompatibleDC(hdcScreen);
+    HDC hdcDst    = CreateCompatibleDC(hdcScreen);
+    // NULL hdc is fine for 32-bit BI_RGB — hdc is only used for palette matching.
+    HBITMAP hDst  = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, &pBits, NULL, 0);
+    ReleaseDC(NULL, hdcScreen);
+
+    if (!hDst) { DeleteDC(hdcSrc); DeleteDC(hdcDst); return nullptr; }
+
+    HGDIOBJ hOldSrc = SelectObject(hdcSrc, hSrc);
+    HGDIOBJ hOldDst = SelectObject(hdcDst, hDst);
+
+    // Fill destination with white so transparent/semi-transparent areas look natural.
+    RECT rc = { 0, 0, size, size };
+    FillRect(hdcDst, &rc, (HBRUSH)GetStockObject(WHITE_BRUSH));
+
+    BLENDFUNCTION bf = {};
+    bf.BlendOp             = AC_SRC_OVER;
+    bf.BlendFlags          = 0;
+    bf.SourceConstantAlpha = 255;
+    bf.AlphaFormat         = AC_SRC_ALPHA;  // source has premultiplied alpha
+
+    // Scale from the FULL source rect (actual dims) into the destination rect (target size).
+    AlphaBlend(hdcDst, 0, 0, size, size,
+               hdcSrc, 0, 0, srcInfo.bmWidth, srcInfo.bmHeight, bf);
+
+    SelectObject(hdcSrc, hOldSrc);
+    SelectObject(hdcDst, hOldDst);
+    DeleteDC(hdcSrc);
+    DeleteDC(hdcDst);
+    return hDst;
+}
 
 // Globals kept alive only while a shell context menu's TrackPopupMenu loop is running.
 IContextMenu2* g_pCtxMenu2 = nullptr;
@@ -261,8 +340,12 @@ static void ShowShellContextMenu(HWND hwnd, int listIdx, POINT screenPt) {
 // --- CUSTOM DRAW ENGINE (Bolding Match) ---
 
 LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
+    if (g_CurrentViewMode != LV_VIEW_DETAILS) return CDRF_DODEFAULT;
     switch (pcd->nmcd.dwDrawStage) {
-    case CDDS_PREPAINT: return CDRF_NOTIFYITEMDRAW;
+    case CDDS_PREPAINT:
+        // Cache the image list once per paint pass — avoids a SendMessage per row.
+        g_hSIL_SmallCached = ListView_GetImageList(hFileList, LVSIL_SMALL);
+        return CDRF_NOTIFYITEMDRAW;
     case CDDS_ITEMPREPAINT: return CDRF_NOTIFYSUBITEMDRAW;
     case CDDS_ITEMPREPAINT | CDDS_SUBITEM:
         if (pcd->iSubItem == 0) {
@@ -281,16 +364,16 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
             FillRect(pcd->nmcd.hdc, &rect, GetSysColorBrush(isSelected ? COLOR_HIGHLIGHT : COLOR_WINDOW));
             SetTextColor(pcd->nmcd.hdc, GetSysColor(isSelected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT));
 
-            HIMAGELIST hSIL = ListView_GetImageList(hFileList, LVSIL_SMALL);
+            HIMAGELIST hSIL = g_hSIL_SmallCached;
             int iconIdx = GetIconIndex(nameStr, rec.FileAttributes, recordIdx);
-            ImageList_Draw(hSIL, iconIdx, pcd->nmcd.hdc, rect.left + 2, rect.top + (rect.bottom - rect.top - 16)/2, ILD_TRANSPARENT);
-            rect.left += 20; 
+            if (hSIL && iconIdx >= 0)
+                ImageList_Draw(hSIL, iconIdx, pcd->nmcd.hdc, rect.left + 2, rect.top + (rect.bottom - rect.top - 16)/2, ILD_TRANSPARENT);
+            rect.left += 20;
 
             size_t matchPos = std::wstring::npos;
             size_t matchLen = 0;
 
             if (!g_HighlightTokens.empty()) {
-                // StrStrIW: zero-allocation, case-insensitive search directly on the original string.
                 for (const auto& token : g_HighlightTokens) {
                     const wchar_t* found = StrStrIW(nameStr.c_str(), token.c_str());
                     if (found) { matchPos = (size_t)(found - nameStr.c_str()); matchLen = token.size(); break; }
@@ -298,28 +381,35 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
             }
 
             SetBkMode(pcd->nmcd.hdc, TRANSPARENT);
+            const wchar_t* pName = nameStr.c_str();
+            int nameLen = (int)nameStr.size();
             if (matchPos != std::wstring::npos && matchLen > 0) {
-                std::wstring p1 = nameStr.substr(0, matchPos);
-                std::wstring p2 = nameStr.substr(matchPos, matchLen);
-                std::wstring p3 = nameStr.substr(matchPos + matchLen);
+                // Draw the three segments using raw pointer + explicit length:
+                // no heap allocation, no wstring copies.
+                int pre  = (int)matchPos;
+                int mid  = (int)matchLen;
+                int post = nameLen - pre - mid;
 
                 RECT r1 = rect;
                 SelectObject(pcd->nmcd.hdc, g_FontNormal);
-                DrawTextW(pcd->nmcd.hdc, p1.c_str(), -1, &r1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
-                DrawTextW(pcd->nmcd.hdc, p1.c_str(), -1, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                rect.left = r1.right;
+                if (pre > 0) {
+                    DrawTextW(pcd->nmcd.hdc, pName, pre, &r1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
+                    DrawTextW(pcd->nmcd.hdc, pName, pre, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                    rect.left = r1.right;
+                }
 
                 RECT r2 = rect;
                 SelectObject(pcd->nmcd.hdc, g_FontBold);
-                DrawTextW(pcd->nmcd.hdc, p2.c_str(), -1, &r2, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
-                DrawTextW(pcd->nmcd.hdc, p2.c_str(), -1, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                DrawTextW(pcd->nmcd.hdc, pName + pre, mid, &r2, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
+                DrawTextW(pcd->nmcd.hdc, pName + pre, mid, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
                 rect.left = r2.right;
 
                 SelectObject(pcd->nmcd.hdc, g_FontNormal);
-                DrawTextW(pcd->nmcd.hdc, p3.c_str(), -1, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                if (post > 0)
+                    DrawTextW(pcd->nmcd.hdc, pName + pre + mid, post, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             } else {
                 SelectObject(pcd->nmcd.hdc, g_FontNormal);
-                DrawTextW(pcd->nmcd.hdc, nameStr.c_str(), -1, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                DrawTextW(pcd->nmcd.hdc, pName, nameLen, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             }
             return CDRF_SKIPDEFAULT;
         }
@@ -332,14 +422,39 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
 
 void OnDisplayInfo(NMLVDISPINFO* pdi) {
     if (!g_ActiveResults || pdi->item.iItem >= (int)g_ActiveResults->size()) return;
+    uint32_t rIdx = (*g_ActiveResults)[pdi->item.iItem];
+
     if (pdi->item.mask & LVIF_TEXT) {
-        // On-demand lookup — only called for ~30 visible rows at a time, never for the whole result set.
-        uint32_t rIdx = (*g_ActiveResults)[pdi->item.iItem];
         switch (pdi->item.iSubItem) {
-            case 1: wcsncpy_s(pdi->item.pszText, pdi->item.cchTextMax, g_Engine->GetParentPath(rIdx).c_str(), _TRUNCATE); break;
-            case 2: { FileRecord r = g_Engine->GetRecord(rIdx); FormatFileSize(pdi->item.pszText, pdi->item.cchTextMax, g_Engine->GetRecordFileSize(rIdx), r.FileAttributes); break; }
-            case 3: { FormatFileTime(pdi->item.pszText, pdi->item.cchTextMax, g_Engine->GetRecordLastModifiedFileTime(rIdx)); break; }
+            case 0: {
+                if (g_CurrentViewMode != LV_VIEW_DETAILS) {
+                    // Icon view: just the filename.
+                    auto [rec, nameStr] = g_Engine->GetRecordAndName(rIdx);
+                    wcsncpy_s(pdi->item.pszText, pdi->item.cchTextMax, nameStr.c_str(), _TRUNCATE);
+                }
+                // Details view col 0 is rendered by OnCustomDraw — return nothing here.
+                break;
+            }
+            case 1:
+            case 2:
+            case 3: {
+                // Fetch all four columns atomically in one lock acquisition so that
+                // size, attributes, and date are always consistent with each other.
+                auto d = g_Engine->GetRowDisplayData(rIdx);
+                if (pdi->item.iSubItem == 1) {
+                    wcsncpy_s(pdi->item.pszText, pdi->item.cchTextMax, d.ParentPath.c_str(), _TRUNCATE);
+                } else if (pdi->item.iSubItem == 2) {
+                    FormatFileSize(pdi->item.pszText, pdi->item.cchTextMax, d.FileSize, d.Attributes);
+                } else {
+                    FormatFileTime(pdi->item.pszText, pdi->item.cchTextMax, d.FileTime);
+                }
+                break;
+            }
         }
+    }
+    if (pdi->item.mask & LVIF_IMAGE) {
+        auto [rec, nameStr] = g_Engine->GetRecordAndName(rIdx);
+        pdi->item.iImage = GetIconIndex(nameStr, rec.FileAttributes, rIdx);
     }
 }
 
@@ -365,6 +480,49 @@ std::wstring FormatNumberWithCommas(size_t n) {
     return s;
 }
 
+void SetViewMode(HWND hWnd, int viewId) {
+    int newMode = LV_VIEW_ICON;
+    int newSize = 256;
+
+    switch (viewId) {
+        case IDM_VIEW_EXTRALARGE: newMode = LV_VIEW_ICON; newSize = 256; break;
+        case IDM_VIEW_LARGE:      newMode = LV_VIEW_ICON; newSize = 96; break;
+        case IDM_VIEW_MEDIUM:     newMode = LV_VIEW_ICON; newSize = 48; break;
+        case IDM_VIEW_DETAILS:    newMode = LV_VIEW_DETAILS; newSize = 16; break;
+    }
+
+    HMENU hMenu = GetMenu(hWnd);
+    CheckMenuRadioItem(hMenu, IDM_VIEW_EXTRALARGE, IDM_VIEW_DETAILS, viewId, MF_BYCOMMAND);
+
+    if (g_CurrentViewMode == newMode && g_CurrentIconSize == newSize) return;
+
+    g_CurrentViewMode = newMode;
+    g_CurrentIconSize = newSize;
+
+    {
+        std::lock_guard<std::mutex> lock(g_iconMutex);
+        g_recordIconCache.clear();
+        g_pendingIconRecords.clear();
+        g_iconRequestQueue.clear();
+    }
+
+    if (newMode == LV_VIEW_DETAILS) {
+        if (g_hCustomImageList) {
+            ImageList_Destroy(g_hCustomImageList);
+            g_hCustomImageList = NULL;
+        }
+        ListView_SetImageList(hFileList, NULL, LVSIL_NORMAL);
+        ListView_SetView(hFileList, LV_VIEW_DETAILS);
+    } else {
+        if (g_hCustomImageList) ImageList_Destroy(g_hCustomImageList);
+        g_hCustomImageList = ImageList_Create(newSize, newSize, ILC_COLOR32 | ILC_MASK, 100, 1000);
+        ListView_SetImageList(hFileList, g_hCustomImageList, LVSIL_NORMAL);
+        ListView_SetView(hFileList, LV_VIEW_ICON);
+        ListView_SetIconSpacing(hFileList, newSize + 16, newSize + 40);
+    }
+    InvalidateRect(hFileList, NULL, TRUE);
+}
+
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
@@ -386,32 +544,60 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         SendMessage(hSearchEdit, WM_SETFONT, (WPARAM)g_FontNormal, TRUE);
         g_Engine->SetNotifyWindow(hWnd);
         g_iconWorkerRunning = true;
-        g_iconWorker = std::thread([hWnd]() {
+        auto workerFn = [hWnd]() {
+            CoInitializeEx(NULL, COINIT_MULTITHREADED);
             while (true) {
                 uint32_t recordIdx = 0;
+                int currentMode = LV_VIEW_DETAILS;
+                int currentSize = 16;
                 {
                     std::unique_lock<std::mutex> lock(g_iconMutex);
                     g_iconCv.wait(lock, [] { return !g_iconWorkerRunning || !g_iconRequestQueue.empty(); });
-                    if (!g_iconWorkerRunning && g_iconRequestQueue.empty()) return;
+                    if (!g_iconWorkerRunning && g_iconRequestQueue.empty()) break;
                     recordIdx = g_iconRequestQueue.front();
-                    g_iconRequestQueue.pop();
+                    g_iconRequestQueue.pop_front();
+                    currentMode = g_CurrentViewMode;
+                    currentSize = g_CurrentIconSize;
                 }
                 std::wstring path = g_Engine->GetFullPath(recordIdx);
-                int iconIdx = g_fileIconIdx;
-                if (!path.empty()) {
-                    SHFILEINFOW sfi = { 0 };
-                    if (SHGetFileInfoW(path.c_str(), 0, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON)) {
-                        iconIdx = sfi.iIcon;
+                if (currentMode == LV_VIEW_DETAILS) {
+                    int iconIdx = g_fileIconIdx;
+                    if (!path.empty()) {
+                        SHFILEINFOW sfi = { 0 };
+                        if (SHGetFileInfoW(path.c_str(), 0, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON))
+                            iconIdx = sfi.iIcon;
                     }
+                    { std::lock_guard<std::mutex> lock(g_iconMutex); g_pendingIconRecords.erase(recordIdx); }
+                    PostMessage(hWnd, WM_USER_ICON_LOADED, (WPARAM)recordIdx, (LPARAM)iconIdx);
+                } else {
+                    HBITMAP hRaw = nullptr;
+                    if (!path.empty()) {
+                        IShellItemImageFactory* pFac = nullptr;
+                        if (SUCCEEDED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&pFac)))) {
+                            SIZE sz = { currentSize, currentSize };
+                            // SIIGBF_BIGGERSIZEOK: return larger cached thumb and let us scale,
+                            // avoiding a slow decode just for an exact-size match.
+                            pFac->GetImage(sz, SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK, &hRaw);
+                            pFac->Release();
+                        }
+                    }
+                    // Composite premultiplied ARGB → opaque DDB so ImageList_Add renders correctly.
+                    HBITMAP hComposited = AlphaCompositeThumbnail(hRaw, currentSize);
+                    if (hRaw) DeleteObject(hRaw);
+                    { std::lock_guard<std::mutex> lock(g_iconMutex); g_pendingIconRecords.erase(recordIdx); }
+                    if (hComposited)
+                        PostMessage(hWnd, WM_USER_THUMBNAIL_LOADED, (WPARAM)recordIdx, (LPARAM)hComposited);
                 }
-                {
-                    std::lock_guard<std::mutex> lock(g_iconMutex);
-                    g_recordIconCache[recordIdx] = iconIdx;
-                    g_pendingIconRecords.erase(recordIdx);
-                }
-                PostMessage(hWnd, WM_USER_ICON_LOADED, (WPARAM)recordIdx, 0);
             }
-        });
+            CoUninitialize();
+        };
+        g_iconWorkers.clear();
+        // I/O-bound thumbnail decoding benefits from multiple threads; cap at 8 to avoid thrashing.
+        unsigned int hwc = std::thread::hardware_concurrency();
+        unsigned int numWorkers = (hwc < 1u) ? 1u : (hwc > 8u) ? 8u : hwc;
+        g_iconWorkers.reserve(numWorkers);
+        for (unsigned int i = 0; i < numWorkers; ++i)
+            g_iconWorkers.emplace_back(workerFn);
 
         // Cache font height once for vertical centering performance in WM_SIZE.
         HDC hdc = GetDC(hSearchEdit);
@@ -426,6 +612,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!g_InitialSearchPath.empty()) {
             SetWindowTextW(hSearchEdit, g_InitialSearchPath.c_str());
         }
+
+        HMENU hMenu = GetMenu(hWnd);
+        CheckMenuRadioItem(hMenu, IDM_VIEW_EXTRALARGE, IDM_VIEW_DETAILS, IDM_VIEW_DETAILS, MF_BYCOMMAND);
 
         break;
     }
@@ -482,22 +671,49 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         break;
     case WM_USER_ICON_LOADED:
-        if (g_ActiveResults) {
+        if (g_ActiveResults && g_CurrentViewMode == LV_VIEW_DETAILS) {
             uint32_t recordIdx = (uint32_t)wParam;
-            for (int i = 0; i < (int)g_ActiveResults->size(); ++i) {
-                if ((*g_ActiveResults)[i] == recordIdx) {
-                    ListView_RedrawItems(hFileList, i, i);
-                    break;
-                }
+            int iconIdx = (int)lParam;
+            if (iconIdx == 0) iconIdx = g_fileIconIdx;
+            {
+                std::lock_guard<std::mutex> lock(g_iconMutex);
+                g_recordIconCache[recordIdx] = iconIdx;
             }
+            InvalidateRect(hFileList, NULL, FALSE);
         }
         break;
+    case WM_USER_THUMBNAIL_LOADED: {
+        uint32_t recordIdx = (uint32_t)wParam;
+        HBITMAP hBmp = (HBITMAP)lParam;
+        bool bValidSize = false;
+        if (hBmp) {
+            BITMAP bmp;
+            if (GetObject(hBmp, sizeof(BITMAP), &bmp) && bmp.bmWidth == g_CurrentIconSize) {
+                bValidSize = true;
+            }
+        }
+        if (bValidSize && g_ActiveResults && g_CurrentViewMode != LV_VIEW_DETAILS && g_hCustomImageList) {
+            int imgIdx = ImageList_Add(g_hCustomImageList, hBmp, NULL);
+            {
+                std::lock_guard<std::mutex> lock(g_iconMutex);
+                g_recordIconCache[recordIdx] = imgIdx;
+            }
+            InvalidateRect(hFileList, NULL, FALSE);
+        }
+        if (hBmp) DeleteObject(hBmp);
+        return 0;
+    }
     case WM_COMMAND:
         if (LOWORD(wParam) == IDC_SEARCH_EDIT && HIWORD(wParam) == EN_CHANGE) {
             GetWindowText(hSearchEdit, g_CurrentQueryW, 256);
             std::string queryA = WideToUtf8(g_CurrentQueryW);
             UpdateHighlightTokens();
             g_Engine->Search(queryA);
+        } else {
+            int wmId = LOWORD(wParam);
+            if (wmId >= IDM_VIEW_EXTRALARGE && wmId <= IDM_VIEW_DETAILS) {
+                SetViewMode(hWnd, wmId);
+            }
         }
         break;
     case WM_NOTIFY: {
@@ -581,11 +797,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_DESTROY: 
         {
             std::lock_guard<std::mutex> lock(g_iconMutex);
-            std::queue<uint32_t>().swap(g_iconRequestQueue);
+            std::deque<uint32_t>().swap(g_iconRequestQueue);
             g_iconWorkerRunning = false;
         }
         g_iconCv.notify_all();
-        if (g_iconWorker.joinable()) g_iconWorker.join();
+        for (auto& t : g_iconWorkers) if (t.joinable()) t.join();
+        g_iconWorkers.clear();
+        if (g_hCustomImageList) { ImageList_Destroy(g_hCustomImageList); g_hCustomImageList = NULL; }
         if (g_FontNormal) DeleteObject(g_FontNormal);
         if (g_FontBold) DeleteObject(g_FontBold); 
         PostQuitMessage(0); 

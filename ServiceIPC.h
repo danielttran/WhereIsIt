@@ -65,6 +65,7 @@ public:
     uint64_t                             GetRecordLastModifiedFileTime(uint32_t idx) const override;
     std::wstring                         GetRecordName(uint32_t idx) const override;
     std::pair<FileRecord, std::wstring>  GetRecordAndName(uint32_t idx) const override;
+    RowDisplayData                        GetRowDisplayData(uint32_t idx) const override;
 
     std::wstring GetCurrentStatus() const override;
     std::wstring GetFullPath(uint32_t idx)   const override;

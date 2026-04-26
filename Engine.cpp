@@ -427,6 +427,24 @@ std::pair<FileRecord, std::wstring> IndexingEngine::GetRecordAndName(uint32_t re
     return { rec, GetWideNameFromPoolOffsetCached(rec.NamePoolOffset) };
 }
 
+// Atomic fetch of all four detail-view display columns under one shared_lock.
+// Calling GetRecord / GetRecordFileSize / GetParentPath separately means each
+// acquires its own lock; a USN delta arriving between two calls can change the
+// record, producing a size that belongs to the old record but attributes that
+// belong to the new one (or vice versa).  This function is immune to that race.
+IIndexEngine::RowDisplayData IndexingEngine::GetRowDisplayData(uint32_t recordIdx) const {
+    std::shared_lock<std::shared_mutex> lock(m_dataMutex);
+    RowDisplayData d;
+    if (recordIdx >= GetRecordCount()) return d;
+    const FileRecord& rec = m_recordPool.GetRecord(recordIdx);
+    d.Attributes = rec.FileAttributes;
+    d.Name       = GetWideNameFromPoolOffsetCached(rec.NamePoolOffset);
+    d.FileSize   = ResolveFileSize(rec, recordIdx);   // giant-map aware, uses same lock scope
+    d.FileTime   = EpochToFileTime(rec.LastModifiedEpoch);
+    d.ParentPath = GetParentPathInternal(recordIdx);  // also lock-safe (no re-lock needed)
+    return d;
+}
+
 std::wstring IndexingEngine::GetWideNameFromPoolOffsetCached(uint32_t namePoolOffset) const {
     {
         std::lock_guard<std::mutex> cacheLock(m_nameCacheMutex);

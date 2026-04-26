@@ -58,6 +58,18 @@ struct IIndexEngine {
     virtual std::wstring                         GetRecordName(uint32_t recordIndex) const = 0;
     virtual std::pair<FileRecord, std::wstring>  GetRecordAndName(uint32_t recordIndex) const = 0;
 
+    // All four detail-view display fields from a single lock acquisition.
+    // Prevents size/attribute mismatch bugs that occur when multiple separate
+    // GetRecord / GetRecordFileSize calls race between USN delta updates.
+    struct RowDisplayData {
+        std::wstring Name;
+        std::wstring ParentPath;
+        uint64_t     FileSize   = 0;   // already resolved (giant-map aware)
+        uint64_t     FileTime   = 0;   // FILETIME ticks (0 = unknown)
+        uint16_t     Attributes = 0;
+    };
+    virtual RowDisplayData GetRowDisplayData(uint32_t recordIndex) const = 0;
+
     // Status
     virtual std::wstring GetCurrentStatus() const = 0;
 
@@ -100,6 +112,8 @@ public:
     std::wstring GetRecordName(uint32_t recordIndex) const override;
     // Single-lock fetch of both record and name — use in hot paint paths to halve lock acquisitions.
     std::pair<FileRecord, std::wstring> GetRecordAndName(uint32_t recordIndex) const override;
+    // Atomic fetch of all four detail-view display columns in one shared_lock acquisition.
+    RowDisplayData GetRowDisplayData(uint32_t recordIndex) const override;
     void SetStatus(const std::wstring& status) {
         std::lock_guard<std::mutex> lock(m_statusMutex);
         m_status = status;

@@ -50,7 +50,12 @@ BEGIN
     END
     POPUP "&View"
     BEGIN
-        MENUITEM "&Status Bar",          IDM_VIEW_STATUSBAR
+        MENUITEM "Extra Large Thumbnails\tCtrl+Shift+1", IDM_VIEW_EXTRALARGE
+        MENUITEM "Large Thumbnails\tCtrl+Shift+2",       IDM_VIEW_LARGE
+        MENUITEM "Medium Thumbnails\tCtrl+Shift+3",      IDM_VIEW_MEDIUM
+        MENUITEM "Details\tCtrl+Shift+6",                IDM_VIEW_DETAILS
+        MENUITEM SEPARATOR
+        MENUITEM "&Status Bar",                          IDM_VIEW_STATUSBAR
     END
     POPUP "&Search"
     BEGIN
@@ -78,6 +83,10 @@ END
 
 IDC_WHEREISIT ACCELERATORS
 BEGIN
+    "1",            IDM_VIEW_EXTRALARGE,    VIRTKEY, CONTROL, SHIFT, NOINVERT
+    "2",            IDM_VIEW_LARGE,         VIRTKEY, CONTROL, SHIFT, NOINVERT
+    "3",            IDM_VIEW_MEDIUM,        VIRTKEY, CONTROL, SHIFT, NOINVERT
+    "6",            IDM_VIEW_DETAILS,       VIRTKEY, CONTROL, SHIFT, NOINVERT
     "?",            IDM_ABOUT,              ASCII,  ALT
     "/",            IDM_ABOUT,              ASCII,  ALT
 END

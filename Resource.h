@@ -19,6 +19,10 @@
 #define IDM_TOOLS_OPTIONS       117
 #define IDC_SEARCH_EDIT         120
 #define IDC_FILE_LIST           121
+#define IDM_VIEW_EXTRALARGE     130
+#define IDM_VIEW_LARGE          131
+#define IDM_VIEW_MEDIUM         132
+#define IDM_VIEW_DETAILS        133
 #define IDI_WHEREISIT			107
 #define IDC_WHEREISIT			109
 #define IDC_MYICON				2
