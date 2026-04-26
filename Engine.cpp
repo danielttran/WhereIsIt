@@ -396,7 +396,7 @@ const char* StringPool::GetString(uint32_t offset) const {
 
 // --- IndexingEngine Implementation ---
 
-IndexingEngine::IndexingEngine() : m_running(false), m_ready(false), m_pool(20 * 1024 * 1024), m_isSearchRequested(false), m_isSortOnlyRequested(false), m_resultsUpdated(false) {
+IndexingEngine::IndexingEngine() : m_running(false), m_ready(false), m_pool(20 * 1024 * 1024), m_isSearchRequested(false), m_isSortOnlyRequested(false) {
     m_records.reserve(1000000);
     m_currentResults = std::make_shared<std::vector<uint32_t>>();
 }
@@ -932,7 +932,6 @@ void IndexingEngine::SearchThread() {
                 SetStatus(L"Query Error: " + plan.ErrorMessage);
                 std::lock_guard<std::mutex> lock(m_resultBufferMutex);
                 m_currentResults = results; // Empty results
-                m_resultsUpdated = true;
                 continue;
             }
 
@@ -1126,13 +1125,11 @@ void IndexingEngine::SearchThread() {
         {
             std::lock_guard<std::mutex> lock(m_resultBufferMutex);
             m_currentResults = std::move(results);
-            m_resultsUpdated = true;
         }
         
         if (m_hwndNotify) {
             PostMessage((HWND)m_hwndNotify, WM_USER_SEARCH_FINISHED, 0, 0);
         }
-        Logger::Log(L"[WhereIsIt] SearchThread: Sort and update complete.");
     }
 }
 

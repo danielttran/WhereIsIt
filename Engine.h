@@ -11,7 +11,6 @@
 #include <memory>
 #include <unordered_set>
 #include <chrono>
-#include <iomanip>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -105,15 +104,12 @@ public:
     void Search(const std::string& query);
     void Sort(QuerySortKey key, bool descending);
     std::shared_ptr<std::vector<uint32_t>> GetSearchResults();
-    bool HasNewResults() { return m_resultsUpdated.exchange(false); }
     void SetNotifyWindow(HWND hwnd) { m_hwndNotify = hwnd; }
 
-    const std::vector<FileRecord>& GetRecords() const { return m_records; }
     FileRecord GetRecord(uint32_t recordIndex) const;
     std::wstring GetRecordName(uint32_t recordIndex) const;
     // Single-lock fetch of both record and name — use in hot paint paths to halve lock acquisitions.
     std::pair<FileRecord, std::wstring> GetRecordAndName(uint32_t recordIndex) const;
-    const StringPool& GetFileNamePool() const { return m_pool; }
     void SetStatus(const std::wstring& status) {
         std::lock_guard<std::mutex> lock(m_statusMutex);
         m_status = status;
@@ -124,7 +120,6 @@ public:
         std::lock_guard<std::mutex> lock(m_statusMutex);
         return m_status;
     }
-    bool IsBusy() const { return !m_ready; }
 
     std::wstring GetFullPath(uint32_t recordIndex) const;
     std::wstring GetParentPath(uint32_t recordIndex) const;
@@ -204,6 +199,5 @@ private:
     std::condition_variable m_searchEvent;
     std::atomic<bool> m_isSearchRequested;
     std::atomic<bool> m_isSortOnlyRequested;
-    std::atomic<bool> m_resultsUpdated;
     std::shared_ptr<std::vector<uint32_t>> m_currentResults;
 };

@@ -8,7 +8,6 @@
 #include <map>
 #include <memory>
 #include <string>
-#include <algorithm>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -19,6 +18,7 @@
 #define WINDOW_WIDTH 900
 #define WINDOW_HEIGHT 1200
 #define SEARCH_BAR_HEIGHT 24
+constexpr int SEARCH_BAR_MARGIN = 5;
 
 // Global UI Context
 HINSTANCE hInst;
@@ -29,6 +29,7 @@ std::shared_ptr<std::vector<uint32_t>> g_ActiveResults;
 
 int g_SortColumn = 0;
 bool g_SortDescending = false;
+int g_SearchEditHeight = 0;
 
 // Search term storage for highlighting
 wchar_t g_CurrentQueryW[256] = { 0 };
@@ -155,8 +156,10 @@ static void ShowShellContextMenu(HWND hwnd, int listIdx, POINT screenPt) {
     PIDLIST_ABSOLUTE pidlFull = nullptr;
     HRESULT hr = SHParseDisplayName(path.c_str(), nullptr, &pidlFull, 0, nullptr);
     if (FAILED(hr)) {
+#ifdef _DEBUG
         swprintf_s(debugBuf, L"[WhereIsIt] SHParseDisplayName failed (0x%08X) for path: %s\n", hr, path.c_str());
         Logger::Log(debugBuf);
+#endif
         return;
     }
 
@@ -348,7 +351,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         lf.lfWeight = FW_BOLD; g_FontBold = CreateFontIndirect(&lf);
         SendMessage(hSearchEdit, WM_SETFONT, (WPARAM)g_FontNormal, TRUE);
         g_Engine.SetNotifyWindow(hWnd);
-        SetTimer(hWnd, 1, 500, NULL);
+
+        // Cache font height once for vertical centering performance in WM_SIZE.
+        HDC hdc = GetDC(hSearchEdit);
+        HFONT hFont = (HFONT)SendMessage(hSearchEdit, WM_GETFONT, 0, 0);
+        HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+        TEXTMETRIC tm;
+        GetTextMetrics(hdc, &tm);
+        SelectObject(hdc, hOldFont);
+        ReleaseDC(hSearchEdit, hdc);
+        g_SearchEditHeight = tm.tmHeight;
+
         break;
     }
     case WM_CONTEXTMENU: {
@@ -374,18 +387,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         break;
     }
-    case WM_TIMER:
-        if (wParam == 1) {
-            if (g_CurrentQueryW[0] != 0) {
-                std::wstring status = FormatNumberWithCommas(g_ActiveResults ? g_ActiveResults->size() : 0) + L" objects";
-                SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)status.c_str());
-            } else SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)g_Engine.GetCurrentStatus().c_str());
-        }
+    case WM_USER_STATUS_CHANGED:
+        if (g_CurrentQueryW[0] != 0) {
+            std::wstring status = FormatNumberWithCommas(g_ActiveResults ? g_ActiveResults->size() : 0) + L" objects";
+            SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)status.c_str());
+        } else SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)g_Engine.GetCurrentStatus().c_str());
         break;
     case WM_USER_SEARCH_FINISHED:
         // CRITICAL: This handler must be O(1) — it runs on the UI thread and blocks keystroke processing.
         // Do NOT iterate over results here. Only swap the pointer and tell the list view the new count.
-        // swap the pointer and tell the list view the new count.
         g_ActiveResults = g_Engine.GetSearchResults();
         if (g_ActiveResults) {
             size_t count = g_ActiveResults->size();
@@ -463,8 +473,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         HDC hdc = BeginPaint(hWnd, &ps);
         RECT clientRect;
         GetClientRect(hWnd, &clientRect);
-        int m = 5;
-        RECT searchBorderRect = { m - 1, m - 1, clientRect.right - m + 1, m + SEARCH_BAR_HEIGHT + 1 };
+        RECT searchBorderRect = { SEARCH_BAR_MARGIN - 1, SEARCH_BAR_MARGIN - 1, clientRect.right - SEARCH_BAR_MARGIN + 1, SEARCH_BAR_MARGIN + SEARCH_BAR_HEIGHT + 1 };
         // Fill the background white so the edit control's parent area looks like part of the box.
         FillRect(hdc, &searchBorderRect, (HBRUSH)(COLOR_WINDOW + 1));
         FrameRect(hdc, &searchBorderRect, GetSysColorBrush(COLOR_GRAYTEXT));
@@ -472,31 +481,21 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
     }
     case WM_SIZE: {
-        int w = LOWORD(lParam), h = HIWORD(lParam), m = 5;
+        int w = LOWORD(lParam), h = HIWORD(lParam);
         SendMessage(hStatusBar, WM_SIZE, 0, 0);
         RECT rs;
         GetWindowRect(hStatusBar, &rs);
 
         // Vertically center the text input. 
-        // We get the font height and position the edit control within the SEARCH_BAR_HEIGHT.
-        HDC hdc = GetDC(hSearchEdit);
-        HFONT hFont = (HFONT)SendMessage(hSearchEdit, WM_GETFONT, 0, 0);
-        HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
-        TEXTMETRIC tm;
-        GetTextMetrics(hdc, &tm);
-        SelectObject(hdc, hOldFont);
-        ReleaseDC(hSearchEdit, hdc);
-
-        int editH = tm.tmHeight;
-        int editY = m + (SEARCH_BAR_HEIGHT - editH) / 2;
+        // We use the cached g_SearchEditHeight to avoid DC lookups on every resize.
+        int editY = SEARCH_BAR_MARGIN + (SEARCH_BAR_HEIGHT - g_SearchEditHeight) / 2;
         // Left offset 2 to avoid touching the border.
-        MoveWindow(hSearchEdit, m + 2, editY, w - 2 * m - 4, editH, TRUE);
+        MoveWindow(hSearchEdit, SEARCH_BAR_MARGIN + 2, editY, w - 2 * SEARCH_BAR_MARGIN - 4, g_SearchEditHeight, TRUE);
 
-        MoveWindow(hFileList, 0, SEARCH_BAR_HEIGHT + 2 * m, w, h - (SEARCH_BAR_HEIGHT + 2 * m) - (rs.bottom - rs.top), TRUE);
+        MoveWindow(hFileList, 0, SEARCH_BAR_HEIGHT + 2 * SEARCH_BAR_MARGIN, w, h - (SEARCH_BAR_HEIGHT + 2 * SEARCH_BAR_MARGIN) - (rs.bottom - rs.top), TRUE);
         break;
     }
     case WM_DESTROY: 
-        KillTimer(hWnd, 1);
         if (g_FontBold) DeleteObject(g_FontBold); 
         PostQuitMessage(0); 
         break;
