@@ -12,6 +12,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include "StringUtils.h"
 #include <queue>
 #include <thread>
 #include <mutex>
@@ -49,6 +50,7 @@ wchar_t g_CurrentQueryW[256] = { 0 };
 std::vector<std::wstring> g_HighlightTokens;
 
 // Global UI Context
+std::wstring g_InitialSearchPath;
 
 void UpdateHighlightTokens() {
     g_HighlightTokens.clear();
@@ -421,6 +423,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         ReleaseDC(hSearchEdit, hdc);
         g_SearchEditHeight = tm.tmHeight;
 
+        if (!g_InitialSearchPath.empty()) {
+            SetWindowTextW(hSearchEdit, g_InitialSearchPath.c_str());
+        }
+
         break;
     }
     case WM_CONTEXTMENU: {
@@ -488,9 +494,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
     case WM_COMMAND:
         if (LOWORD(wParam) == IDC_SEARCH_EDIT && HIWORD(wParam) == EN_CHANGE) {
-            GetWindowText(hSearchEdit, g_CurrentQueryW, 256); char queryA[256];
+            GetWindowText(hSearchEdit, g_CurrentQueryW, 256);
+            std::string queryA = WideToUtf8(g_CurrentQueryW);
             UpdateHighlightTokens();
-            WideCharToMultiByte(CP_UTF8, 0, g_CurrentQueryW, -1, queryA, 256, NULL, NULL); 
             g_Engine->Search(queryA);
         }
         break;
@@ -597,6 +603,18 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         if (wcsstr(lpCmdLine, L"-install"))   return ServiceInstall();
         if (wcsstr(lpCmdLine, L"-uninstall")) return ServiceUninstall();
         if (wcsstr(lpCmdLine, L"-svc"))       return RunAsService();
+        if (wcsstr(lpCmdLine, L"-register") || wcsstr(lpCmdLine, L"/register")) { RegisterContextMenu(); return 0; }
+        if (wcsstr(lpCmdLine, L"-unregister") || wcsstr(lpCmdLine, L"/unregister")) { UnregisterContextMenu(); return 0; }
+
+        std::wstring cmdLineStr(lpCmdLine);
+        if (cmdLineStr.front() == L'"' && cmdLineStr.back() == L'"' && cmdLineStr.length() >= 2) {
+            g_InitialSearchPath = cmdLineStr.substr(1, cmdLineStr.length() - 2);
+        } else {
+            g_InitialSearchPath = cmdLineStr;
+        }
+        if (g_InitialSearchPath.length() > 3 && g_InitialSearchPath.back() == L'\\') {
+            g_InitialSearchPath.pop_back();
+        }
     }
 
     // UI mode: try to connect to the named pipe server.

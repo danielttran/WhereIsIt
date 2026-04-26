@@ -19,107 +19,17 @@
 #include <winioctl.h>
 #include <sddl.h>
 
-SECURITY_ATTRIBUTES* GetPermissiveSA();
+
 
 #define WM_USER_SEARCH_FINISHED  (WM_USER + 1)
 #define WM_USER_STATUS_CHANGED   (WM_USER + 2)  // engine posts when status text changes
 
 std::wstring FormatNumberWithCommas(size_t n);
 
-class Logger {
-public:
-    static void Log(const std::wstring& message);
-    static void SetEnabled(bool enabled) { m_enabled = enabled; }
-    static bool IsEnabled() { return m_enabled; }
-private:
-    static bool m_enabled;
-};
-
-enum class DriveFileSystem {
-    Unknown,
-    NTFS,
-    Generic
-};
-
-enum class QuerySortKey { Name, Path, Size, Date };
-
-#pragma pack(push, 1)
-struct FileRecord {
-    uint32_t NamePoolOffset;
-    uint32_t ParentMftIndex;
-    uint32_t MftIndex;
-    uint32_t LastModifiedEpoch;
-    uint32_t FileSize;
-    uint16_t MftSequence;
-    uint16_t ParentSequence;
-    uint32_t DriveIndex       : 6;
-    uint32_t IsGiantFile      : 1;
-    uint32_t FileAttributes   : 16;
-    uint32_t DirSizeComputed  : 1;   // set after directory sizes have been propagated
-    uint32_t Reserved         : 8;
-    uint32_t ParentRecordIndex;
-};
-#pragma pack(pop)
-static_assert(sizeof(FileRecord) == 32, "FileRecord MUST be exactly 32 bytes for cache alignment");
-
-// Internal NTFS Direct-Disk Structures
-#pragma pack(push, 1)
-struct MFT_RECORD_HEADER {
-    uint32_t Magic; uint16_t UpdateSeqOffset; uint16_t UpdateSeqSize; uint64_t LSN;
-    uint16_t SequenceNumber; uint16_t HardLinkCount; uint16_t AttributeOffset;
-    uint16_t Flags; uint32_t UsedSize; uint32_t AllocatedSize; uint64_t BaseRecord; uint16_t NextAttributeID;
-};
-struct MFT_ATTRIBUTE {
-    uint32_t Type; uint32_t Length; uint8_t NonResident; uint8_t NameLength;
-    uint16_t NameOffset; uint16_t Flags; uint16_t AttributeID;
-};
-struct MFT_RESIDENT_ATTRIBUTE { MFT_ATTRIBUTE Header; uint32_t ValueLength; uint16_t ValueOffset; uint8_t Flags; uint8_t Reserved; };
-struct MFT_FILE_NAME {
-    uint64_t ParentDirectory; uint64_t CreationTime; uint64_t ChangeTime; uint64_t LastWriteTime;
-    uint64_t LastAccessTime; uint64_t AllocatedSize; uint64_t DataSize; uint32_t FileAttributes;
-    uint32_t AlignmentOrReserved; uint8_t NameLength; uint8_t NameNamespace; wchar_t Name[1];
-};
-#pragma pack(pop)
-
-class StringPool {
-public:
-    static constexpr size_t kChunkSize = 16 * 1024 * 1024;  // 16 MB per chunk
-
-    StringPool(bool isShared = false);
-    ~StringPool();
-    uint32_t AddString(const std::wstring& text);
-    uint32_t AddString(const wchar_t* text, size_t length);
-    const char* GetString(uint32_t offset) const;
-    size_t GetSize() const { return m_totalSize; }
-    void Clear();
-    void LoadRawData(const char* data, size_t size);
-    uint32_t AddRawData(const char* data, size_t size);
-    uint32_t AdoptChunksFrom(StringPool& other);
-    // Write all chunks contiguously into a pre-allocated destination buffer (used by SaveIndex).
-    void WriteRawTo(uint8_t* dest) const;
-    // Iterate each contiguous chunk: calls fn(data, bytes) per chunk in order.
-    template<typename Fn>
-    void ForEachChunk(Fn fn) const {
-        for (size_t ci = 0; ci < m_chunks.size(); ++ci) {
-            bool isLast  = (ci == m_chunks.size() - 1);
-            size_t bytes = isLast ? m_chunkUsed : kChunkSize;
-            if (bytes > 0) fn(m_chunks[ci].data, bytes);
-        }
-    }
-private:
-    struct Chunk {
-        HANDLE hMap = NULL;
-        char* data = nullptr;
-    };
-    std::vector<Chunk> m_chunks;
-    size_t m_chunkUsed = 0;  // bytes used in the current (last) chunk
-    size_t m_totalSize = 0;  // total bytes across all chunks
-    bool m_shared = false;
-
-    // Ensure there is room for `needed` bytes in the current chunk,
-    // allocating a new chunk if necessary.
-    char* Reserve(size_t needed);
-};
+#include "CoreTypes.h"
+#include "StringPool.h"
+#include "RecordPool.h"
+#include "Utils.h"
 
 // ---------------------------------------------------------------------------
 // IIndexEngine — pure-virtual interface
@@ -287,8 +197,8 @@ private:
     };
     std::vector<DriveContext> m_drives;
     
-    HANDLE m_hRecordsMapping = NULL;
-    FileRecord* m_recordsShared = nullptr;
+    HANDLE m_hRecordsCountMapping = NULL;
+    RecordPool m_recordPool{true};
     std::atomic<uint32_t>* m_recordsCount = nullptr;
 
     HANDLE m_hDrivesMapping = NULL;

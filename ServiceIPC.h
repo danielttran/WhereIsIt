@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include "RecordPool.h"
 
 #define WHEREISIT_PIPE_NAME       L"\\\\.\\pipe\\WhereIsItIPC"
 #define WHEREISIT_SERVICE_NAME    L"WhereIsIt"
@@ -86,8 +87,8 @@ private:
     // Local engine used solely for record-accessor calls (GetRecord, GetFullPath…).
     // (Phase 2): Now eliminated. The UI directly maps the background service's memory.
     
-    HANDLE m_hRecordsMapping = NULL;
-    FileRecord* m_recordsShared = nullptr;
+    RecordPool m_recordPool{true};
+    HANDLE m_hRecordsCountMapping = NULL;
     std::atomic<uint32_t>* m_recordsCount = nullptr;
     HANDLE m_hDataMutex = NULL;
     HANDLE m_hDrivesMapping = NULL;

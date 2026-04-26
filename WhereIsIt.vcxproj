@@ -161,15 +161,26 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="CoreTypes.h" />
     <ClInclude Include="Engine.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="Resource.h" />
     <ClInclude Include="ServiceIPC.h" />
     <ClInclude Include="targetver.h" />
+    <ClInclude Include="QueryEngine.h" />
+    <ClInclude Include="RecordPool.h" />
+    <ClInclude Include="StringPool.h" />
+    <ClInclude Include="StringUtils.h" />
+    <ClInclude Include="Utils.h" />
     <ClInclude Include="WhereIsIt.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Engine.cpp" />
+    <ClCompile Include="QueryEngine.cpp" />
+    <ClCompile Include="RecordPool.cpp" />
+    <ClCompile Include="StringUtils.cpp" />
+    <ClCompile Include="Utils.cpp" />
+    <ClCompile Include="StringPool.cpp" />
     <ClCompile Include="ServiceIPC.cpp" />
     <ClCompile Include="WhereIsIt.cpp" />
   </ItemGroup>

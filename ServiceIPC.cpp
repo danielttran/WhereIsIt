@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <vector>
 #include <string>
+#include "StringUtils.h"
 
 // Max response payload: 1 M result indices × 4 bytes + 4-byte count header.
 // Both the server write buffer and the client receive buffer are sized to this.
@@ -350,16 +351,16 @@ void NamedPipeEngine::Start()
 
     // Phase 2: Attach to Shared Memory instead of running local scan
     m_hDataMutex = OpenMutexW(MUTEX_ALL_ACCESS, FALSE, L"Global\\WhereIsIt_DataMutex");
-    m_hRecordsMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\WhereIsIt_Records");
+    m_hRecordsCountMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\WhereIsIt_RecordsCount");
     m_hDrivesMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\WhereIsIt_Drives");
     if (m_hDrivesMapping) {
         m_driveLettersShared = (wchar_t(*)[4])MapViewOfFile(m_hDrivesMapping, FILE_MAP_READ, 0, 0, 0);
     }
-    if (m_hRecordsMapping) {
-        uint8_t* base = (uint8_t*)MapViewOfFile(m_hRecordsMapping, FILE_MAP_READ, 0, 0, 0);
+    if (m_hRecordsCountMapping) {
+        uint8_t* base = (uint8_t*)MapViewOfFile(m_hRecordsCountMapping, FILE_MAP_READ, 0, 0, 0);
         if (base) {
             m_recordsCount = (std::atomic<uint32_t>*)base;
-            m_recordsShared = (FileRecord*)(base + sizeof(std::atomic<uint32_t>));
+            m_recordPool.Reserve(m_recordsCount->load(std::memory_order_acquire)); // Ensure initial UI capacity
         }
     }
 
@@ -380,8 +381,9 @@ void NamedPipeEngine::Stop()
     if (m_searchThread.joinable())
         m_searchThread.join();
 
+    m_recordPool.Clear();
     if (m_recordsCount) UnmapViewOfFile(m_recordsCount);
-    if (m_hRecordsMapping) CloseHandle(m_hRecordsMapping);
+    if (m_hRecordsCountMapping) CloseHandle(m_hRecordsCountMapping);
     if (m_driveLettersShared) UnmapViewOfFile(m_driveLettersShared);
     if (m_hDrivesMapping) CloseHandle(m_hDrivesMapping);
     if (m_hDataMutex) CloseHandle(m_hDataMutex);
@@ -610,77 +612,63 @@ const char* NamedPipeEngine::GetString(uint32_t offset) const {
     return chunk ? (chunk + pos) : ""; 
 }
 
-FileRecord NamedPipeEngine::GetRecord(uint32_t recordIdx) const {
-    if (!m_recordsShared || !m_recordsCount || recordIdx >= m_recordsCount->load(std::memory_order_acquire)) return {};
-    if (m_hDataMutex) WaitForSingleObject(m_hDataMutex, INFINITE);
-    FileRecord rec = m_recordsShared[recordIdx];
-    if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
-    return rec;
-}
-
 uint64_t NamedPipeEngine::GetRecordFileSize(uint32_t recordIdx) const {
-    if (!m_recordsShared || !m_recordsCount || recordIdx >= m_recordsCount->load(std::memory_order_acquire)) return 0;
-    if (m_hDataMutex) WaitForSingleObject(m_hDataMutex, INFINITE);
-    uint64_t sz = m_recordsShared[recordIdx].FileSize; 
-    if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
-    return sz;
+    if (!m_recordsCount) return 0;
+    uint32_t count = m_recordsCount->load(std::memory_order_acquire);
+    if (recordIdx >= count) return 0;
+    const_cast<NamedPipeEngine*>(this)->m_recordPool.Reserve(count);
+    return m_recordPool.GetRecord(recordIdx).FileSize;
 }
 
 uint64_t NamedPipeEngine::GetRecordLastModifiedFileTime(uint32_t recordIdx) const {
-    if (!m_recordsShared || !m_recordsCount || recordIdx >= m_recordsCount->load(std::memory_order_acquire)) return 0;
-    if (m_hDataMutex) WaitForSingleObject(m_hDataMutex, INFINITE);
-    uint32_t epoch = m_recordsShared[recordIdx].LastModifiedEpoch;
-    if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
+    if (!m_recordsCount) return 0;
+    uint32_t count = m_recordsCount->load(std::memory_order_acquire);
+    if (recordIdx >= count) return 0;
+    const_cast<NamedPipeEngine*>(this)->m_recordPool.Reserve(count);
+    uint32_t epoch = m_recordPool.GetRecord(recordIdx).LastModifiedEpoch;
     return UnixEpochSecondsToFileTime(epoch);
 }
 
 std::wstring NamedPipeEngine::GetRecordName(uint32_t recordIdx) const {
-    if (!m_recordsShared || !m_recordsCount || recordIdx >= m_recordsCount->load(std::memory_order_acquire)) return L"";
-    if (m_hDataMutex) WaitForSingleObject(m_hDataMutex, INFINITE);
-    uint32_t offset = m_recordsShared[recordIdx].NamePoolOffset;
-    if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
-    const char* nameA = GetString(offset);
-    if (!nameA || !nameA[0]) return L"";
-    int sz = MultiByteToWideChar(CP_UTF8, 0, nameA, -1, NULL, 0);
-    if (sz <= 1) return L"";
-    std::wstring converted(sz - 1, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, nameA, -1, &converted[0], sz);
-    return converted;
+    if (!m_recordsCount) return L"";
+    uint32_t count = m_recordsCount->load(std::memory_order_acquire);
+    if (recordIdx >= count) return L"";
+    const_cast<NamedPipeEngine*>(this)->m_recordPool.Reserve(count);
+    uint32_t offset = m_recordPool.GetRecord(recordIdx).NamePoolOffset;
+    const char* str = GetString(offset);
+    if (!str || !str[0]) return L"";
+    return Utf8ToWide(str);
 }
 
 std::pair<FileRecord, std::wstring> NamedPipeEngine::GetRecordAndName(uint32_t recordIdx) const {
-    if (!m_recordsShared || !m_recordsCount || recordIdx >= m_recordsCount->load(std::memory_order_acquire)) return { {}, L"" };
-    if (m_hDataMutex) WaitForSingleObject(m_hDataMutex, INFINITE);
-    FileRecord rec = m_recordsShared[recordIdx];
-    if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
-    const char* nameA = GetString(rec.NamePoolOffset);
-    std::wstring converted;
-    if (nameA && nameA[0]) {
-        int sz = MultiByteToWideChar(CP_UTF8, 0, nameA, -1, NULL, 0);
-        if (sz > 1) {
-            converted.resize(sz - 1);
-            MultiByteToWideChar(CP_UTF8, 0, nameA, -1, &converted[0], sz);
-        }
-    }
-    return { rec, converted };
-}
-
-std::wstring NamedPipeEngine::GetCurrentStatus() const {
-    if (!m_recordsCount) return L"Not connected";
-    return L"Connected - " + std::to_wstring(m_recordsCount->load(std::memory_order_acquire)) + L" items";
+    if (!m_recordsCount) return { {}, L"" };
+    uint32_t count = m_recordsCount->load(std::memory_order_acquire);
+    if (recordIdx >= count) return { {}, L"" };
+    const_cast<NamedPipeEngine*>(this)->m_recordPool.Reserve(count);
+    FileRecord rec = m_recordPool.GetRecord(recordIdx);
+    const char* str = GetString(rec.NamePoolOffset);
+    std::wstring name = (!str || !str[0]) ? L"" : Utf8ToWide(str);
+    return { rec, name };
 }
 
 std::wstring NamedPipeEngine::GetFullPath(uint32_t recordIdx) const {
-    if (!m_recordsShared || !m_recordsCount || recordIdx >= m_recordsCount->load(std::memory_order_acquire)) return L"";
+    return GetParentPath(recordIdx) + L"\\" + GetRecordName(recordIdx);
+}
+
+std::wstring NamedPipeEngine::GetParentPath(uint32_t recordIdx) const {
+    if (!m_recordsCount) return L"";
+    uint32_t count = m_recordsCount->load(std::memory_order_acquire);
+    if (recordIdx >= count) return L"";
+    const_cast<NamedPipeEngine*>(this)->m_recordPool.Reserve(count);
     
     thread_local const char* parts[4096];
     int partsCount = 0;
     thread_local uint32_t visited[4096];
     int visitedCount = 0;
-    
+
     uint32_t cur = recordIdx;
-    uint8_t rootDriveIndex = 0;
-    
+    uint8_t rootDrive = 0;
+
     while (partsCount < 4096 && visitedCount < 4096) {
         bool cycle = false;
         for (int i = 0; i < visitedCount; i++) {
@@ -689,18 +677,18 @@ std::wstring NamedPipeEngine::GetFullPath(uint32_t recordIdx) const {
         if (cycle) break;
         visited[visitedCount++] = cur;
 
-        if (m_hDataMutex) WaitForSingleObject(m_hDataMutex, INFINITE);
-        FileRecord r = m_recordsShared[cur]; 
-        if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
-        rootDriveIndex = r.DriveIndex;
-
-        const char* name = GetString(r.NamePoolOffset);
-        if (name[0] != '.' || name[1] != '\0') {
-            parts[partsCount++] = name;
+        FileRecord r = m_recordPool.GetRecord(cur); 
+        rootDrive = r.DriveIndex;
+        if (cur != recordIdx) {
+            const char* name = GetString(r.NamePoolOffset);
+            if (name && (name[0] != '.' || name[1] != '\0')) {
+                parts[partsCount++] = name;
+            }
         }
+
         uint32_t pi = r.ParentRecordIndex;
-        if (pi == 0xFFFFFFFF || pi >= m_recordsCount->load(std::memory_order_acquire)) break;
-        if (pi == cur) break; cur = pi;
+        if (pi == 0xFFFFFFFF || pi >= count || pi == cur) break;
+        cur = pi;
     }
     
     std::string pa;
@@ -708,27 +696,18 @@ std::wstring NamedPipeEngine::GetFullPath(uint32_t recordIdx) const {
         if (!pa.empty()) pa += "\\";
         pa += parts[i];
     }
-    int sz = MultiByteToWideChar(CP_UTF8, 0, pa.c_str(), -1, NULL, 0);
-    std::wstring drive = (m_driveLettersShared && rootDriveIndex < 64) ? m_driveLettersShared[rootDriveIndex] : L"X:\\";
-    if (sz > 0) { 
-        std::wstring pw(sz - 1, L'\0'); 
-        MultiByteToWideChar(CP_UTF8, 0, pa.c_str(), -1, &pw[0], sz); 
-        return drive + pw; 
-    }
-    return drive;
+    std::wstring drive = (m_driveLettersShared && rootDrive < 64) ? m_driveLettersShared[rootDrive] : L"X:\\";
+    return drive + Utf8ToWide(pa);
 }
 
-std::wstring NamedPipeEngine::GetParentPath(uint32_t recordIdx) const {
-    if (!m_recordsShared || !m_recordsCount || recordIdx >= m_recordsCount->load(std::memory_order_acquire)) return L"";
-    if (m_hDataMutex) WaitForSingleObject(m_hDataMutex, INFINITE);
-    uint32_t pi = m_recordsShared[recordIdx].ParentRecordIndex;
-    uint8_t di = m_recordsShared[recordIdx].DriveIndex;
-    if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
+std::wstring NamedPipeEngine::GetCurrentStatus() const { return L"UI Mode"; }
 
-    if (pi == 0xFFFFFFFF || pi >= m_recordsCount->load(std::memory_order_acquire)) {
-        return (m_driveLettersShared && di < 64) ? m_driveLettersShared[di] : L"X:\\";
-    }
-    return GetFullPath(pi);
+FileRecord NamedPipeEngine::GetRecord(uint32_t recordIdx) const {
+    if (!m_recordsCount) return {};
+    uint32_t count = m_recordsCount->load(std::memory_order_acquire);
+    if (recordIdx >= count) return {};
+    const_cast<NamedPipeEngine*>(this)->m_recordPool.Reserve(count);
+    return m_recordPool.GetRecord(recordIdx);
 }
 
 void NamedPipeEngine::SetIndexScopeConfig(const IndexScopeConfig& /*cfg*/)
