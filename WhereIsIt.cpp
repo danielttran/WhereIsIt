@@ -1,6 +1,7 @@
 #include "framework.h"
 #include "WhereIsIt.h"
 #include "Engine.h"
+#include "ServiceIPC.h"
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -32,8 +33,10 @@ HINSTANCE hInst;
 WCHAR szTitle[MAX_LOADSTRING], szWindowClass[MAX_LOADSTRING];
 HWND hSearchEdit, hFileList, hStatusBar;
 // g_EngineImpl is the concrete in-process engine.
-// g_Engine is the interface pointer — future Named Pipe proxy only needs to swap this.
-static IndexingEngine g_EngineImpl;
+// g_Engine is the interface pointer — swapped to g_PipeEngineImpl when the
+// named pipe server is reachable; falls back to g_EngineImpl otherwise.
+static IndexingEngine  g_EngineImpl;
+static NamedPipeEngine* g_PipeEngineImpl = nullptr;
 IIndexEngine* g_Engine = &g_EngineImpl;
 std::shared_ptr<std::vector<uint32_t>> g_ActiveResults;
 
@@ -583,7 +586,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nCmdShow) {
-    UNREFERENCED_PARAMETER(hPrevInstance); UNREFERENCED_PARAMETER(lpCmdLine);
+    UNREFERENCED_PARAMETER(hPrevInstance);
+
+    // Service command dispatch — must happen before any UI or COM setup.
+    if (lpCmdLine && *lpCmdLine) {
+        if (wcsstr(lpCmdLine, L"-install"))   return ServiceInstall();
+        if (wcsstr(lpCmdLine, L"-uninstall")) return ServiceUninstall();
+        if (wcsstr(lpCmdLine, L"-svc"))       return RunAsService();
+    }
+
+    // UI mode: try to connect to the named pipe server.
+    // If reachable, proxy all search calls through it; otherwise run in-process.
+    if (IsNamedPipeServerAvailable()) {
+        g_PipeEngineImpl = new NamedPipeEngine();
+        g_Engine = g_PipeEngineImpl;
+    }
+
     if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE))) return FALSE;
     LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
     LoadStringW(hInstance, IDC_WHEREISIT, szWindowClass, MAX_LOADSTRING);
@@ -604,6 +622,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0)) { TranslateMessage(&msg); DispatchMessage(&msg); }
     g_Engine->Stop();
+    delete g_PipeEngineImpl;
+    g_PipeEngineImpl = nullptr;
     CoUninitialize();
     return (int)msg.wParam;
 }
