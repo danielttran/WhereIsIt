@@ -997,7 +997,7 @@ void IndexingEngine::SearchThread() {
                             // megabytes every 50 ms — this would cause visible CPU spikes
                             // for queries matching hundreds of thousands of files.
                             // The full result set is published once the scan completes.
-                            size_t streamCount = std::min(results->size(), (size_t)50000);
+                            size_t streamCount = (std::min)(results->size(), (size_t)50000);
                             auto partial = std::make_shared<std::vector<uint32_t>>(
                                 results->begin(), results->begin() + (std::ptrdiff_t)streamCount);
                             {
@@ -1418,9 +1418,9 @@ void IndexingEngine::MonitorChanges() {
     }
 
     // Cleanup
-    if (hDebounceTimer) CloseHandle(hDebounceTimer);
+    if (hDebounceTimer) { CloseHandle(hDebounceTimer); hDebounceTimer = nullptr; }
     for (size_t hi = 1; hi < waitHandles.size(); ++hi) {
-        if (waitHandles[hi] != hDebounceTimer)
+        if (waitHandles[hi] != nullptr)
             FindCloseChangeNotification(waitHandles[hi]);
     }
 }
