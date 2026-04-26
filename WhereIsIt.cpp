@@ -16,7 +16,9 @@
 #pragma comment(linker,"\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 #define MAX_LOADSTRING 100
-#define IDT_SEARCH_DEBOUNCE 2
+#define WINDOW_WIDTH 900
+#define WINDOW_HEIGHT 1200
+#define SEARCH_BAR_HEIGHT 24
 
 // Global UI Context
 HINSTANCE hInst;
@@ -32,14 +34,7 @@ bool g_SortDescending = false;
 wchar_t g_CurrentQueryW[256] = { 0 };
 std::vector<std::wstring> g_HighlightTokens;
 
-// Pre-cached display data: populated at WM_USER_SEARCH_FINISHED, read lock-free from paint callbacks.
-// Indexed parallel to g_ActiveResults (same size). Avoids holding m_dataMutex during LVN_GETDISPINFO.
-std::vector<std::wstring> g_CachedPaths;       // parent path per result
-std::vector<std::wstring> g_CachedNames;       // file name (wide) per result
-std::vector<std::wstring> g_CachedNamesLower;  // lower-case name per result, for highlight matching
-std::vector<uint16_t>     g_CachedAttribs;     // FileAttributes per result
-std::vector<uint64_t>     g_CachedSizes;       // FileSize per result
-std::vector<uint64_t>     g_CachedDates;       // LastModified per result
+// Global UI Context
 
 void UpdateHighlightTokens() {
     g_HighlightTokens.clear();
@@ -336,7 +331,7 @@ std::wstring FormatNumberWithCommas(size_t n) {
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
-        hSearchEdit = CreateWindowEx(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, hWnd, (HMENU)IDC_SEARCH_EDIT, hInst, NULL);
+        hSearchEdit = CreateWindowEx(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, hWnd, (HMENU)IDC_SEARCH_EDIT, hInst, NULL);
         hFileList = CreateWindowEx(0, WC_LISTVIEW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_OWNERDATA | LVS_SHAREIMAGELISTS, 0, 0, 0, 0, hWnd, (HMENU)IDC_FILE_LIST, hInst, NULL);
         SHFILEINFOW sfi = { 0 }; HIMAGELIST hSIL = (HIMAGELIST)SHGetFileInfoW(L"C:\\", 0, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
         if (hSIL) ListView_SetImageList(hFileList, hSIL, LVSIL_SMALL);
@@ -353,7 +348,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         lf.lfWeight = FW_BOLD; g_FontBold = CreateFontIndirect(&lf);
         SendMessage(hSearchEdit, WM_SETFONT, (WPARAM)g_FontNormal, TRUE);
         g_Engine.SetNotifyWindow(hWnd);
-        // No polling timer needed — status bar updates are event-driven via WM_USER_STATUS_CHANGED.
+        SetTimer(hWnd, 1, 500, NULL);
         break;
     }
     case WM_CONTEXTMENU: {
@@ -379,25 +374,19 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         break;
     }
-    case WM_USER_STATUS_CHANGED:
-        // Engine posted this when status changed — update status bar immediately, no polling.
-        if (g_CurrentQueryW[0] != 0) {
-            if (g_ActiveResults) {
-                std::wstring s = FormatNumberWithCommas(g_ActiveResults->size()) + L" objects";
-                SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)s.c_str());
-            }
-        } else {
-            SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)g_Engine.GetCurrentStatus().c_str());
+    case WM_TIMER:
+        if (wParam == 1) {
+            if (g_CurrentQueryW[0] != 0) {
+                std::wstring status = FormatNumberWithCommas(g_ActiveResults ? g_ActiveResults->size() : 0) + L" objects";
+                SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)status.c_str());
+            } else SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)g_Engine.GetCurrentStatus().c_str());
         }
         break;
     case WM_USER_SEARCH_FINISHED:
         // CRITICAL: This handler must be O(1) — it runs on the UI thread and blocks keystroke processing.
         // Do NOT iterate over results here. Only swap the pointer and tell the list view the new count.
+        // swap the pointer and tell the list view the new count.
         g_ActiveResults = g_Engine.GetSearchResults();
-        // Clear display caches — they are no longer pre-built upfront (too expensive for large result sets).
-        // OnDisplayInfo/OnCustomDraw use on-demand per-visible-row lookups.
-        g_CachedPaths.clear(); g_CachedNames.clear(); g_CachedNamesLower.clear();
-        g_CachedAttribs.clear(); g_CachedSizes.clear(); g_CachedDates.clear();
         if (g_ActiveResults) {
             size_t count = g_ActiveResults->size();
             ListView_SetItemCount(hFileList, (int)count);
@@ -469,11 +458,41 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (g_pCtxMenu3) { g_pCtxMenu3->HandleMenuMsg(WM_MEASUREITEM, wParam, lParam); return TRUE; }
         if (g_pCtxMenu2) { g_pCtxMenu2->HandleMenuMsg(WM_MEASUREITEM, wParam, lParam); return TRUE; }
         break;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hWnd, &ps);
+        RECT clientRect;
+        GetClientRect(hWnd, &clientRect);
+        int m = 5;
+        RECT searchBorderRect = { m - 1, m - 1, clientRect.right - m + 1, m + SEARCH_BAR_HEIGHT + 1 };
+        // Fill the background white so the edit control's parent area looks like part of the box.
+        FillRect(hdc, &searchBorderRect, (HBRUSH)(COLOR_WINDOW + 1));
+        FrameRect(hdc, &searchBorderRect, GetSysColorBrush(COLOR_GRAYTEXT));
+        EndPaint(hWnd, &ps);
+        return 0;
+    }
     case WM_SIZE: {
-        int w = LOWORD(lParam), h = HIWORD(lParam), sh = 24, m = 5;
-        SendMessage(hStatusBar, WM_SIZE, 0, 0); RECT rs; GetWindowRect(hStatusBar, &rs);
-        MoveWindow(hSearchEdit, m, m, w - 2 * m, sh, TRUE);
-        MoveWindow(hFileList, 0, sh + 2 * m, w, h - (sh + 2 * m) - (rs.bottom - rs.top), TRUE);
+        int w = LOWORD(lParam), h = HIWORD(lParam), m = 5;
+        SendMessage(hStatusBar, WM_SIZE, 0, 0);
+        RECT rs;
+        GetWindowRect(hStatusBar, &rs);
+
+        // Vertically center the text input. 
+        // We get the font height and position the edit control within the SEARCH_BAR_HEIGHT.
+        HDC hdc = GetDC(hSearchEdit);
+        HFONT hFont = (HFONT)SendMessage(hSearchEdit, WM_GETFONT, 0, 0);
+        HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+        TEXTMETRIC tm;
+        GetTextMetrics(hdc, &tm);
+        SelectObject(hdc, hOldFont);
+        ReleaseDC(hSearchEdit, hdc);
+
+        int editH = tm.tmHeight;
+        int editY = m + (SEARCH_BAR_HEIGHT - editH) / 2;
+        // Left offset 2 to avoid touching the border.
+        MoveWindow(hSearchEdit, m + 2, editY, w - 2 * m - 4, editH, TRUE);
+
+        MoveWindow(hFileList, 0, SEARCH_BAR_HEIGHT + 2 * m, w, h - (SEARCH_BAR_HEIGHT + 2 * m) - (rs.bottom - rs.top), TRUE);
         break;
     }
     case WM_DESTROY: 
@@ -500,7 +519,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     INITCOMMONCONTROLSEX icex = { sizeof(INITCOMMONCONTROLSEX), ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES };
     InitCommonControlsEx(&icex);
     g_Engine.Start(); hInst = hInstance;
-    HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, 0, CW_USEDEFAULT, 0, nullptr, nullptr, hInstance, nullptr);
+    int windowX = (GetSystemMetrics(SM_CXSCREEN) - WINDOW_WIDTH) / 2;
+    int windowY = (GetSystemMetrics(SM_CYSCREEN) - WINDOW_HEIGHT) / 2;
+    HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW, windowX, windowY, WINDOW_WIDTH, WINDOW_HEIGHT, nullptr, nullptr, hInstance, nullptr);
     if (!hWnd) return FALSE;
     ShowWindow(hWnd, nCmdShow); UpdateWindow(hWnd);
     MSG msg;
