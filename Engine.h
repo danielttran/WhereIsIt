@@ -10,6 +10,8 @@
 #include <condition_variable>
 #include <memory>
 #include <unordered_set>
+#include <unordered_map>
+#include <list>
 #include <chrono>
 
 #define WIN32_LEAN_AND_MEAN
@@ -125,6 +127,19 @@ public:
     std::wstring GetParentPath(uint32_t recordIndex) const;
 
 private:
+    struct PendingUsnDelta {
+        enum class Kind { Upsert, Delete } Type = Kind::Upsert;
+        uint8_t DriveIndex = 0;
+        uint32_t MftIndex = 0;
+        uint16_t MftSequence = 0;
+        uint32_t ParentMftIndex = 0;
+        uint16_t ParentSequence = 0;
+        std::wstring Name;
+        uint64_t FileSize = 0;
+        uint64_t LastModified = 0;
+        uint16_t FileAttributes = 0;
+    };
+
     struct DriveScanContext {
         std::vector<FileRecord> Records;
         std::vector<uint32_t> LookupTable;
@@ -163,6 +178,9 @@ private:
     static bool WildcardMatchI(const wchar_t* pattern, const wchar_t* text);
     void CloseAllDriveHandles();
     void UpdatePreSortedIndex();
+    void EnqueueUsnDelta(PendingUsnDelta&& delta);
+    void ApplyPendingUsnDeltas();
+    std::wstring GetWideNameFromPoolOffsetCached(uint32_t namePoolOffset) const;
 
     std::thread m_mainWorker;
     std::thread m_searchWorker;
@@ -191,6 +209,14 @@ private:
     mutable std::mutex m_scopeConfigMutex;
 
     mutable std::shared_mutex m_dataMutex;
+    std::mutex m_usnDeltaMutex;
+    std::vector<PendingUsnDelta> m_pendingUsnDeltas;
+    std::chrono::steady_clock::time_point m_lastUsnMerge = std::chrono::steady_clock::now();
+
+    mutable std::mutex m_nameCacheMutex;
+    mutable std::list<uint32_t> m_nameCacheLru;
+    mutable std::unordered_map<uint32_t, std::pair<std::wstring, std::list<uint32_t>::iterator>> m_nameCache;
+    static constexpr size_t kWideNameCacheCapacity = 256;
     std::string m_pendingSearchQuery;
     QuerySortKey m_currentSortKey = QuerySortKey::Name;
     bool m_currentSortDescending = false;

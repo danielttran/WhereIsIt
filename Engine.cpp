@@ -11,6 +11,8 @@
 #include <cctype>
 #include <cwctype>
 #include <functional>
+#include <immintrin.h>
+#include <intrin.h>
 
 // --- Logger Implementation ---
 bool Logger::m_enabled = true; 
@@ -82,9 +84,37 @@ static bool FastContains(const std::string& haystack, const std::string& needle,
 static bool FastContainsCIPtr(const char* haystack, const char* needleLow, size_t needleLen) {
     if (!needleLen) return true;
     const unsigned char first = (unsigned char)needleLow[0];
-    for (; *haystack; ++haystack) {
-        if (g_ToLowerLookup[(unsigned char)*haystack] == first) {
-            const char *h = haystack, *n = needleLow;
+#if defined(__AVX2__)
+    const char lowerFirst = (char)first;
+    const char upperFirst = (lowerFirst >= 'a' && lowerFirst <= 'z') ? (char)(lowerFirst - 32) : lowerFirst;
+    const __m256i vLower = _mm256_set1_epi8(lowerFirst);
+    const __m256i vUpper = _mm256_set1_epi8(upperFirst);
+#endif
+    const char* p = haystack;
+#if defined(__AVX2__)
+    while (*p) {
+        size_t remaining = strlen(p);
+        if (remaining < 32) break;
+        __m256i v = _mm256_loadu_si256((const __m256i*)p);
+        __m256i eqLower = _mm256_cmpeq_epi8(v, vLower);
+        __m256i eqUpper = _mm256_cmpeq_epi8(v, vUpper);
+        unsigned mask = (unsigned)_mm256_movemask_epi8(_mm256_or_si256(eqLower, eqUpper));
+        while (mask) {
+            unsigned long bitScan = 0;
+            _BitScanForward(&bitScan, mask);
+            unsigned bit = (unsigned)bitScan;
+            const char* h = p + bit;
+            const char* n = needleLow;
+            while (*h && *n && g_ToLowerLookup[(unsigned char)*h] == (unsigned char)*n) { ++h; ++n; }
+            if (!*n) return true;
+            mask &= (mask - 1);
+        }
+        p += 32;
+    }
+#endif
+    for (; *p; ++p) {
+        if (g_ToLowerLookup[(unsigned char)*p] == first) {
+            const char *h = p, *n = needleLow;
             while (*h && *n && g_ToLowerLookup[(unsigned char)*h] == (unsigned char)*n) { ++h; ++n; }
             if (!*n) return true;
         }
@@ -472,6 +502,9 @@ bool IndexingEngine::SaveIndex(const std::wstring& filePath) {
 bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
     auto clearState = [this]() {
         m_records.clear(); m_mftLookupTables.clear(); m_pool.Clear();
+        std::lock_guard<std::mutex> cacheLock(m_nameCacheMutex);
+        m_nameCache.clear();
+        m_nameCacheLru.clear();
     };
     auto readExact = [](std::ifstream& stream, char* buffer, size_t bytes) {
         stream.read(buffer, (std::streamsize)bytes);
@@ -643,13 +676,7 @@ FileRecord IndexingEngine::GetRecord(uint32_t recordIdx) const {
 std::wstring IndexingEngine::GetRecordName(uint32_t recordIdx) const {
     std::shared_lock<std::shared_mutex> lock(m_dataMutex);
     if (recordIdx >= m_records.size()) return L"";
-    const char* nameA = m_pool.GetString(m_records[recordIdx].NamePoolOffset);
-    if (!nameA) return L"";
-    int sz = MultiByteToWideChar(CP_UTF8, 0, nameA, -1, NULL, 0);
-    if (sz <= 1) return L"";
-    std::wstring nameStr(sz - 1, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, nameA, -1, &nameStr[0], sz);
-    return nameStr;
+    return GetWideNameFromPoolOffsetCached(m_records[recordIdx].NamePoolOffset);
 }
 
 // Single shared_lock acquisition returning both record and wide name — use in paint hot paths.
@@ -657,13 +684,42 @@ std::pair<FileRecord, std::wstring> IndexingEngine::GetRecordAndName(uint32_t re
     std::shared_lock<std::shared_mutex> lock(m_dataMutex);
     if (recordIdx >= m_records.size()) return { {}, L"" };
     const FileRecord& rec = m_records[recordIdx];
-    const char* nameA = m_pool.GetString(rec.NamePoolOffset);
-    if (!nameA || !nameA[0]) return { rec, L"" };
+    return { rec, GetWideNameFromPoolOffsetCached(rec.NamePoolOffset) };
+}
+
+std::wstring IndexingEngine::GetWideNameFromPoolOffsetCached(uint32_t namePoolOffset) const {
+    {
+        std::lock_guard<std::mutex> cacheLock(m_nameCacheMutex);
+        auto it = m_nameCache.find(namePoolOffset);
+        if (it != m_nameCache.end()) {
+            m_nameCacheLru.splice(m_nameCacheLru.begin(), m_nameCacheLru, it->second.second);
+            return it->second.first;
+        }
+    }
+
+    const char* nameA = m_pool.GetString(namePoolOffset);
+    if (!nameA || !nameA[0]) return L"";
     int sz = MultiByteToWideChar(CP_UTF8, 0, nameA, -1, NULL, 0);
-    if (sz <= 1) return { rec, L"" };
-    std::wstring nameStr(sz - 1, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, nameA, -1, &nameStr[0], sz);
-    return { rec, std::move(nameStr) };
+    if (sz <= 1) return L"";
+    std::wstring converted(sz - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, nameA, -1, &converted[0], sz);
+
+    {
+        std::lock_guard<std::mutex> cacheLock(m_nameCacheMutex);
+        auto it = m_nameCache.find(namePoolOffset);
+        if (it != m_nameCache.end()) {
+            m_nameCacheLru.splice(m_nameCacheLru.begin(), m_nameCacheLru, it->second.second);
+            return it->second.first;
+        }
+        m_nameCacheLru.push_front(namePoolOffset);
+        m_nameCache[namePoolOffset] = { converted, m_nameCacheLru.begin() };
+        if (m_nameCache.size() > kWideNameCacheCapacity) {
+            uint32_t evict = m_nameCacheLru.back();
+            m_nameCacheLru.pop_back();
+            m_nameCache.erase(evict);
+        }
+    }
+    return converted;
 }
 
 std::wstring IndexingEngine::GetFullPath(uint32_t recordIdx) const {
@@ -785,6 +841,73 @@ void IndexingEngine::Sort(QuerySortKey key, bool descending) {
 
 namespace {
     class SortAbortedException : public std::exception {};
+
+    uint32_t ResolveParentRecordIndex(
+        const FileRecord& rec,
+        const std::vector<FileRecord>& records,
+        const std::vector<std::vector<uint32_t>>& mftLookupTables) {
+        const uint8_t di = rec.DriveIndex;
+        if (di >= (uint8_t)mftLookupTables.size()) return 0xFFFFFFFF;
+        if (rec.ParentMftIndex < 5 || rec.ParentMftIndex >= (uint32_t)mftLookupTables[di].size()) return 0xFFFFFFFF;
+        const uint32_t parentIdx = mftLookupTables[di][rec.ParentMftIndex];
+        if (parentIdx == 0xFFFFFFFF || parentIdx >= (uint32_t)records.size()) return 0xFFFFFFFF;
+        if (records[parentIdx].MftSequence != rec.ParentSequence) return 0xFFFFFFFF;
+        return parentIdx;
+    }
+
+    int ComparePathByHierarchy(
+        uint32_t aIdx,
+        uint32_t bIdx,
+        const std::vector<FileRecord>& records,
+        const std::vector<std::string>& driveLetters,
+        const std::vector<std::vector<uint32_t>>& mftLookupTables,
+        const StringPool& pool) {
+        if (aIdx >= records.size() || bIdx >= records.size()) return (aIdx < bIdx) ? -1 : 1;
+
+        const FileRecord& aRec = records[aIdx];
+        const FileRecord& bRec = records[bIdx];
+
+        if (aRec.DriveIndex != bRec.DriveIndex) {
+            const char* aDrive = (aRec.DriveIndex < driveLetters.size()) ? driveLetters[aRec.DriveIndex].c_str() : "";
+            const char* bDrive = (bRec.DriveIndex < driveLetters.size()) ? driveLetters[bRec.DriveIndex].c_str() : "";
+            int driveCmp = FastCompareIgnoreCase(aDrive, bDrive);
+            if (driveCmp != 0) return driveCmp;
+            return (aRec.DriveIndex < bRec.DriveIndex) ? -1 : 1;
+        }
+
+        constexpr size_t kMaxDepth = 1024;
+        uint32_t aChain[kMaxDepth];
+        uint32_t bChain[kMaxDepth];
+        size_t aCount = 0, bCount = 0;
+
+        uint32_t cur = aIdx;
+        while (aCount < kMaxDepth && cur != 0xFFFFFFFF) {
+            aChain[aCount++] = cur;
+            const uint32_t parent = ResolveParentRecordIndex(records[cur], records, mftLookupTables);
+            if (parent == cur) break;
+            cur = parent;
+        }
+        cur = bIdx;
+        while (bCount < kMaxDepth && cur != 0xFFFFFFFF) {
+            bChain[bCount++] = cur;
+            const uint32_t parent = ResolveParentRecordIndex(records[cur], records, mftLookupTables);
+            if (parent == cur) break;
+            cur = parent;
+        }
+
+        size_t ai = aCount;
+        size_t bi = bCount;
+        while (ai > 0 && bi > 0) {
+            const char* aName = pool.GetString(records[aChain[ai - 1]].NamePoolOffset);
+            const char* bName = pool.GetString(records[bChain[bi - 1]].NamePoolOffset);
+            int cmp = FastCompareIgnoreCase(aName ? aName : "", bName ? bName : "");
+            if (cmp != 0) return cmp;
+            --ai;
+            --bi;
+        }
+        if (ai == 0 && bi == 0) return 0;
+        return (ai == 0) ? -1 : 1;
+    }
 }
 
 void IndexingEngine::SearchThread() {
@@ -1028,10 +1151,56 @@ void IndexingEngine::SearchThread() {
                                     results->push_back(idx);
                             }
                         };
+                        auto parallelFastLoop = [&](uint32_t count, auto getIndex) {
+                            const unsigned int hw = std::thread::hardware_concurrency();
+                            const uint32_t workerCount = (std::min)((uint32_t)(hw ? hw : 4), (uint32_t)8);
+                            if (workerCount < 2 || count < 200000) {
+                                fastLoop(count, getIndex);
+                                return;
+                            }
+
+                            std::vector<std::vector<uint32_t>> chunks(workerCount);
+                            std::vector<std::thread> workers;
+                            workers.reserve(workerCount > 0 ? workerCount - 1 : 0);
+
+                            auto workerFn = [&](uint32_t begin, uint32_t end, uint32_t workerId) {
+                                auto& local = chunks[workerId];
+                                local.reserve((end - begin) / 8 + 64);
+                                for (uint32_t i = begin; i < end; ++i) {
+                                    if ((i & 0xFF) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) return;
+                                    const uint32_t idx = getIndex(i);
+                                    const auto& rec = m_records[idx];
+                                    if (rec.MftIndex == 0xFFFFFFFF) continue;
+                                    const char* name = m_pool.GetString(rec.NamePoolOffset);
+                                    if (FastContainsCIPtr(name, needlePtr, needleLen)) local.push_back(idx);
+                                }
+                            };
+
+                            const uint32_t base = count / workerCount;
+                            const uint32_t rem = count % workerCount;
+                            uint32_t begin = 0;
+                            for (uint32_t w = 0; w < workerCount; ++w) {
+                                const uint32_t len = base + (w < rem ? 1 : 0);
+                                const uint32_t end = begin + len;
+                                if (w == 0) workerFn(begin, end, w);
+                                else workers.emplace_back(workerFn, begin, end, w);
+                                begin = end;
+                            }
+                            for (auto& t : workers) t.join();
+                            if (m_isSearchRequested.load(std::memory_order_relaxed)) return;
+
+                            size_t total = 0;
+                            for (const auto& c : chunks) total += c.size();
+                            results->clear();
+                            results->reserve(total);
+                            for (auto& c : chunks) {
+                                results->insert(results->end(), c.begin(), c.end());
+                            }
+                        };
                         if (usePreSorted)
-                            fastLoop((uint32_t)m_preSortedByName.size(), [&](uint32_t i) { return m_preSortedByName[i]; });
+                            parallelFastLoop((uint32_t)m_preSortedByName.size(), [&](uint32_t i) { return m_preSortedByName[i]; });
                         else
-                            fastLoop((uint32_t)m_records.size(), [&](uint32_t i) { return i; });
+                            parallelFastLoop((uint32_t)m_records.size(), [&](uint32_t i) { return i; });
                     } else {
                         // MEDIUM FAST PATH: single-term path query (e.g. C:\Windows\*.exe).
                         // Detects queries that contain a slash but no operators, spaces, quotes,
@@ -1140,34 +1309,19 @@ void IndexingEngine::SearchThread() {
             if (usePreSorted) {
                 // Already sorted!
             } else if (sortKey == QuerySortKey::Path) {
-                struct PathSortItem { std::string path; uint32_t idx; };
-                std::vector<PathSortItem> sortItems;
-                sortItems.reserve(results->size());
-                for (uint32_t idx : *results) {
-                    if (m_isSearchRequested) break;
-                    sortItems.push_back({WideToUtf8(GetFullPathInternal(idx)), idx});
-                }
-                
-                if (!m_isSearchRequested) {
-                    try {
-                        int cmpCount = 0;
-                        std::sort(sortItems.begin(), sortItems.end(), [this, sortDescending, &cmpCount](const PathSortItem& a, const PathSortItem& b) {
-                            if ((++cmpCount & 0x3F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) throw SortAbortedException();
-                            int primary = FastCompareIgnoreCase(a.path.c_str(), b.path.c_str());
-                            if (primary == 0) {
-                                const auto& ra = m_records[a.idx];
-                                const auto& rb = m_records[b.idx];
-                                primary = FastCompareIgnoreCase(m_pool.GetString(ra.NamePoolOffset), m_pool.GetString(rb.NamePoolOffset));
-                                if (primary == 0) primary = (a.idx < b.idx ? -1 : 1);
-                            }
-                            return sortDescending ? (primary > 0) : (primary < 0);
-                        });
-                    } catch (const SortAbortedException&) {
-                        // Sort aborted
-                    }
-                    for (size_t i = 0; i < sortItems.size(); ++i) {
-                        (*results)[i] = sortItems[i].idx;
-                    }
+                std::vector<std::string> driveLetters;
+                driveLetters.reserve(m_drives.size());
+                for (const auto& d : m_drives) driveLetters.push_back(d.LetterUTF8);
+                try {
+                    int cmpCount = 0;
+                    std::sort(results->begin(), results->end(), [this, &driveLetters, sortDescending, &cmpCount](uint32_t a, uint32_t b) {
+                        if ((++cmpCount & 0x3F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) throw SortAbortedException();
+                        int primary = ComparePathByHierarchy(a, b, m_records, driveLetters, m_mftLookupTables, m_pool);
+                        if (primary == 0) primary = (a < b ? -1 : 1);
+                        return sortDescending ? (primary > 0) : (primary < 0);
+                    });
+                } catch (const SortAbortedException&) {
+                    // Sort aborted
                 }
             } else {
                 try {
@@ -1210,6 +1364,72 @@ void IndexingEngine::SearchThread() {
     }
 }
 
+void IndexingEngine::EnqueueUsnDelta(PendingUsnDelta&& delta) {
+    std::lock_guard<std::mutex> lock(m_usnDeltaMutex);
+    m_pendingUsnDeltas.emplace_back(std::move(delta));
+}
+
+void IndexingEngine::ApplyPendingUsnDeltas() {
+    std::vector<PendingUsnDelta> deltas;
+    {
+        std::lock_guard<std::mutex> lock(m_usnDeltaMutex);
+        if (m_pendingUsnDeltas.empty()) return;
+        deltas.swap(m_pendingUsnDeltas);
+    }
+
+    std::unique_lock<std::shared_mutex> lock(m_dataMutex);
+    for (const auto& d : deltas) {
+        const uint8_t di = d.DriveIndex;
+        if (di >= m_mftLookupTables.size()) continue;
+        if (d.Type == PendingUsnDelta::Kind::Delete) {
+            if (d.MftIndex < (uint32_t)m_mftLookupTables[di].size()) {
+                uint32_t idx = m_mftLookupTables[di][d.MftIndex];
+                if (idx != 0xFFFFFFFF && idx < m_records.size() && m_records[idx].MftSequence == d.MftSequence) {
+                    m_records[idx].MftIndex = 0xFFFFFFFF;
+                    m_mftLookupTables[di][d.MftIndex] = 0xFFFFFFFF;
+                    m_preSortedByName.clear();
+                }
+            }
+            continue;
+        }
+
+        uint32_t existing = 0xFFFFFFFF;
+        if (d.MftIndex < (uint32_t)m_mftLookupTables[di].size()) existing = m_mftLookupTables[di][d.MftIndex];
+
+        uint32_t nameOffset = 0;
+        if (existing != 0xFFFFFFFF && existing < m_records.size()) {
+            const char* existingNameUtf8 = m_pool.GetString(m_records[existing].NamePoolOffset);
+            std::string incomingNameUtf8 = WideToUtf8(d.Name);
+            if (existingNameUtf8 && incomingNameUtf8 == existingNameUtf8) nameOffset = m_records[existing].NamePoolOffset;
+        }
+        if (nameOffset == 0) {
+            try { nameOffset = m_pool.AddString(d.Name); }
+            catch (const std::bad_alloc&) { continue; }
+        }
+
+        FileRecord rec = { nameOffset, d.ParentMftIndex, d.MftIndex, d.FileSize, d.LastModified, d.FileAttributes, d.MftSequence, d.ParentSequence, di };
+        if (d.MftIndex >= (uint32_t)m_mftLookupTables[di].size()) {
+            try { m_mftLookupTables[di].resize(d.MftIndex + 10000, 0xFFFFFFFF); }
+            catch (const std::bad_alloc&) { continue; }
+        }
+        if (existing != 0xFFFFFFFF && existing < m_records.size()) {
+            if (m_records[existing].MftSequence <= d.MftSequence) {
+                if (m_records[existing].NamePoolOffset != rec.NamePoolOffset) m_preSortedByName.clear();
+                m_records[existing] = rec;
+            }
+        } else {
+            uint32_t idx = (uint32_t)m_records.size();
+            try {
+                m_records.push_back(rec);
+                m_preSortedByName.clear();
+            } catch (const std::bad_alloc&) {
+                continue;
+            }
+            m_mftLookupTables[di][d.MftIndex] = idx;
+        }
+    }
+}
+
 void IndexingEngine::HandleUsnJournalRecord(USN_RECORD_V2* r, uint8_t di) {
     uint32_t mftIdx = (uint32_t)(r->FileReferenceNumber & 0xFFFFFFFFFFFFLL);
     uint16_t seq = (uint16_t)(r->FileReferenceNumber >> 48);
@@ -1217,16 +1437,12 @@ void IndexingEngine::HandleUsnJournalRecord(USN_RECORD_V2* r, uint8_t di) {
     uint16_t pSeq = (uint16_t)(r->ParentFileReferenceNumber >> 48);
 
     if (r->Reason & USN_REASON_FILE_DELETE) {
-        std::unique_lock<std::shared_mutex> lock(m_dataMutex);
-        if (mftIdx < (uint32_t)m_mftLookupTables[di].size()) {
-            uint32_t idx = m_mftLookupTables[di][mftIdx];
-            if (idx != 0xFFFFFFFF && m_records[idx].MftSequence == seq) { 
-                m_records[idx].MftIndex = 0xFFFFFFFF; 
-                m_mftLookupTables[di][mftIdx] = 0xFFFFFFFF;
-                // #6: Clear the pre-sorted index so a deleted entry is never referenced.
-                m_preSortedByName.clear();
-            }
-        }
+        PendingUsnDelta d;
+        d.Type = PendingUsnDelta::Kind::Delete;
+        d.DriveIndex = di;
+        d.MftIndex = mftIdx;
+        d.MftSequence = seq;
+        EnqueueUsnDelta(std::move(d));
     }
     
     if (r->Reason & (USN_REASON_FILE_CREATE | USN_REASON_RENAME_NEW_NAME | USN_REASON_DATA_EXTEND | USN_REASON_DATA_TRUNCATION | USN_REASON_CLOSE)) {
@@ -1253,60 +1469,19 @@ void IndexingEngine::HandleUsnJournalRecord(USN_RECORD_V2* r, uint8_t di) {
             fileSize = ((uint64_t)att.nFileSizeHigh << 32) | att.nFileSizeLow;
             lastMod  = ((uint64_t)att.ftLastWriteTime.dwHighDateTime << 32) | att.ftLastWriteTime.dwLowDateTime;
         }
-        
-        std::unique_lock<std::shared_mutex> lock(m_dataMutex);
-        
-        uint32_t existing = 0xFFFFFFFF;
-        if (mftIdx < (uint32_t)m_mftLookupTables[di].size()) {
-            existing = m_mftLookupTables[di][mftIdx];
-        }
-        
-        uint32_t nameOffset = 0;
-        if (existing != 0xFFFFFFFF && existing < m_records.size()) {
-            const char* existingNameUtf8 = m_pool.GetString(m_records[existing].NamePoolOffset);
-            std::string incomingNameUtf8 = WideToUtf8(name);
-            if (incomingNameUtf8 == existingNameUtf8) {
-                nameOffset = m_records[existing].NamePoolOffset;
-            }
-        }
-        
-        if (nameOffset == 0) {
-            try {
-                nameOffset = m_pool.AddString(name);
-            } catch (const std::bad_alloc&) {
-                Logger::Log(L"[WhereIsIt] bad_alloc allocating string pool in HandleUsnJournalRecord. Discarding record.");
-                return;
-            }
-        }
-        
-        FileRecord rec = { nameOffset, pIdx, mftIdx, fileSize, lastMod, (uint16_t)r->FileAttributes, seq, pSeq, di };
-        
-        if (mftIdx >= (uint32_t)m_mftLookupTables[di].size()) {
-            try {
-                m_mftLookupTables[di].resize(mftIdx + 10000, 0xFFFFFFFF);
-            } catch (const std::bad_alloc&) {
-                Logger::Log(L"[WhereIsIt] bad_alloc resizing m_mftLookupTables in HandleUsnJournalRecord. Discarding record.");
-                return;
-            }
-        }
-        
-        if (existing != 0xFFFFFFFF && existing < m_records.size()) {
-            // Update existing record if sequence matches or is newer
-            if (m_records[existing].MftSequence <= seq) {
-                if (m_records[existing].NamePoolOffset != rec.NamePoolOffset) m_preSortedByName.clear();
-                m_records[existing] = rec;
-            }
-        } else {
-            uint32_t idx = (uint32_t)m_records.size();
-            try {
-                m_records.push_back(rec);
-                m_preSortedByName.clear();
-            } catch (const std::bad_alloc&) {
-                Logger::Log(L"[WhereIsIt] bad_alloc pushing to m_records in HandleUsnJournalRecord. Discarding record.");
-                return;
-            }
-            m_mftLookupTables[di][mftIdx] = idx;
-        }
+
+        PendingUsnDelta d;
+        d.Type = PendingUsnDelta::Kind::Upsert;
+        d.DriveIndex = di;
+        d.MftIndex = mftIdx;
+        d.MftSequence = seq;
+        d.ParentMftIndex = pIdx;
+        d.ParentSequence = pSeq;
+        d.Name = std::move(name);
+        d.FileSize = fileSize;
+        d.LastModified = lastMod;
+        d.FileAttributes = (uint16_t)r->FileAttributes;
+        EnqueueUsnDelta(std::move(d));
     }
 }
 
@@ -1355,6 +1530,7 @@ void IndexingEngine::MonitorChanges() {
         if (waitRes == WAIT_FAILED) break;
 
         if (hDebounceTimer && waitRes == debounceIdx) {
+            ApplyPendingUsnDeltas();
             // Debounce timer fired — changes have settled, now rebuild pre-sorted index
             // and trigger a re-search. Rebuilding here keeps the keyword fast path valid
             // after file-system changes and avoids linear scans on empty-query display.
@@ -1392,6 +1568,12 @@ void IndexingEngine::MonitorChanges() {
             }
         }
 
+        auto now = std::chrono::steady_clock::now();
+        if (now - m_lastUsnMerge >= std::chrono::milliseconds(100)) {
+            ApplyPendingUsnDeltas();
+            m_lastUsnMerge = now;
+        }
+
         // Re-arm change notification handles that fired.
         for (size_t hi = 1; hi < waitHandles.size(); ++hi) {
             if (waitHandles[hi] == hDebounceTimer) continue;
@@ -1409,6 +1591,7 @@ void IndexingEngine::MonitorChanges() {
                 SetWaitableTimer(hDebounceTimer, &due, 0, NULL, NULL, FALSE);
             } else {
                 // No timer available: trigger immediately (fallback).
+                ApplyPendingUsnDeltas();
                 pendingChanges = false;
                 std::lock_guard<std::mutex> lock(m_searchSyncMutex);
                 m_isSearchRequested = true;
@@ -1416,6 +1599,8 @@ void IndexingEngine::MonitorChanges() {
             }
         }
     }
+
+    ApplyPendingUsnDeltas();
 
     // Cleanup
     if (hDebounceTimer) { CloseHandle(hDebounceTimer); hDebounceTimer = nullptr; }
@@ -1526,6 +1711,11 @@ void IndexingEngine::PerformFullDriveScan() {
     {
         std::unique_lock<std::shared_mutex> lock(m_dataMutex);
         m_records.clear(); m_pool.Clear(); m_mftLookupTables.clear();
+        {
+            std::lock_guard<std::mutex> cacheLock(m_nameCacheMutex);
+            m_nameCache.clear();
+            m_nameCacheLru.clear();
+        }
         m_mftLookupTables.resize(m_drives.size());
 
         for (uint8_t i = 0; i < (uint8_t)m_drives.size(); ++i) {
