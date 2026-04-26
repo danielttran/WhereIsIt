@@ -1696,6 +1696,7 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
     // of files at once).
     constexpr size_t kEpochSize = 256;
     std::unique_lock<std::shared_mutex> lock(m_dataMutex);
+    if (m_hDataMutex) WaitForSingleObject(m_hDataMutex, INFINITE);
     for (size_t i = 0; i < deltas.size(); ++i) {
         const auto& d = deltas[i];
         const uint8_t di = d.DriveIndex;
@@ -1753,6 +1754,13 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
         rec.FileAttributes = d.FileAttributes;
         rec.Reserved = 0;
         rec.ParentRecordIndex = 0xFFFFFFFF;
+        if (d.ParentMftIndex < (uint32_t)m_mftLookupTables[di].size()) {
+            uint32_t pIdx = m_mftLookupTables[di][d.ParentMftIndex];
+            if (pIdx != 0xFFFFFFFF && pIdx < GetRecordCount() && 
+                m_recordsShared[pIdx].MftSequence == d.ParentSequence) {
+                rec.ParentRecordIndex = pIdx;
+            }
+        }
         if (d.MftIndex >= (uint32_t)m_mftLookupTables[di].size()) {
             try { m_mftLookupTables[di].resize(d.MftIndex + 10000, 0xFFFFFFFF); }
             catch (const std::bad_alloc&) { continue; }
@@ -1808,10 +1816,13 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
 
         // Yield the exclusive lock every kEpochSize operations so readers can proceed.
         if ((i & (kEpochSize - 1)) == (kEpochSize - 1) && i + 1 < deltas.size()) {
+            if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
             lock.unlock();
             lock.lock();
+            if (m_hDataMutex) WaitForSingleObject(m_hDataMutex, INFINITE);
         }
     }
+    if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
 }
 
 void IndexingEngine::HandleUsnJournalRecord(USN_RECORD_V2* r, uint8_t di) {
