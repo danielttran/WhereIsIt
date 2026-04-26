@@ -1,3 +1,4 @@
+#include <array>
 #pragma once
 #include "Engine.h"
 #include <atomic>
@@ -83,10 +84,20 @@ private:
     std::atomic<HWND>        m_hwndNotify{ nullptr };
 
     // Local engine used solely for record-accessor calls (GetRecord, GetFullPath…).
-    // NOTE (Phase 1 limitation): Start() also launches a full MFT scan, which
-    // duplicates work already done by the service. A future "load-only" mode
-    // in IndexingEngine would eliminate this redundancy.
-    IndexingEngine           m_local;
+    // (Phase 2): Now eliminated. The UI directly maps the background service's memory.
+    
+    HANDLE m_hRecordsMapping = NULL;
+    FileRecord* m_recordsShared = nullptr;
+    std::atomic<uint32_t>* m_recordsCount = nullptr;
+    HANDLE m_hDataMutex = NULL;
+    HANDLE m_hDrivesMapping = NULL;
+    wchar_t (*m_driveLettersShared)[4] = nullptr;
+
+    // String pool dynamic mapping
+    #include <array>
+    mutable std::array<std::atomic<char*>, 100> m_uiChunks;
+    mutable std::mutex m_chunkMutex;
+    const char* GetString(uint32_t offset) const;
 
     std::thread              m_searchThread;
     std::atomic<bool>        m_running{ false };

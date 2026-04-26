@@ -17,6 +17,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winioctl.h>
+#include <sddl.h>
+
+SECURITY_ATTRIBUTES* GetPermissiveSA();
 
 #define WM_USER_SEARCH_FINISHED  (WM_USER + 1)
 #define WM_USER_STATUS_CHANGED   (WM_USER + 2)  // engine posts when status text changes
@@ -54,7 +57,7 @@ struct FileRecord {
     uint32_t FileAttributes   : 16;
     uint32_t DirSizeComputed  : 1;   // set after directory sizes have been propagated
     uint32_t Reserved         : 8;
-    uint32_t Padding;
+    uint32_t ParentRecordIndex;
 };
 #pragma pack(pop)
 static_assert(sizeof(FileRecord) == 32, "FileRecord MUST be exactly 32 bytes for cache alignment");
@@ -83,6 +86,7 @@ public:
     static constexpr size_t kChunkSize = 16 * 1024 * 1024;  // 16 MB per chunk
 
     StringPool(size_t /*ignored*/ = 0);
+    ~StringPool();
     uint32_t AddString(const std::wstring& text);
     uint32_t AddString(const wchar_t* text, size_t length);
     const char* GetString(uint32_t offset) const;
@@ -98,11 +102,15 @@ public:
         for (size_t ci = 0; ci < m_chunks.size(); ++ci) {
             bool isLast  = (ci == m_chunks.size() - 1);
             size_t bytes = isLast ? m_chunkUsed : kChunkSize;
-            if (bytes > 0) fn(m_chunks[ci].get(), bytes);
+            if (bytes > 0) fn(m_chunks[ci].data, bytes);
         }
     }
 private:
-    std::vector<std::unique_ptr<char[]>> m_chunks;
+    struct Chunk {
+        HANDLE hMap = NULL;
+        char* data = nullptr;
+    };
+    std::vector<Chunk> m_chunks;
     size_t m_chunkUsed = 0;  // bytes used in the current (last) chunk
     size_t m_totalSize = 0;  // total bytes across all chunks
 
@@ -193,6 +201,8 @@ public:
     std::wstring GetFullPath(uint32_t recordIndex) const override;
     std::wstring GetParentPath(uint32_t recordIndex) const override;
 
+    uint32_t GetRecordCount() const { return m_recordsCount ? m_recordsCount->load(std::memory_order_acquire) : 0; }
+
     void             SetIndexScopeConfig(const IndexScopeConfig& config) override;
     IndexScopeConfig GetIndexScopeConfig() const override;
 
@@ -274,7 +284,13 @@ private:
     };
     std::vector<DriveContext> m_drives;
     
-    std::vector<FileRecord> m_records;
+    HANDLE m_hRecordsMapping = NULL;
+    FileRecord* m_recordsShared = nullptr;
+    std::atomic<uint32_t>* m_recordsCount = nullptr;
+
+    HANDLE m_hDrivesMapping = NULL;
+    wchar_t (*m_driveLettersShared)[4] = nullptr;
+
     std::vector<uint32_t> m_preSortedByName;
     std::vector<std::vector<uint32_t>> m_mftLookupTables;
     std::unordered_map<uint32_t, uint64_t> m_giantFileSizes;
@@ -283,6 +299,7 @@ private:
     mutable std::mutex m_scopeConfigMutex;
 
     mutable std::shared_mutex m_dataMutex;
+    HANDLE m_hDataMutex = NULL;
     std::mutex m_usnDeltaMutex;
     std::vector<PendingUsnDelta> m_pendingUsnDeltas;
     std::chrono::steady_clock::time_point m_lastUsnMerge = std::chrono::steady_clock::now();

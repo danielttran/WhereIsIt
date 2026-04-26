@@ -333,6 +333,10 @@ int RunAsService()
 // NamedPipeEngine — IIndexEngine proxy over WhereIsItIPC
 // ---------------------------------------------------------------------------
 
+static uint64_t UnixEpochSecondsToFileTime(uint32_t epochSeconds) {
+    return (uint64_t)epochSeconds * 10000000ULL + 116444736000000000ULL;
+}
+
 NamedPipeEngine::NamedPipeEngine()  = default;
 NamedPipeEngine::~NamedPipeEngine() { Stop(); }
 
@@ -340,7 +344,23 @@ void NamedPipeEngine::Start()
 {
     if (m_running.exchange(true)) return;
     m_rxBuf.resize(kMaxResultBytes);   // allocate once; reused every search
-    m_local.Start();
+
+    // Phase 2: Attach to Shared Memory instead of running local scan
+    m_hDataMutex = OpenMutexW(MUTEX_ALL_ACCESS, FALSE, L"Global\\WhereIsIt_DataMutex");
+    m_hRecordsMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\WhereIsIt_Records");
+    if (m_hRecordsMapping) {
+        uint8_t* base = (uint8_t*)MapViewOfFile(m_hRecordsMapping, FILE_MAP_READ, 0, 0, 0);
+        if (base) {
+            m_recordsCount = (std::atomic<uint32_t>*)base;
+            m_recordsShared = (FileRecord*)(base + sizeof(std::atomic<uint32_t>));
+        }
+    }
+
+
+    for (auto& c : m_uiChunks) {
+        c.store(nullptr, std::memory_order_relaxed);
+    }
+
     m_searchThread = std::thread(&NamedPipeEngine::SearchWorker, this);
 }
 
@@ -348,22 +368,23 @@ void NamedPipeEngine::Stop()
 {
     if (!m_running.exchange(false)) return;
 
-    {
-        std::lock_guard<std::mutex> lk(m_searchMutex);
-        m_searchPending = true;
-        m_sortPending   = true;
-    }
-    m_searchCv.notify_all();
+    CancelSynchronousIo(m_searchThread.native_handle());
 
-    if (m_searchThread.joinable()) {
-        // CancelSynchronousIo interrupts any blocking CallNamedPipeW in the
-        // worker so the join returns promptly instead of waiting up to
-        // kPipeCallTimeout (5 s).
-        CancelSynchronousIo(m_searchThread.native_handle());
+    if (m_searchThread.joinable())
         m_searchThread.join();
+
+    if (m_recordsCount) UnmapViewOfFile(m_recordsCount);
+    if (m_hRecordsMapping) CloseHandle(m_hRecordsMapping);
+    if (m_driveLettersShared) UnmapViewOfFile(m_driveLettersShared);
+    if (m_hDrivesMapping) CloseHandle(m_hDrivesMapping);
+    if (m_hDataMutex) CloseHandle(m_hDataMutex);
+
+    std::lock_guard<std::mutex> lock(m_chunkMutex);
+    for (auto& c : m_uiChunks) {
+        char* ptr = c.load(std::memory_order_relaxed);
+        if (ptr) UnmapViewOfFile(ptr);
     }
 
-    m_local.Stop();
 }
 
 void NamedPipeEngine::Search(const std::string& query)
@@ -401,37 +422,37 @@ void NamedPipeEngine::ApplySort(
             int cmp = 0;
             switch (key) {
             case QuerySortKey::Name: {
-                auto na = m_local.GetRecordName(a);
-                auto nb = m_local.GetRecordName(b);
+                auto na = this->GetRecordName(a);
+                auto nb = this->GetRecordName(b);
                 cmp = _wcsicmp(na.c_str(), nb.c_str());
                 break;
             }
             case QuerySortKey::Path: {
-                auto pa = m_local.GetParentPath(a);
-                auto pb = m_local.GetParentPath(b);
+                auto pa = this->GetParentPath(a);
+                auto pb = this->GetParentPath(b);
                 cmp = _wcsicmp(pa.c_str(), pb.c_str());
                 if (cmp == 0) {
-                    auto na = m_local.GetRecordName(a);
-                    auto nb = m_local.GetRecordName(b);
+                    auto na = this->GetRecordName(a);
+                    auto nb = this->GetRecordName(b);
                     cmp = _wcsicmp(na.c_str(), nb.c_str());
                 }
                 break;
             }
             case QuerySortKey::Size: {
-                uint64_t sa = m_local.GetRecordFileSize(a);
-                uint64_t sb = m_local.GetRecordFileSize(b);
+                uint64_t sa = this->GetRecordFileSize(a);
+                uint64_t sb = this->GetRecordFileSize(b);
                 if (sa != sb) { cmp = (sa < sb) ? -1 : 1; break; }
-                auto na = m_local.GetRecordName(a);
-                auto nb = m_local.GetRecordName(b);
+                auto na = this->GetRecordName(a);
+                auto nb = this->GetRecordName(b);
                 cmp = _wcsicmp(na.c_str(), nb.c_str());
                 break;
             }
             case QuerySortKey::Date: {
-                uint64_t da = m_local.GetRecordLastModifiedFileTime(a);
-                uint64_t db = m_local.GetRecordLastModifiedFileTime(b);
+                uint64_t da = this->GetRecordLastModifiedFileTime(a);
+                uint64_t db = this->GetRecordLastModifiedFileTime(b);
                 if (da != db) { cmp = (da < db) ? -1 : 1; break; }
-                auto na = m_local.GetRecordName(a);
-                auto nb = m_local.GetRecordName(b);
+                auto na = this->GetRecordName(a);
+                auto nb = this->GetRecordName(b);
                 cmp = _wcsicmp(na.c_str(), nb.c_str());
                 break;
             }
@@ -536,52 +557,129 @@ std::shared_ptr<std::vector<uint32_t>> NamedPipeEngine::GetSearchResults()
     return m_results;
 }
 
-FileRecord NamedPipeEngine::GetRecord(uint32_t idx) const
-{
-    return m_local.GetRecord(idx);
+const char* NamedPipeEngine::GetString(uint32_t offset) const {
+    size_t chunkIdx = offset / 16777216; // StringPool::kChunkSize (16MB)
+    size_t pos      = offset % 16777216;
+
+    if (chunkIdx >= m_uiChunks.size()) return "";
+
+    char* chunk = m_uiChunks[chunkIdx].load(std::memory_order_acquire);
+    if (chunk) {
+        return chunk + pos;
+    }
+
+    std::lock_guard<std::mutex> lock(m_chunkMutex);
+    chunk = m_uiChunks[chunkIdx].load(std::memory_order_relaxed);
+    if (!chunk) {
+        wchar_t mapName[64];
+        swprintf_s(mapName, L"Global\\WhereIsIt_PoolChunk_%zu", chunkIdx);
+        
+        HANDLE hMap = OpenFileMappingW(FILE_MAP_READ, FALSE, mapName);
+        if (hMap) {
+            chunk = static_cast<char*>(MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0));
+            CloseHandle(hMap);
+            if (chunk) {
+                m_uiChunks[chunkIdx].store(chunk, std::memory_order_release);
+            }
+        }
+    }
+    return chunk ? (chunk + pos) : ""; 
 }
 
-uint64_t NamedPipeEngine::GetRecordFileSize(uint32_t idx) const
-{
-    return m_local.GetRecordFileSize(idx);
+FileRecord NamedPipeEngine::GetRecord(uint32_t recordIdx) const {
+    if (!m_recordsShared || !m_recordsCount || recordIdx >= m_recordsCount->load(std::memory_order_acquire)) return {};
+    return m_recordsShared[recordIdx];
 }
 
-uint64_t NamedPipeEngine::GetRecordLastModifiedFileTime(uint32_t idx) const
-{
-    return m_local.GetRecordLastModifiedFileTime(idx);
+uint64_t NamedPipeEngine::GetRecordFileSize(uint32_t recordIdx) const {
+    if (!m_recordsShared || !m_recordsCount || recordIdx >= m_recordsCount->load(std::memory_order_acquire)) return 0;
+    return m_recordsShared[recordIdx].FileSize; 
 }
 
-std::wstring NamedPipeEngine::GetRecordName(uint32_t idx) const
-{
-    return m_local.GetRecordName(idx);
+uint64_t NamedPipeEngine::GetRecordLastModifiedFileTime(uint32_t recordIdx) const {
+    if (!m_recordsShared || !m_recordsCount || recordIdx >= m_recordsCount->load(std::memory_order_acquire)) return 0;
+    return UnixEpochSecondsToFileTime(m_recordsShared[recordIdx].LastModifiedEpoch);
 }
 
-std::pair<FileRecord, std::wstring> NamedPipeEngine::GetRecordAndName(uint32_t idx) const
-{
-    return m_local.GetRecordAndName(idx);
+std::wstring NamedPipeEngine::GetRecordName(uint32_t recordIdx) const {
+    if (!m_recordsShared || !m_recordsCount || recordIdx >= m_recordsCount->load(std::memory_order_acquire)) return L"";
+    const char* nameA = GetString(m_recordsShared[recordIdx].NamePoolOffset);
+    if (!nameA || !nameA[0]) return L"";
+    int sz = MultiByteToWideChar(CP_UTF8, 0, nameA, -1, NULL, 0);
+    if (sz <= 1) return L"";
+    std::wstring converted(sz - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, nameA, -1, &converted[0], sz);
+    return converted;
 }
 
-std::wstring NamedPipeEngine::GetCurrentStatus() const
-{
-    return m_local.GetCurrentStatus();
+std::pair<FileRecord, std::wstring> NamedPipeEngine::GetRecordAndName(uint32_t recordIdx) const {
+    if (!m_recordsShared || !m_recordsCount || recordIdx >= m_recordsCount->load(std::memory_order_acquire)) return { {}, L"" };
+    FileRecord rec = m_recordsShared[recordIdx];
+    return { rec, GetRecordName(recordIdx) };
 }
 
-std::wstring NamedPipeEngine::GetFullPath(uint32_t idx) const
-{
-    return m_local.GetFullPath(idx);
+std::wstring NamedPipeEngine::GetCurrentStatus() const {
+    if (!m_recordsCount) return L"Not connected";
+    return L"Connected - " + std::to_wstring(m_recordsCount->load(std::memory_order_acquire)) + L" items";
 }
 
-std::wstring NamedPipeEngine::GetParentPath(uint32_t idx) const
-{
-    return m_local.GetParentPath(idx);
+std::wstring NamedPipeEngine::GetFullPath(uint32_t recordIdx) const {
+    if (!m_recordsShared || !m_recordsCount || recordIdx >= m_recordsCount->load(std::memory_order_acquire)) return L"";
+    
+    thread_local const char* parts[4096];
+    int partsCount = 0;
+    thread_local uint32_t visited[4096];
+    int visitedCount = 0;
+    
+    uint32_t cur = recordIdx;
+    
+    while (partsCount < 4096 && visitedCount < 4096) {
+        bool cycle = false;
+        for (int i = 0; i < visitedCount; i++) {
+            if (visited[i] == cur) { cycle = true; break; }
+        }
+        if (cycle) break;
+        visited[visitedCount++] = cur;
+
+        const FileRecord& r = m_recordsShared[cur]; 
+        const char* name = GetString(r.NamePoolOffset);
+        if (name[0] != '.' || name[1] != '\0') {
+            parts[partsCount++] = name;
+        }
+        uint32_t pi = r.ParentRecordIndex;
+        if (pi == 0xFFFFFFFF || pi >= m_recordsCount->load(std::memory_order_acquire)) break;
+        if (pi == cur) break; cur = pi;
+    }
+    
+    std::string pa;
+    for (int i = partsCount - 1; i >= 0; --i) {
+        if (!pa.empty()) pa += "\\";
+        pa += parts[i];
+    }
+    int sz = MultiByteToWideChar(CP_UTF8, 0, pa.c_str(), -1, NULL, 0);
+    std::wstring drive = (m_driveLettersShared && m_recordsShared[recordIdx].DriveIndex < 64) ? m_driveLettersShared[m_recordsShared[recordIdx].DriveIndex] : L"X:\\";
+    if (sz > 0) { 
+        std::wstring pw(sz - 1, L'\0'); 
+        MultiByteToWideChar(CP_UTF8, 0, pa.c_str(), -1, &pw[0], sz); 
+        return drive + pw; 
+    }
+    return drive;
 }
 
-void NamedPipeEngine::SetIndexScopeConfig(const IndexScopeConfig& cfg)
-{
-    m_local.SetIndexScopeConfig(cfg);
+std::wstring NamedPipeEngine::GetParentPath(uint32_t recordIdx) const {
+    if (!m_recordsShared || !m_recordsCount || recordIdx >= m_recordsCount->load(std::memory_order_acquire)) return L"";
+    uint32_t pi = m_recordsShared[recordIdx].ParentRecordIndex;
+    if (pi == 0xFFFFFFFF || pi >= m_recordsCount->load(std::memory_order_acquire)) {
+        return (m_driveLettersShared && m_recordsShared[recordIdx].DriveIndex < 64) ? m_driveLettersShared[m_recordsShared[recordIdx].DriveIndex] : L"X:\\";
+    }
+    return GetFullPath(pi);
 }
 
-IIndexEngine::IndexScopeConfig NamedPipeEngine::GetIndexScopeConfig() const
-{
-    return m_local.GetIndexScopeConfig();
+void NamedPipeEngine::SetIndexScopeConfig(const IndexScopeConfig& /*cfg*/)
+ {
+    // Config handled by Service in Phase 2
+}
+
+IIndexEngine::IndexScopeConfig NamedPipeEngine::GetIndexScopeConfig() const {
+    return IIndexEngine::IndexScopeConfig();
 }
