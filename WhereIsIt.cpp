@@ -130,6 +130,17 @@ int g_CurrentViewMode = LV_VIEW_DETAILS;
 int g_CurrentIconSize = 16;
 HIMAGELIST g_hCustomImageList = NULL;
 
+// Maximum entries kept in the icon/thumbnail cache.
+// Beyond this the image list would consume too much GDI memory
+// (e.g. 500 × 256 × 256 × 4 bytes ≈ 128 MB for 256-px thumbnails).
+static constexpr int MAX_ICON_CACHE_ENTRIES = 500;
+
+// Monotonically-increasing generation counter.  Bumped whenever the result
+// set changes or the view mode switches.  Workers read it before and after
+// GetImage(); if it changed while they were decoding, the result is stale
+// and is discarded (DeleteObject only) rather than posted to the UI thread.
+static std::atomic<uint32_t> g_iconGeneration{ 0 };
+
 int g_folderIconIdx = -1;
 int g_fileIconIdx = -1;
 std::unordered_map<uint32_t, int> g_recordIconCache;
@@ -211,61 +222,6 @@ void FormatFileTime(wchar_t* buffer, size_t bufferLen, uint64_t filetime) {
         displayHour, localTime.wMinute, (localTime.wHour >= 12 ? L"PM" : L"AM"));
 }
 
-// Composites a premultiplied-ARGB HBITMAP (from IShellItemImageFactory) onto an
-// opaque white background and returns a new DDB suitable for ImageList_Add.
-// The caller is responsible for deleting the returned HBITMAP.
-static HBITMAP AlphaCompositeThumbnail(HBITMAP hSrc, int size) {
-    if (!hSrc) return nullptr;
-
-    // Query ACTUAL source dimensions — SIIGBF_BIGGERSIZEOK may return a bitmap
-    // larger than requested, so we must not assume size x size.
-    BITMAP srcInfo = {};
-    if (!GetObject(hSrc, sizeof(BITMAP), &srcInfo) || srcInfo.bmWidth <= 0 || srcInfo.bmHeight <= 0)
-        return nullptr;
-
-    // Destination must be a 32-bit DIB section; CreateCompatibleBitmap produces a
-    // DDB which causes AlphaBlend(AC_SRC_ALPHA) to composite incorrectly on some drivers.
-    BITMAPINFO bi = {};
-    bi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
-    bi.bmiHeader.biWidth       = size;
-    bi.bmiHeader.biHeight      = -size;   // top-down so row 0 is the top
-    bi.bmiHeader.biPlanes      = 1;
-    bi.bmiHeader.biBitCount    = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
-
-    void* pBits = nullptr;
-    HDC hdcScreen = GetDC(NULL);
-    HDC hdcSrc    = CreateCompatibleDC(hdcScreen);
-    HDC hdcDst    = CreateCompatibleDC(hdcScreen);
-    // NULL hdc is fine for 32-bit BI_RGB — hdc is only used for palette matching.
-    HBITMAP hDst  = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, &pBits, NULL, 0);
-    ReleaseDC(NULL, hdcScreen);
-
-    if (!hDst) { DeleteDC(hdcSrc); DeleteDC(hdcDst); return nullptr; }
-
-    HGDIOBJ hOldSrc = SelectObject(hdcSrc, hSrc);
-    HGDIOBJ hOldDst = SelectObject(hdcDst, hDst);
-
-    // Fill destination with white so transparent/semi-transparent areas look natural.
-    RECT rc = { 0, 0, size, size };
-    FillRect(hdcDst, &rc, (HBRUSH)GetStockObject(WHITE_BRUSH));
-
-    BLENDFUNCTION bf = {};
-    bf.BlendOp             = AC_SRC_OVER;
-    bf.BlendFlags          = 0;
-    bf.SourceConstantAlpha = 255;
-    bf.AlphaFormat         = AC_SRC_ALPHA;  // source has premultiplied alpha
-
-    // Scale from the FULL source rect (actual dims) into the destination rect (target size).
-    AlphaBlend(hdcDst, 0, 0, size, size,
-               hdcSrc, 0, 0, srcInfo.bmWidth, srcInfo.bmHeight, bf);
-
-    SelectObject(hdcSrc, hOldSrc);
-    SelectObject(hdcDst, hOldDst);
-    DeleteDC(hdcSrc);
-    DeleteDC(hdcDst);
-    return hDst;
-}
 
 // Globals kept alive only while a shell context menu's TrackPopupMenu loop is running.
 IContextMenu2* g_pCtxMenu2 = nullptr;
@@ -542,6 +498,9 @@ void SetViewMode(HWND hWnd, int viewId) {
         g_pendingIconRecords.clear();
         g_iconRequestQueue.clear();
     }
+    // Bump generation so any in-flight thumbnail decode is discarded when it
+    // completes (generation mismatch → DeleteObject only, no PostMessage).
+    ++g_iconGeneration;
 
     if (newMode == LV_VIEW_DETAILS) {
         if (g_hCustomImageList) {
@@ -552,7 +511,8 @@ void SetViewMode(HWND hWnd, int viewId) {
         ListView_SetView(hFileList, LV_VIEW_DETAILS);
     } else {
         if (g_hCustomImageList) ImageList_Destroy(g_hCustomImageList);
-        g_hCustomImageList = ImageList_Create(newSize, newSize, ILC_COLOR32 | ILC_MASK, 100, 1000);
+        g_hCustomImageList = ImageList_Create(newSize, newSize, ILC_COLOR32 | ILC_MASK,
+                                              MAX_ICON_CACHE_ENTRIES, 100);
         ListView_SetImageList(hFileList, g_hCustomImageList, LVSIL_NORMAL);
         ListView_SetView(hFileList, LV_VIEW_ICON);
         ListView_SetIconSpacing(hFileList, newSize + 16, newSize + 40);
@@ -582,7 +542,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         g_Engine->SetNotifyWindow(hWnd);
         g_iconWorkerRunning = true;
         auto workerFn = [hWnd]() {
-            CoInitializeEx(NULL, COINIT_MULTITHREADED);
+            CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);  // STA required for IShellItemImageFactory
+            // Cache a compatible HDC once per worker thread — avoids GetDC(NULL)/ReleaseDC overhead
+            // (which hits the GDI lock) on every single thumbnail compositing call.
+            HDC hdcScreen = GetDC(NULL);
+            HDC hdcSrc    = CreateCompatibleDC(hdcScreen);
+            HDC hdcDst    = CreateCompatibleDC(hdcScreen);
+            ReleaseDC(NULL, hdcScreen);
+
             while (true) {
                 uint32_t recordIdx = 0;
                 int currentMode = LV_VIEW_DETAILS;
@@ -596,8 +563,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     currentMode = g_CurrentViewMode;
                     currentSize = g_CurrentIconSize;
                 }
+
+                // Resolve the full path once — used both for SHGetFileInfoW (details)
+                // and SHCreateItemFromParsingName (thumbnails).  Doing it outside the lock
+                // means only one shared_lock acquisition per item instead of potentially two.
                 std::wstring path = g_Engine->GetFullPath(recordIdx);
+
                 if (currentMode == LV_VIEW_DETAILS) {
+                    // --- Details mode: shell icon index (fast, ~1 ms per item) ---
                     int iconIdx = g_fileIconIdx;
                     if (!path.empty()) {
                         SHFILEINFOW sfi = { 0 };
@@ -607,31 +580,90 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     { std::lock_guard<std::mutex> lock(g_iconMutex); g_pendingIconRecords.erase(recordIdx); }
                     PostMessage(hWnd, WM_USER_ICON_LOADED, (WPARAM)recordIdx, (LPARAM)iconIdx);
                 } else {
+                    // --- Thumbnail mode: two-pass IShellItemImageFactory strategy ---
+                    // Pass 1: SIIGBF_THUMBNAILONLY — returns in <2ms if Windows has already
+                    //   cached this thumbnail in thumbcache_*.db (e.g. Explorer visited the
+                    //   folder).  Fails (E_FAIL) for uncached files — no disk I/O wasted.
+                    // Pass 2: SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK — full decode path,
+                    //   only reached for files Explorer has never thumbnailed.
+                    //
+                    // Generation check: read g_iconGeneration before AND after GetImage.
+                    // If the generation changed while we were blocked decoding, the view
+                    // has switched or results changed — discard the bitmap (DeleteObject)
+                    // instead of posting it to the UI thread.
+                    const uint32_t genBefore = g_iconGeneration.load(std::memory_order_acquire);
                     HBITMAP hRaw = nullptr;
                     if (!path.empty()) {
-                        IShellItemImageFactory* pFac = nullptr;
-                        if (SUCCEEDED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&pFac)))) {
-                            SIZE sz = { currentSize, currentSize };
-                            // SIIGBF_BIGGERSIZEOK: return larger cached thumb and let us scale,
-                            // avoiding a slow decode just for an exact-size match.
-                            pFac->GetImage(sz, SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK, &hRaw);
-                            pFac->Release();
+                        IShellItem* pItem = nullptr;
+                        if (SUCCEEDED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&pItem)))) {
+                            IShellItemImageFactory* pFac = nullptr;
+                            if (SUCCEEDED(pItem->QueryInterface(IID_PPV_ARGS(&pFac)))) {
+                                SIZE sz = { currentSize, currentSize };
+                                // Pass 1: fast cache-hit query (returns immediately if cached).
+                                HRESULT hr = pFac->GetImage(sz, SIIGBF_THUMBNAILONLY | SIIGBF_BIGGERSIZEOK, &hRaw);
+                                if (FAILED(hr)) {
+                                    // Pass 2: full decode (may take 50-300ms for large files).
+                                    pFac->GetImage(sz, SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK, &hRaw);
+                                }
+                                pFac->Release();
+                            }
+                            pItem->Release();
                         }
                     }
-                    // Composite premultiplied ARGB → opaque DDB so ImageList_Add renders correctly.
-                    HBITMAP hComposited = AlphaCompositeThumbnail(hRaw, currentSize);
-                    if (hRaw) DeleteObject(hRaw);
+
+                    // Composite premultiplied ARGB bitmap onto opaque white DIB section.
+                    // Reuse the per-thread HDC pair — avoids two CreateCompatibleDC / DeleteDC
+                    // kernel calls per thumbnail (which previously serialized on the GDI lock).
+                    HBITMAP hComposited = nullptr;
+                    if (hRaw) {
+                        BITMAP srcInfo = {};
+                        if (GetObject(hRaw, sizeof(BITMAP), &srcInfo) && srcInfo.bmWidth > 0 && srcInfo.bmHeight > 0) {
+                            BITMAPINFO bi = {};
+                            bi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+                            bi.bmiHeader.biWidth       = currentSize;
+                            bi.bmiHeader.biHeight      = -currentSize;
+                            bi.bmiHeader.biPlanes      = 1;
+                            bi.bmiHeader.biBitCount    = 32;
+                            bi.bmiHeader.biCompression = BI_RGB;
+                            void* pBits = nullptr;
+                            hComposited = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, &pBits, NULL, 0);
+                            if (hComposited) {
+                                HGDIOBJ hOldSrc = SelectObject(hdcSrc, hRaw);
+                                HGDIOBJ hOldDst = SelectObject(hdcDst, hComposited);
+                                RECT rc = { 0, 0, currentSize, currentSize };
+                                FillRect(hdcDst, &rc, (HBRUSH)GetStockObject(WHITE_BRUSH));
+                                BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+                                AlphaBlend(hdcDst, 0, 0, currentSize, currentSize,
+                                           hdcSrc, 0, 0, srcInfo.bmWidth, srcInfo.bmHeight, bf);
+                                SelectObject(hdcSrc, hOldSrc);
+                                SelectObject(hdcDst, hOldDst);
+                            }
+                        }
+                        DeleteObject(hRaw);
+                    }
+
                     { std::lock_guard<std::mutex> lock(g_iconMutex); g_pendingIconRecords.erase(recordIdx); }
-                    if (hComposited)
-                        PostMessage(hWnd, WM_USER_THUMBNAIL_LOADED, (WPARAM)recordIdx, (LPARAM)hComposited);
+                    // Only post if the generation hasn't changed since we started decoding.
+                    // If it changed the view switched or results refreshed; discard the bitmap.
+                    if (hComposited) {
+                        if (g_iconGeneration.load(std::memory_order_acquire) == genBefore)
+                            PostMessage(hWnd, WM_USER_THUMBNAIL_LOADED, (WPARAM)recordIdx, (LPARAM)hComposited);
+                        else
+                            DeleteObject(hComposited);  // stale — avoid leaking GDI bitmap
+                    }
                 }
             }
+            DeleteDC(hdcSrc);
+            DeleteDC(hdcDst);
             CoUninitialize();
         };
         g_iconWorkers.clear();
-        // I/O-bound thumbnail decoding benefits from multiple threads; cap at 8 to avoid thrashing.
+        // Thumbnail decoding (IShellItemImageFactory::GetImage) holds the Windows Imaging
+        // Component lock internally, so beyond ~4 threads you get diminishing returns and
+        // increased context-switch overhead.  Details-mode icon resolution (SHGetFileInfoW)
+        // is fast enough that even 2 threads saturates it.
         unsigned int hwc = std::thread::hardware_concurrency();
-        unsigned int numWorkers = (hwc < 1u) ? 1u : (hwc > 8u) ? 8u : hwc;
+        unsigned int numWorkers = (hwc < 1u) ? 2u : (hwc > 4u) ? 4u : hwc;
         g_iconWorkers.reserve(numWorkers);
         for (unsigned int i = 0; i < numWorkers; ++i)
             g_iconWorkers.emplace_back(workerFn);
@@ -690,6 +722,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // Do NOT iterate over results here. Only swap the pointer and tell the list view the new count.
         g_ActiveResults = g_Engine->GetSearchResults();
         if (g_ActiveResults) {
+            // Bump generation so workers decoding thumbnails for the previous result set
+            // discard their bitmaps instead of posting stale WM_USER_THUMBNAIL_LOADED messages.
+            ++g_iconGeneration;
+            {
+                std::lock_guard<std::mutex> lock(g_iconMutex);
+                g_recordIconCache.clear();
+                g_pendingIconRecords.clear();
+                g_iconRequestQueue.clear();
+            }
+
             size_t count = g_ActiveResults->size();
             ListView_SetItemCountEx(hFileList, (int)count, LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
             if (count > 0) {
@@ -731,12 +773,19 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
         }
         if (bValidSize && g_ActiveResults && g_CurrentViewMode != LV_VIEW_DETAILS && g_hCustomImageList) {
-            int imgIdx = ImageList_Add(g_hCustomImageList, hBmp, NULL);
-            {
-                std::lock_guard<std::mutex> lock(g_iconMutex);
-                g_recordIconCache[recordIdx] = imgIdx;
+            // Cap the image list at MAX_ICON_CACHE_ENTRIES to bound GDI memory usage.
+            // 500 × 256px × 256px × 4B ≈ 128 MB at the largest view size.
+            int currentCount = ImageList_GetImageCount(g_hCustomImageList);
+            if (currentCount < MAX_ICON_CACHE_ENTRIES) {
+                int imgIdx = ImageList_Add(g_hCustomImageList, hBmp, NULL);
+                if (imgIdx >= 0) {
+                    std::lock_guard<std::mutex> lock(g_iconMutex);
+                    g_recordIconCache[recordIdx] = imgIdx;
+                }
+                InvalidateRect(hFileList, NULL, FALSE);
             }
-            InvalidateRect(hFileList, NULL, FALSE);
+            // If the cap is reached: bitmap is deleted below, item keeps showing default icon.
+            // This is intentional — memory safety over completeness.
         }
         if (hBmp) DeleteObject(hBmp);
         return 0;
