@@ -26,9 +26,18 @@ SECURITY_ATTRIBUTES* GetPermissiveSA() {
     // C++11 guarantees this static is initialized exactly once, thread-safely.
     static SECURITY_ATTRIBUTES sa = []() -> SECURITY_ATTRIBUTES {
         SECURITY_ATTRIBUTES attrs = { sizeof(SECURITY_ATTRIBUTES), nullptr, FALSE };
+
+        // Use DACL-only: "Allow Generic All to Everyone".
+        // We intentionally omit the SACL (S:(ML;;NW;;;LW)) because creating a
+        // SACL requires SeSecurityPrivilege, which the process may not hold when
+        // this static initializer runs (e.g. before ServiceMain is entered).
+        // Without a valid security descriptor the kernel falls back to
+        // SYSTEM-only access, which blocks non-admin clients from opening
+        // any of the Global\\ named objects (mutex, file mappings) and causes
+        // all record fields to appear blank.
         PSECURITY_DESCRIPTOR pSD = nullptr;
-        // D:(A;;GA;;;WD) = Allow Generic All to World (Everyone)
-        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;;GA;;;WD)", SDDL_REVISION_1, &pSD, nullptr))
+        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                L"D:(A;;GA;;;WD)", SDDL_REVISION_1, &pSD, nullptr))
             attrs.lpSecurityDescriptor = pSD;
         return attrs;
     }();

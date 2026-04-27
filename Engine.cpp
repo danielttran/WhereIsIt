@@ -105,23 +105,10 @@ uint32_t IndexingEngine::FetchVolumeSerialNumber(const std::wstring& drive) {
 }
 
 std::wstring IndexingEngine::ResolveIndexSavePath() {
-    // Store index in %LOCALAPPDATA%\WhereIsIt\ so the process works normally
-    // even when the exe lives in a UAC-protected location (e.g. Program Files).
-    wchar_t* pLocal = nullptr;
-    std::wstring dir;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &pLocal)) && pLocal) {
-        dir = pLocal;
-        CoTaskMemFree(pLocal);
-        dir += L"\\WhereIsIt";
-        CreateDirectoryW(dir.c_str(), nullptr);  // no-op if already exists
-    } else {
-        // Fallback: same directory as the executable.
-        wchar_t exePath[MAX_PATH];
-        GetModuleFileNameW(NULL, exePath, MAX_PATH);
-        std::wstring s(exePath);
-        dir = s.substr(0, s.find_last_of(L'\\'));
-    }
-    return dir + L"\\index.dat";
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(NULL, exePath, MAX_PATH);
+    std::wstring s(exePath);
+    return s.substr(0, s.find_last_of(L'\\')) + L"\\index.dat";
 }
 
 bool IndexingEngine::SaveIndex(const std::wstring& filePath) {

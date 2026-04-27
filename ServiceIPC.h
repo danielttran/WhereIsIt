@@ -111,6 +111,9 @@ private:
     bool                     m_sortPending   = false;  // sort-only re-sort needed
     QuerySortKey             m_sortKey       = QuerySortKey::Name;
     bool                     m_sortDescending = false;
+    
+    std::string              m_lastQuery;
+    uint32_t                 m_lastRecordsCount = 0;
 
     mutable std::mutex                     m_resultsMutex;
     std::shared_ptr<std::vector<uint32_t>> m_results;

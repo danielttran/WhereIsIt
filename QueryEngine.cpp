@@ -9,12 +9,59 @@
 // Extension whitelists for file-type quick-filters.
 // Defined here so BuildQueryPlan can populate QueryConfig.ExtWhitelist
 // without exposing them to the UI layer. TriggerSearch emits "extfilt:audio" etc.
-static const char* s_audioExts[]      = {"mp3","flac","aac","wav","ogg","m4a","wma","opus","aiff","alac",nullptr};
-static const char* s_compressedExts[] = {"zip","7z","rar","tar","gz","xz","bz2","zst","cab","iso",nullptr};
-static const char* s_documentExts[]   = {"doc","docx","xls","xlsx","ppt","pptx","pdf","txt","rtf","odt","ods","odp","md","csv",nullptr};
-static const char* s_executableExts[] = {"exe","dll","msi","bat","cmd","ps1","com","scr","vbs","wsf",nullptr};
-static const char* s_pictureExts[]    = {"jpg","jpeg","png","gif","bmp","tif","tiff","webp","heic","svg","ico","raw","cr2","nef","arw",nullptr};
-static const char* s_videoExts[]      = {"mp4","mkv","avi","mov","wmv","flv","webm","m4v","mpg","mpeg","ts",nullptr};
+static const char* s_audioExts[] = {
+    "mp3","flac","aac","wav","ogg","m4a","wma","opus","aiff","alac",
+    "ape","oga","wv","mid","midi", nullptr
+};
+
+static const char* s_codeExts[]       = {
+    "c","cpp","cc","cxx","h","hpp","hh","hxx","h","inl",
+    "py","pyw","pyc",
+    "java","class",
+    "js","jsx","ts","tsx","mjs","cjs",
+    "php","php3","php4","php5","phtml",
+    "rb","erb","rake",
+    "go",
+    "rs",
+    "swift",
+    "cs","vb","vbs",
+    "sh","bash","zsh","fish",
+    "css","scss","sass","less",
+    "html","htm","xhtml","shtml",
+    "xml","xsd","xsl","wsdl",
+    "json","yaml","yml",
+    "sql","ddl",
+    "lua","pl","pm","tcl",
+    "asm","s","inc",
+    "kt","kts","dart","scala",
+    "r","R",
+    nullptr
+};
+
+static const char* s_compressedExts[] = {
+    "zip","7z","rar","tar","gz","xz","bz2","zst","cab","iso",
+    "tgz","jar","dmg","deb","rpm", nullptr
+};
+
+static const char* s_documentExts[] = {
+    "doc","docx","xls","xlsx","ppt","pptx","pdf","txt","rtf","odt","ods","odp","md","csv",
+    "epub","html","htm","json", nullptr
+};
+
+static const char* s_executableExts[] = {
+    "exe","dll","msi","bat","cmd","ps1","com","scr","vbs","wsf",
+    "jar","sh","js","py", nullptr
+};
+
+static const char* s_pictureExts[] = {
+    "jpg","jpeg","png","gif","bmp","tif","tiff","webp","heic","svg","ico","raw","cr2","nef","arw",
+    "avif","heif","psd","dng", nullptr
+};
+
+static const char* s_videoExts[] = {
+    "mp4","mkv","avi","mov","wmv","flv","webm","m4v","mpg","mpeg","ts",
+    "m2ts","mts","ogv","3gp","vob", nullptr
+};
 
 const unsigned char g_ToLowerLookup[256] = {
     0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,

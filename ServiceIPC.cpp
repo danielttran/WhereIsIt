@@ -64,8 +64,53 @@ int ServiceInstall()
         nullptr, nullptr, nullptr, nullptr, nullptr);
 
     int result = 0;
-    if (!hSvc) result = static_cast<int>(GetLastError());
-    else       CloseServiceHandle(hSvc);
+    if (!hSvc) {
+        DWORD createErr = GetLastError();
+        if (createErr == ERROR_SERVICE_EXISTS) {
+            hSvc = OpenServiceW(hScm, WHEREISIT_SERVICE_NAME, SERVICE_ALL_ACCESS);
+            if (hSvc) {
+                // Update the binary path in case the exe moved.
+                ChangeServiceConfigW(hSvc, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START,
+                    SERVICE_ERROR_NORMAL, cmd.c_str(),
+                    nullptr, nullptr, nullptr, nullptr, nullptr,
+                    WHEREISIT_SERVICE_DISPLAY);
+
+                // If the service is still running or stopping, stop it first so that
+                // StartServiceW below won't fail with ERROR_SERVICE_ALREADY_RUNNING
+                // or ERROR_SERVICE_CANNOT_ACCEPT_CTRL.
+                SERVICE_STATUS ss{};
+                if (QueryServiceStatus(hSvc, &ss)) {
+                    if (ss.dwCurrentState == SERVICE_RUNNING ||
+                        ss.dwCurrentState == SERVICE_PAUSED) {
+                        // Request a stop.
+                        ControlService(hSvc, SERVICE_CONTROL_STOP, &ss);
+                    }
+                    // Wait up to 10 s for the service to reach STOPPED.
+                    const DWORD kMaxWaitMs  = 10000;
+                    const DWORD kPollMs     = 250;
+                    DWORD       waited      = 0;
+                    while (ss.dwCurrentState != SERVICE_STOPPED && waited < kMaxWaitMs) {
+                        Sleep(kPollMs);
+                        waited += kPollMs;
+                        if (!QueryServiceStatus(hSvc, &ss)) break;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!hSvc) {
+        result = static_cast<int>(GetLastError());
+    } else {
+        // Start the service (it is now guaranteed to be in STOPPED state, or freshly created).
+        if (!StartServiceW(hSvc, 0, nullptr)) {
+            DWORD startErr = GetLastError();
+            // ERROR_SERVICE_ALREADY_RUNNING is benign — the service is up.
+            if (startErr != ERROR_SERVICE_ALREADY_RUNNING)
+                result = static_cast<int>(startErr);
+        }
+        CloseServiceHandle(hSvc);
+    }
 
     CloseServiceHandle(hScm);
     return result;
@@ -121,7 +166,7 @@ void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
             PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
             PIPE_UNLIMITED_INSTANCES,
-            kMaxResultBytes, 4096, 0, nullptr);
+            kMaxResultBytes, 4096, 0, GetPermissiveSA());
 
         if (hPipe == INVALID_HANDLE_VALUE) break;
 
@@ -347,7 +392,7 @@ void NamedPipeEngine::Start()
     if (m_running.exchange(true)) return;
 
     // Phase 2: Attach to Shared Memory instead of running local scan
-    m_hDataMutex = OpenMutexW(MUTEX_ALL_ACCESS, FALSE, L"Global\\WhereIsIt_DataMutex");
+    m_hDataMutex = OpenMutexW(SYNCHRONIZE, FALSE, L"Global\\WhereIsIt_DataMutex");
     m_hRecordsCountMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\WhereIsIt_RecordsCount");
     m_hDrivesMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\WhereIsIt_Drives");
     if (m_hDrivesMapping) {
@@ -372,6 +417,13 @@ void NamedPipeEngine::Start()
 void NamedPipeEngine::Stop()
 {
     if (!m_running.exchange(false)) return;
+
+    {
+        std::lock_guard<std::mutex> lk(m_searchMutex);
+        m_searchPending = false;
+        m_sortPending = false;
+    }
+    m_searchCv.notify_all();
 
     CancelSynchronousIo(m_searchThread.native_handle());
 
@@ -497,7 +549,7 @@ void NamedPipeEngine::SearchWorker()
         bool         sortDescending = false;
         {
             std::unique_lock<std::mutex> lk(m_searchMutex);
-            m_searchCv.wait(lk, [this] {
+            bool signaled = m_searchCv.wait_for(lk, std::chrono::milliseconds(500), [this] {
                 return m_searchPending || m_sortPending || !m_running;
             });
             if (!m_running) break;
@@ -509,8 +561,16 @@ void NamedPipeEngine::SearchWorker()
 
             if (doSearch) {
                 query           = std::move(m_pendingQuery);
-                m_pendingQuery.clear();
+                m_lastQuery     = query;
                 m_searchPending = false;
+            } else if (!signaled) {
+                // Timeout. Check if the background service has indexed more files.
+                uint32_t currentRecords = m_recordsCount ? m_recordsCount->load(std::memory_order_relaxed) : 0;
+                if (currentRecords != m_lastRecordsCount) {
+                    m_lastRecordsCount = currentRecords;
+                    doSearch = true;
+                    query = m_lastQuery;
+                }
             }
             m_sortPending = false;
         }

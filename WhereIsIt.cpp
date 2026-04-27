@@ -34,12 +34,18 @@ constexpr int SEARCH_BAR_MARGIN = 5;
 HINSTANCE hInst;
 WCHAR szTitle[MAX_LOADSTRING], szWindowClass[MAX_LOADSTRING];
 HWND hSearchEdit, hFileList, hStatusBar;
-// g_EngineImpl is the concrete in-process engine.
-// g_Engine is the interface pointer — swapped to g_PipeEngineImpl when the
-// named pipe server is reachable; falls back to g_EngineImpl otherwise.
-static IndexingEngine  g_EngineImpl;
-static NamedPipeEngine* g_PipeEngineImpl = nullptr;
-IIndexEngine* g_Engine = &g_EngineImpl;
+// g_Engine is the active engine interface pointer.
+// It is set in WinMain before any other code uses it:
+//   - pipe reachable  → g_PipeEngineImpl  (NamedPipeEngine, no local scan)
+//   - pipe not found  → g_LocalEngineImpl (IndexingEngine,  full local scan)
+// IMPORTANT: do NOT make IndexingEngine a global-scope object. Its constructor
+// calls CreateFileMappingW / CreateMutexW for Global\ named objects and writes
+// zero into the shared record-count atomic. If the service is already running,
+// a global IndexingEngine would corrupt the service's live record count on
+// every non-admin process start, making all subsequent clients see 0 records.
+static IndexingEngine*  g_LocalEngineImpl  = nullptr;  // allocated in WinMain if needed
+static NamedPipeEngine* g_PipeEngineImpl   = nullptr;  // allocated in WinMain if needed
+IIndexEngine*           g_Engine           = nullptr;  // assigned in WinMain before use
 std::shared_ptr<std::vector<uint32_t>> g_ActiveResults;
 
 int g_SortColumn = 0;
@@ -1016,20 +1022,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 // --- Persistent Settings (ini file in %LOCALAPPDATA%\WhereIsIt\) ---
 
 static std::wstring GetSettingsPath() {
-    wchar_t* pLocal = nullptr;
-    std::wstring dir;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &pLocal)) && pLocal) {
-        dir = pLocal;
-        CoTaskMemFree(pLocal);
-        dir += L"\\WhereIsIt";
-        CreateDirectoryW(dir.c_str(), nullptr);
-    } else {
-        wchar_t exePath[MAX_PATH];
-        GetModuleFileNameW(NULL, exePath, MAX_PATH);
-        std::wstring s(exePath);
-        dir = s.substr(0, s.find_last_of(L'\\'));
-    }
-    return dir + L"\\settings.ini";
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(NULL, exePath, MAX_PATH);
+    std::wstring s(exePath);
+    return s.substr(0, s.find_last_of(L'\\')) + L"\\settings.ini";
 }
 
 static void LoadSettings() {
@@ -1102,10 +1098,74 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     }
 
     // UI mode: try to connect to the named pipe server.
-    // If reachable, proxy all search calls through it; otherwise run in-process.
-    if (IsNamedPipeServerAvailable()) {
+    bool usePipe = IsNamedPipeServerAvailable();
+    
+    if (!usePipe) {
+        if (!IsUserAnAdmin()) {
+            int buttonClicked = 0;
+            const TASKDIALOG_BUTTON buttons[] = {
+                { 100, L"Install Windows Service (Recommended)\nRuns quietly in the background without UAC prompts." },
+                { 101, L"Run as Administrator\nRequires a UAC prompt every time." }
+            };
+
+            TASKDIALOGCONFIG tdc = { sizeof(TASKDIALOGCONFIG) };
+            tdc.dwFlags = TDF_USE_COMMAND_LINKS | TDF_ALLOW_DIALOG_CANCELLATION;
+            tdc.pszWindowTitle = L"WhereIsIt";
+            tdc.pszMainInstruction = L"Administrator privileges required";
+            tdc.pszContent = L"WhereIsIt needs administrator privileges to read NTFS volumes for instant search.";
+            tdc.pButtons = buttons;
+            tdc.cButtons = _countof(buttons);
+            tdc.pszMainIcon = TD_WARNING_ICON;
+
+            HRESULT hr = TaskDialogIndirect(&tdc, &buttonClicked, NULL, NULL);
+            if (FAILED(hr) || (buttonClicked != 100 && buttonClicked != 101)) {
+                return 0; // Exit if canceled or failed
+            }
+
+            wchar_t exePath[MAX_PATH];
+            GetModuleFileNameW(NULL, exePath, MAX_PATH);
+
+            if (buttonClicked == 100) {
+                // Install Service
+                SHELLEXECUTEINFOW sei = { sizeof(SHELLEXECUTEINFOW) };
+                sei.lpVerb = L"runas";
+                sei.lpFile = exePath;
+                sei.lpParameters = L"-install";
+                sei.nShow = SW_SHOWNORMAL;
+                sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+                
+                if (ShellExecuteExW(&sei)) {
+                    WaitForSingleObject(sei.hProcess, INFINITE);
+                    CloseHandle(sei.hProcess);
+                    // Give the service a brief moment to start its named pipe server
+                    Sleep(1000);
+                    usePipe = IsNamedPipeServerAvailable();
+                } else {
+                    return 0; // Elevation canceled
+                }
+            } else if (buttonClicked == 101) {
+                // Run as Administrator
+                SHELLEXECUTEINFOW sei = { sizeof(SHELLEXECUTEINFOW) };
+                sei.lpVerb = L"runas";
+                sei.lpFile = exePath;
+                sei.lpParameters = lpCmdLine;
+                sei.nShow = SW_SHOWNORMAL;
+                ShellExecuteExW(&sei);
+                return 0; // Exit this non-admin instance so the elevated one takes over
+            }
+        }
+    }
+
+    if (usePipe) {
         g_PipeEngineImpl = new NamedPipeEngine();
         g_Engine = g_PipeEngineImpl;
+    } else {
+        // Only allocate the local (in-process) engine when we actually need it.
+        // This is the critical deferral: if we constructed IndexingEngine as a
+        // global, its constructor would run before WinMain and corrupt the
+        // service's Global\\WhereIsIt_RecordsCount by writing 0 into it.
+        g_LocalEngineImpl = new IndexingEngine();
+        g_Engine = g_LocalEngineImpl;
     }
 
     if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE))) return FALSE;
@@ -1135,8 +1195,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         }
     }
     g_Engine->Stop();
-    delete g_PipeEngineImpl;
-    g_PipeEngineImpl = nullptr;
+    delete g_PipeEngineImpl;  g_PipeEngineImpl  = nullptr;
+    delete g_LocalEngineImpl; g_LocalEngineImpl = nullptr;
     CoUninitialize();
     return (int)msg.wParam;
 }
