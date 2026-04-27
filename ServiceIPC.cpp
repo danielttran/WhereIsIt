@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <vector>
 #include <string>
+#include <thread>
 #include <shlobj.h>
 #include "StringUtils.h"
 
@@ -89,6 +90,21 @@ int ServiceInstall()
     if (!IsSecureServiceInstallPath(exeFullPath)) {
         Logger::Log(L"[WhereIsIt] Refusing service install from non-admin-controlled directory.");
         return ERROR_ACCESS_DENIED;
+    }
+
+    // LPE prevention: only allow installation from %ProgramFiles% or %ProgramFiles(x86)%.
+    // A binary planted in a user-writable location (Downloads, AppData, Desktop …)
+    // must not be granted LocalSystem privileges via a service.
+    {
+        auto inPF = [&](REFKNOWNFOLDERID fid) -> bool {
+            PWSTR pFolder = nullptr;
+            if (FAILED(SHGetKnownFolderPath(fid, 0, nullptr, &pFolder))) return false;
+            bool match = _wcsnicmp(exePath, pFolder, wcslen(pFolder)) == 0;
+            CoTaskMemFree(pFolder);
+            return match;
+        };
+        if (!inPF(FOLDERID_ProgramFiles) && !inPF(FOLDERID_ProgramFilesX86))
+            return static_cast<int>(ERROR_ACCESS_DENIED);
     }
 
     std::wstring cmd = L"\"";
@@ -244,9 +260,17 @@ static bool WriteClientMessage(HANDLE hPipe, const void* buffer, DWORD bytesToWr
     return ok == TRUE && bytesWritten == bytesToWrite;
 }
 
+// Global Results mapping kept alive between transactions so the client can open
+// it after receiving the count response without a race against CloseHandle.
+// Protected by s_resultsMapMutex; only the most-recent transaction's map is held.
+static std::mutex s_resultsMapMutex;
+static HANDLE     s_hResultsMap = NULL;
+
+// Handles one connected client: read query → search → write results → close.
+// Runs in a detached thread so a slow client cannot block the accept loop.
 static void HandleClientTransaction(HANDLE hPipe, IndexingEngine* engine)
 {
-    char readBuf[4096];
+    char  readBuf[4096];
     DWORD bytesRead = 0;
     if (!ReadClientMessage(hPipe, readBuf, sizeof(readBuf), bytesRead) ||
         bytesRead < sizeof(uint32_t)) {
@@ -271,16 +295,34 @@ static void HandleClientTransaction(HANDLE hPipe, IndexingEngine* engine)
     uint32_t count = static_cast<uint32_t>(
         (std::min)(results->size(), static_cast<size_t>(kMaxResultCount)));
 
-    std::vector<uint8_t> response(sizeof(uint32_t) + static_cast<size_t>(count) * sizeof(uint32_t));
-    memcpy(response.data(), &count, sizeof(uint32_t));
+    // Publish results into Global\WhereIsIt_Results shared memory.
+    HANDLE hNewMap = NULL;
     if (count > 0) {
-        memcpy(response.data() + sizeof(uint32_t), results->data(), count * sizeof(uint32_t));
+        hNewMap = CreateFileMappingW(INVALID_HANDLE_VALUE, GetSharedMemoryReadOnlySA(),
+            PAGE_READWRITE, 0, count * sizeof(uint32_t), L"Global\\WhereIsIt_Results");
+        if (hNewMap) {
+            void* pView = MapViewOfFile(hNewMap, FILE_MAP_WRITE, 0, 0, count * sizeof(uint32_t));
+            if (pView) {
+                memcpy(pView, results->data(), count * sizeof(uint32_t));
+                UnmapViewOfFile(pView);
+            }
+        }
     }
 
-    WriteClientMessage(hPipe, response.data(), static_cast<DWORD>(response.size()));
+    WriteClientMessage(hPipe, &count, sizeof(count));
     FlushFileBuffers(hPipe);
     DisconnectNamedPipe(hPipe);
     CloseHandle(hPipe);
+
+    // Keep the new map alive until the next transaction replaces it,
+    // so the client can OpenFileMappingW after receiving the count without racing.
+    {
+        std::lock_guard<std::mutex> lk(s_resultsMapMutex);
+        HANDLE old    = s_hResultsMap;
+        s_hResultsMap = hNewMap;
+        hNewMap       = old;
+    }
+    if (hNewMap) CloseHandle(hNewMap);
 }
 
 void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
@@ -308,17 +350,18 @@ void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
             DWORD connectErr = GetLastError();
 
             if (connectErr == ERROR_PIPE_CONNECTED) {
-                // Client connected before ConnectNamedPipe was called.
                 clientConnected = true;
             } else if (connectErr == ERROR_IO_PENDING) {
                 HANDLE waitSet[2] = { hStopEvent, ov.hEvent };
                 DWORD  w = WaitForMultipleObjects(2, waitSet, FALSE, INFINITE);
 
                 if (w == WAIT_OBJECT_0) {
-                    // Stop requested.
                     CancelIo(hPipe);
                     CloseHandle(ov.hEvent);
                     CloseHandle(hPipe);
+                    // Drain the global Results map on clean shutdown.
+                    std::lock_guard<std::mutex> lk(s_resultsMapMutex);
+                    if (s_hResultsMap) { CloseHandle(s_hResultsMap); s_hResultsMap = NULL; }
                     return;
                 }
                 if (w == WAIT_OBJECT_0 + 1) {
@@ -326,7 +369,6 @@ void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
                     clientConnected =
                         GetOverlappedResult(hPipe, &ov, &dummy, FALSE) != FALSE;
                 }
-                // If w == WAIT_FAILED: clientConnected stays false → pipe closed below.
             }
             CloseHandle(ov.hEvent);
         }
@@ -338,6 +380,10 @@ void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
 
         std::thread(HandleClientTransaction, hPipe, engine).detach();
     }
+
+    // Drain the global Results map on loop exit.
+    std::lock_guard<std::mutex> lk(s_resultsMapMutex);
+    if (s_hResultsMap) { CloseHandle(s_hResultsMap); s_hResultsMap = NULL; }
 }
 
 // ---------------------------------------------------------------------------

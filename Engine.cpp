@@ -30,7 +30,8 @@
 
 IndexingEngine::IndexingEngine() : m_running(false), m_ready(false), m_pool(true), m_isSearchRequested(false), m_isSortOnlyRequested(false) {
     m_hDataMutex = CreateMutexW(GetSharedMemoryReadOnlySA(), FALSE, L"Global\\WhereIsIt_DataMutex");
-    
+
+
     m_hRecordsCountMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, GetSharedMemoryReadOnlySA(), PAGE_READWRITE, 0,
         sizeof(std::atomic<uint32_t>), L"Global\\WhereIsIt_RecordsCount");
 
