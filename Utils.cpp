@@ -38,17 +38,9 @@ static SECURITY_ATTRIBUTES* BuildSa(const wchar_t* sddl)
         }
     };
 
-    // Keep lifetime for process duration; objects may be created throughout runtime.
-    static SaHolder pipeSa(
-        // LocalSystem + Builtin Administrators full control.
-        // Authenticated Users can connect/read/write to named-pipe transactions.
-        L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)");
-    static SaHolder sharedReadSa(
-        // LocalSystem + Builtin Administrators full control.
-        // Authenticated Users read/synchronize only for shared data and mutex.
-        L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;AU)");
-    static SaHolder serviceOnlySa(
-        L"D:(A;;GA;;;SY)(A;;GA;;;BA)");
+    static SaHolder pipeSa(L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)");
+    static SaHolder sharedReadSa(L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;AU)");
+    static SaHolder serviceOnlySa(L"D:(A;;GA;;;SY)(A;;GA;;;BA)");
 
     if (sddl == nullptr) return &sharedReadSa.attrs;
     if (wcscmp(sddl, L"pipe") == 0) return &pipeSa.attrs;
@@ -61,7 +53,7 @@ SECURITY_ATTRIBUTES* GetPipeServerSA() {
 }
 
 SECURITY_ATTRIBUTES* GetSharedMemoryReadOnlySA() {
-    return BuildSa(L"shared");
+    return BuildSa(nullptr);
 }
 
 SECURITY_ATTRIBUTES* GetServiceOnlySA() {
