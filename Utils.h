@@ -2,7 +2,9 @@
 #include <windows.h>
 #include <string>
 
-SECURITY_ATTRIBUTES* GetPermissiveSA();
+SECURITY_ATTRIBUTES* GetPipeServerSA();
+SECURITY_ATTRIBUTES* GetSharedMemoryReadOnlySA();
+SECURITY_ATTRIBUTES* GetServiceOnlySA();
 bool SetPrivilege(HANDLE hToken, LPCTSTR lpszPrivilege, bool bEnablePrivilege);
 
 bool RegisterContextMenu();

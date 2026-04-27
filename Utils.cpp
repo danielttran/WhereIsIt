@@ -22,26 +22,50 @@ void Logger::Log(const std::wstring& message) {
     OutputDebugStringW(out.c_str());
 }
 
-SECURITY_ATTRIBUTES* GetPermissiveSA() {
-    // C++11 guarantees this static is initialized exactly once, thread-safely.
-    static SECURITY_ATTRIBUTES sa = []() -> SECURITY_ATTRIBUTES {
-        SECURITY_ATTRIBUTES attrs = { sizeof(SECURITY_ATTRIBUTES), nullptr, FALSE };
+static SECURITY_ATTRIBUTES* BuildSa(const wchar_t* sddl)
+{
+    struct SaHolder {
+        SECURITY_ATTRIBUTES attrs{ sizeof(SECURITY_ATTRIBUTES), nullptr, FALSE };
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        explicit SaHolder(const wchar_t* inSddl) {
+            if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    inSddl, SDDL_REVISION_1, &sd, nullptr)) {
+                attrs.lpSecurityDescriptor = sd;
+            }
+        }
+        ~SaHolder() {
+            if (sd) LocalFree(sd);
+        }
+    };
 
-        // Use DACL-only: "Allow Generic All to Everyone".
-        // We intentionally omit the SACL (S:(ML;;NW;;;LW)) because creating a
-        // SACL requires SeSecurityPrivilege, which the process may not hold when
-        // this static initializer runs (e.g. before ServiceMain is entered).
-        // Without a valid security descriptor the kernel falls back to
-        // SYSTEM-only access, which blocks non-admin clients from opening
-        // any of the Global\\ named objects (mutex, file mappings) and causes
-        // all record fields to appear blank.
-        PSECURITY_DESCRIPTOR pSD = nullptr;
-        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                L"D:(A;;GA;;;WD)", SDDL_REVISION_1, &pSD, nullptr))
-            attrs.lpSecurityDescriptor = pSD;
-        return attrs;
-    }();
-    return &sa;
+    // Keep lifetime for process duration; objects may be created throughout runtime.
+    static SaHolder pipeSa(
+        // LocalSystem + Builtin Administrators full control.
+        // Authenticated Users can connect/read/write to named-pipe transactions.
+        L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)");
+    static SaHolder sharedReadSa(
+        // LocalSystem + Builtin Administrators full control.
+        // Authenticated Users read/synchronize only for shared data and mutex.
+        L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;AU)");
+    static SaHolder serviceOnlySa(
+        L"D:(A;;GA;;;SY)(A;;GA;;;BA)");
+
+    if (sddl == nullptr) return &sharedReadSa.attrs;
+    if (wcscmp(sddl, L"pipe") == 0) return &pipeSa.attrs;
+    if (wcscmp(sddl, L"service") == 0) return &serviceOnlySa.attrs;
+    return &sharedReadSa.attrs;
+}
+
+SECURITY_ATTRIBUTES* GetPipeServerSA() {
+    return BuildSa(L"pipe");
+}
+
+SECURITY_ATTRIBUTES* GetSharedMemoryReadOnlySA() {
+    return BuildSa(L"shared");
+}
+
+SECURITY_ATTRIBUTES* GetServiceOnlySA() {
+    return BuildSa(L"service");
 }
 
 bool RegisterContextMenu() {

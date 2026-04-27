@@ -29,9 +29,9 @@
 // --- IndexingEngine Implementation ---
 
 IndexingEngine::IndexingEngine() : m_running(false), m_ready(false), m_pool(true), m_isSearchRequested(false), m_isSortOnlyRequested(false) {
-    m_hDataMutex = CreateMutexW(GetPermissiveSA(), FALSE, L"Global\\WhereIsIt_DataMutex");
+    m_hDataMutex = CreateMutexW(GetSharedMemoryReadOnlySA(), FALSE, L"Global\\WhereIsIt_DataMutex");
     
-    m_hRecordsCountMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, GetPermissiveSA(), PAGE_READWRITE, 0,
+    m_hRecordsCountMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, GetSharedMemoryReadOnlySA(), PAGE_READWRITE, 0,
         sizeof(std::atomic<uint32_t>), L"Global\\WhereIsIt_RecordsCount");
 
     if (m_hRecordsCountMapping) {
@@ -42,7 +42,7 @@ IndexingEngine::IndexingEngine() : m_running(false), m_ready(false), m_pool(true
         }
     }
     
-    m_hDrivesMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, GetPermissiveSA(), PAGE_READWRITE, 
+    m_hDrivesMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, GetSharedMemoryReadOnlySA(), PAGE_READWRITE,
         0, 64 * 4 * sizeof(wchar_t), L"Global\\WhereIsIt_Drives");
     if (m_hDrivesMapping) {
         m_driveLettersShared = (wchar_t(*)[4])MapViewOfFile(m_hDrivesMapping, FILE_MAP_WRITE, 0, 0, 64 * 4 * sizeof(wchar_t));
@@ -299,16 +299,16 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
     std::vector<uint32_t> maxMft(h.DriveCount, 0);
     for (const auto& rec : tempRecords) {
         if (rec.DriveIndex >= h.DriveCount || rec.NamePoolOffset >= h.PoolSize) { clearState(); return false; }
-        if (rec.MftIndex != 0xFFFFFFFF && rec.MftIndex > maxMft[rec.DriveIndex])
+        if (rec.MftIndex != kInvalidIndex && rec.MftIndex > maxMft[rec.DriveIndex])
             maxMft[rec.DriveIndex] = rec.MftIndex;
     }
     for (uint32_t i = 0; i < h.DriveCount; ++i) {
-        try { tempLookup[i].assign((size_t)maxMft[i] + 1, 0xFFFFFFFF); }
+        try { tempLookup[i].assign((size_t)maxMft[i] + 1, kInvalidIndex); }
         catch (...) { Logger::Log(L"[WhereIsIt] MFT lookup allocation failed."); clearState(); return false; }
     }
     for (uint32_t i = 0; i < (uint32_t)tempRecords.size(); ++i) {
         const auto& rec = tempRecords[i];
-        if (rec.MftIndex != 0xFFFFFFFF)
+        if (rec.MftIndex != kInvalidIndex)
             tempLookup[rec.DriveIndex][rec.MftIndex] = i;
     }
 
@@ -518,7 +518,7 @@ std::wstring IndexingEngine::GetFullPathInternal(uint32_t recordIdx) const {
         }
         if (r.ParentMftIndex < 5 || r.ParentMftIndex >= (uint32_t)m_mftLookupTables[di].size()) break;
         uint32_t pi = m_mftLookupTables[di][r.ParentMftIndex];
-        if (pi == 0xFFFFFFFF || pi >= (uint32_t)GetRecordCount() || m_recordPool.GetRecord(pi).MftSequence != r.ParentSequence) break;
+        if (pi == kInvalidIndex || pi >= (uint32_t)GetRecordCount() || m_recordPool.GetRecord(pi).MftSequence != r.ParentSequence) break;
         if (pi == cur) break; cur = pi;
     }
     // Reset only the slots we used (not the full kBitCap array).
@@ -544,7 +544,7 @@ std::wstring IndexingEngine::GetParentPathInternal(uint32_t recordIdx) const {
     if (di >= (uint8_t)m_drives.size() || di >= (uint8_t)m_mftLookupTables.size()) return L"";
     if (child.ParentMftIndex < 5 || child.ParentMftIndex >= (uint32_t)m_mftLookupTables[di].size()) return m_drives[di].Letter;
     uint32_t pi = m_mftLookupTables[di][child.ParentMftIndex];
-    if (pi == 0xFFFFFFFF || pi >= (uint32_t)GetRecordCount() || m_recordPool.GetRecord(pi).MftSequence != child.ParentSequence) return m_drives[di].Letter;
+    if (pi == kInvalidIndex || pi >= (uint32_t)GetRecordCount() || m_recordPool.GetRecord(pi).MftSequence != child.ParentSequence) return m_drives[di].Letter;
     return GetFullPathInternal(pi);
 }
 
@@ -560,7 +560,7 @@ void IndexingEngine::UpdatePreSortedIndex() {
         std::shared_lock<std::shared_mutex> dataLock(m_dataMutex);
         entries.reserve(GetRecordCount());
         for (uint32_t i = 0; i < (uint32_t)GetRecordCount(); ++i) {
-            if (m_recordPool.GetRecord(i).MftIndex != 0xFFFFFFFF)
+            if (m_recordPool.GetRecord(i).MftIndex != kInvalidIndex)
                 entries.push_back({ i, m_pool.GetString(m_recordPool.GetRecord(i).NamePoolOffset) });
         }
     } // shared lock released before sort
@@ -608,11 +608,11 @@ namespace {
         const std::vector<FileRecord>& records,
         const std::vector<std::vector<uint32_t>>& mftLookupTables) {
         const uint8_t di = rec.DriveIndex;
-        if (di >= (uint8_t)mftLookupTables.size()) return 0xFFFFFFFF;
-        if (rec.ParentMftIndex < 5 || rec.ParentMftIndex >= (uint32_t)mftLookupTables[di].size()) return 0xFFFFFFFF;
+        if (di >= (uint8_t)mftLookupTables.size()) return kInvalidIndex;
+        if (rec.ParentMftIndex < 5 || rec.ParentMftIndex >= (uint32_t)mftLookupTables[di].size()) return kInvalidIndex;
         const uint32_t parentIdx = mftLookupTables[di][rec.ParentMftIndex];
-        if (parentIdx == 0xFFFFFFFF || parentIdx >= (uint32_t)records.size()) return 0xFFFFFFFF;
-        if (records[parentIdx].MftSequence != rec.ParentSequence) return 0xFFFFFFFF;
+        if (parentIdx == kInvalidIndex || parentIdx >= (uint32_t)records.size()) return kInvalidIndex;
+        if (records[parentIdx].MftSequence != rec.ParentSequence) return kInvalidIndex;
         return parentIdx;
     }
 
@@ -642,14 +642,14 @@ namespace {
         size_t aCount = 0, bCount = 0;
 
         uint32_t cur = aIdx;
-        while (aCount < kMaxDepth && cur != 0xFFFFFFFF) {
+        while (aCount < kMaxDepth && cur != kInvalidIndex) {
             aChain[aCount++] = cur;
             const uint32_t parent = ResolveParentRecordIndex(records[cur], records, mftLookupTables);
             if (parent == cur) break;
             cur = parent;
         }
         cur = bIdx;
-        while (bCount < kMaxDepth && cur != 0xFFFFFFFF) {
+        while (bCount < kMaxDepth && cur != kInvalidIndex) {
             bChain[bCount++] = cur;
             const uint32_t parent = ResolveParentRecordIndex(records[cur], records, mftLookupTables);
             if (parent == cur) break;
@@ -868,7 +868,7 @@ void IndexingEngine::SearchThread() {
                             if ((i & 0x3F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) break;
                             uint32_t idx = m_preSortedByName[i];
                             const auto& rec = m_recordPool.GetRecord(idx);
-                            if (rec.MftIndex == 0xFFFFFFFF) continue;
+                            if (rec.MftIndex == kInvalidIndex) continue;
                             if (hasExtFilter) {
                                 const char* name = m_pool.GetString(rec.NamePoolOffset);
                                 if (!passesFilter(rec, name)) continue;
@@ -879,7 +879,7 @@ void IndexingEngine::SearchThread() {
                         for (uint32_t i = 0; i < (uint32_t)GetRecordCount(); ++i) {
                             if ((i & 0x3F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) break;
                             const auto& rec = m_recordPool.GetRecord(i);
-                            if (rec.MftIndex == 0xFFFFFFFF) continue;
+                            if (rec.MftIndex == kInvalidIndex) continue;
                             if (hasExtFilter) {
                                 const char* name = m_pool.GetString(rec.NamePoolOffset);
                                 if (!passesFilter(rec, name)) continue;
@@ -931,7 +931,7 @@ void IndexingEngine::SearchThread() {
                                 }
                                 uint32_t idx = getIndex(i);
                                 const auto& rec = m_recordPool.GetRecord(idx);
-                                if (rec.MftIndex == 0xFFFFFFFF) continue;
+                                if (rec.MftIndex == kInvalidIndex) continue;
                                 // Zero allocation: use const char* directly from pool.
                                 const char* name = m_pool.GetString(rec.NamePoolOffset);
                                 if (!FastContainsCIPtr(name, needlePtr, needleLen)) continue;
@@ -958,7 +958,7 @@ void IndexingEngine::SearchThread() {
                                     if ((i & 0xFF) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) return;
                                     const uint32_t idx = getIndex(i);
                                     const auto& rec = m_recordPool.GetRecord(idx);
-                                    if (rec.MftIndex == 0xFFFFFFFF) continue;
+                                    if (rec.MftIndex == kInvalidIndex) continue;
                                     const char* name = m_pool.GetString(rec.NamePoolOffset);
                                     if (!FastContainsCIPtr(name, needlePtr, needleLen)) continue;
                                     if (hasExtFilter && !passesFilter(rec, name)) continue;
@@ -1031,7 +1031,7 @@ void IndexingEngine::SearchThread() {
                                     }
                                     uint32_t idx = getIndex(i);
                                     const auto& rec = m_recordPool.GetRecord(idx);
-                                    if (rec.MftIndex == 0xFFFFFFFF) continue;
+                                    if (rec.MftIndex == kInvalidIndex) continue;
 
                                     const char* name = m_pool.GetString(rec.NamePoolOffset);
 
@@ -1071,7 +1071,7 @@ void IndexingEngine::SearchThread() {
                                     }
                                     uint32_t idx = getIndex(i);
                                     const auto& rec = m_recordPool.GetRecord(idx);
-                                    if (rec.MftIndex == 0xFFFFFFFF) continue;
+                                    if (rec.MftIndex == kInvalidIndex) continue;
                                     const char* namePtr = m_pool.GetString(rec.NamePoolOffset);
                                     std::string cachedPath;
                                     bool pathCached = false;
@@ -1186,6 +1186,18 @@ void IndexingEngine::EnqueueUsnDelta(PendingUsnDelta&& delta) {
     m_pendingUsnDeltas.emplace_back(std::move(delta));
 }
 
+static std::string WideToUtf8ThreadLocal(const std::wstring& input)
+{
+    if (input.empty()) return {};
+    thread_local std::vector<char> buffer;
+    int required = WideCharToMultiByte(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()), nullptr, 0, nullptr, nullptr);
+    if (required <= 0) return {};
+    buffer.resize(static_cast<size_t>(required));
+    int written = WideCharToMultiByte(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()), buffer.data(), required, nullptr, nullptr);
+    if (written <= 0) return {};
+    return std::string(buffer.data(), static_cast<size_t>(written));
+}
+
 void IndexingEngine::ApplyPendingUsnDeltas() {
     std::vector<PendingUsnDelta> deltas;
     {
@@ -1200,7 +1212,7 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
     std::vector<std::string> utf8Names(deltas.size());
     for (size_t i = 0; i < deltas.size(); ++i)
         if (deltas[i].Type == PendingUsnDelta::Kind::Upsert)
-            utf8Names[i] = WideToUtf8(deltas[i].Name);
+            utf8Names[i] = WideToUtf8ThreadLocal(deltas[i].Name);
 
     // Phase 2: apply under exclusive lock in epochs of 256 to keep lock windows bounded.
     // Yielding between epochs allows SearchThread and UI reads to proceed during
@@ -1221,9 +1233,9 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
         if (d.Type == PendingUsnDelta::Kind::Delete) {
             if (d.MftIndex < (uint32_t)m_mftLookupTables[di].size()) {
                 uint32_t idx = m_mftLookupTables[di][d.MftIndex];
-                if (idx != 0xFFFFFFFF && idx < GetRecordCount() && m_recordPool.GetRecord(idx).MftSequence == d.MftSequence) {
-                    m_recordPool.GetRecord(idx).MftIndex = 0xFFFFFFFF;
-                    m_mftLookupTables[di][d.MftIndex] = 0xFFFFFFFF;
+                if (idx != kInvalidIndex && idx < GetRecordCount() && m_recordPool.GetRecord(idx).MftSequence == d.MftSequence) {
+                    m_recordPool.GetRecord(idx).MftIndex = kInvalidIndex;
+                    m_mftLookupTables[di][d.MftIndex] = kInvalidIndex;
                     m_giantFileSizes.erase(idx);
                     
                     if (!m_preSortedByName.empty()) {
@@ -1246,11 +1258,11 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
         }
 
         const std::string& incomingNameUtf8 = utf8Names[i];
-        uint32_t existing = 0xFFFFFFFF;
+        uint32_t existing = kInvalidIndex;
         if (d.MftIndex < (uint32_t)m_mftLookupTables[di].size()) existing = m_mftLookupTables[di][d.MftIndex];
 
         uint32_t nameOffset = 0;
-        if (existing != 0xFFFFFFFF && existing < GetRecordCount()) {
+        if (existing != kInvalidIndex && existing < GetRecordCount()) {
             const char* existingNameUtf8 = m_pool.GetString(m_recordPool.GetRecord(existing).NamePoolOffset);
             if (existingNameUtf8 && incomingNameUtf8 == existingNameUtf8) nameOffset = m_recordPool.GetRecord(existing).NamePoolOffset;
         }
@@ -1265,26 +1277,26 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
         rec.ParentMftIndex = d.ParentMftIndex;
         rec.MftIndex = d.MftIndex;
         rec.LastModifiedEpoch = FileTimeToEpoch(d.LastModified);
-        rec.FileSize = (d.FileSize >= 0xFFFFFFFFULL) ? 0xFFFFFFFFu : (uint32_t)d.FileSize;
+        rec.FileSize = (d.FileSize >= 0xFFFFFFFFULL) ? kInvalidIndex : static_cast<uint32_t>(d.FileSize);
         rec.MftSequence = d.MftSequence;
         rec.ParentSequence = d.ParentSequence;
         rec.DriveIndex = di;
         rec.IsGiantFile = d.FileSize >= 0xFFFFFFFFULL ? 1u : 0u;
         rec.FileAttributes = d.FileAttributes;
         rec.Reserved = 0;
-        rec.ParentRecordIndex = 0xFFFFFFFF;
+        rec.ParentRecordIndex = kInvalidIndex;
         if (d.ParentMftIndex < (uint32_t)m_mftLookupTables[di].size()) {
             uint32_t pIdx = m_mftLookupTables[di][d.ParentMftIndex];
-            if (pIdx != 0xFFFFFFFF && pIdx < GetRecordCount() && 
+            if (pIdx != kInvalidIndex && pIdx < GetRecordCount() &&
                 m_recordPool.GetRecord(pIdx).MftSequence == d.ParentSequence) {
                 rec.ParentRecordIndex = pIdx;
             }
         }
         if (d.MftIndex >= (uint32_t)m_mftLookupTables[di].size()) {
-            try { m_mftLookupTables[di].resize(d.MftIndex + 10000, 0xFFFFFFFF); }
+            try { m_mftLookupTables[di].resize(d.MftIndex + 10000, kInvalidIndex); }
             catch (const std::bad_alloc&) { continue; }
         }
-        if (existing != 0xFFFFFFFF && existing < GetRecordCount()) {
+        if (existing != kInvalidIndex && existing < GetRecordCount()) {
             if (m_recordPool.GetRecord(existing).MftSequence <= d.MftSequence) {
                 bool nameChanged = (m_recordPool.GetRecord(existing).NamePoolOffset != rec.NamePoolOffset);
                 if (nameChanged && !m_preSortedByName.empty()) {
@@ -1343,6 +1355,7 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
         if ((i & (kEpochSize - 1)) == (kEpochSize - 1) && i + 1 < deltas.size()) {
             if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
             lock.unlock();
+            std::this_thread::yield();
             lock.lock();
             if (m_hDataMutex) WaitForSingleObject(m_hDataMutex, INFINITE);
         }
@@ -1377,7 +1390,7 @@ void IndexingEngine::HandleUsnJournalRecord(USN_RECORD_V2* r, uint8_t di) {
             std::shared_lock<std::shared_mutex> lock(m_dataMutex);
             if (pIdx < (uint32_t)m_mftLookupTables[di].size()) {
                 uint32_t parentRecIdx = m_mftLookupTables[di][pIdx];
-                if (parentRecIdx != 0xFFFFFFFF) {
+                if (parentRecIdx != kInvalidIndex) {
                     fullPath = GetFullPathInternal(parentRecIdx) + L"\\" + name;
                 }
             }
@@ -1444,7 +1457,7 @@ void IndexingEngine::MonitorChanges() {
             if (d.VolumeHandle == INVALID_HANDLE_VALUE || d.Type != DriveFileSystem::NTFS) continue;
             USN_JOURNAL_DATA_V0 uj; DWORD cb;
             if (!DeviceIoControl(d.VolumeHandle, FSCTL_QUERY_USN_JOURNAL, NULL, 0, &uj, sizeof(uj), &cb, NULL)) continue;
-            READ_USN_JOURNAL_DATA_V0 rd = { (USN)d.LastProcessedUsn, 0xFFFFFFFF, FALSE, 0, 0, uj.UsnJournalID };
+            READ_USN_JOURNAL_DATA_V0 rd = { (USN)d.LastProcessedUsn, kInvalidIndex, FALSE, 0, 0, uj.UsnJournalID };
             if (DeviceIoControl(d.VolumeHandle, FSCTL_READ_USN_JOURNAL, &rd, sizeof(rd), buf.get(), 65536, &cb, NULL)) {
                 if (cb > sizeof(USN)) {
                     uint8_t* p = buf.get() + sizeof(USN);
@@ -1571,7 +1584,7 @@ void IndexingEngine::PerformFullDriveScan() {
                 ScanMftForDrive(ctx);
             } else {
                 std::unordered_set<uint64_t> visitedDirs;
-                ScanGenericDrive(ctx, ctx.DriveLetter, 0xFFFFFFFF, 0, visitedDirs);
+                ScanGenericDrive(ctx, ctx.DriveLetter, kInvalidIndex, 0, visitedDirs);
             }
             totalFound += ctx.Records.size();
             activeWorkers--;
@@ -1637,10 +1650,10 @@ void IndexingEngine::PerformFullDriveScan() {
                 }
                 rec.NamePoolOffset += poolOffsetShift;
                 if (ctx.Type != DriveFileSystem::NTFS) {
-                    if (rec.ParentMftIndex != 0xFFFFFFFF) rec.ParentMftIndex += recordIndexShift;
+                    if (rec.ParentMftIndex != kInvalidIndex) rec.ParentMftIndex += recordIndexShift;
                     uint32_t localIdx = rec.MftIndex; 
                     rec.MftIndex = recordIndexShift + localIdx;
-                    if (localIdx >= m_mftLookupTables[i].size()) m_mftLookupTables[i].resize(localIdx + 1, 0xFFFFFFFF);
+                    if (localIdx >= m_mftLookupTables[i].size()) m_mftLookupTables[i].resize(localIdx + 1, kInvalidIndex);
                     m_mftLookupTables[i][localIdx] = rec.MftIndex;
                 }
                 {
@@ -1651,7 +1664,7 @@ void IndexingEngine::PerformFullDriveScan() {
 
             if (ctx.Type == DriveFileSystem::NTFS) {
                 for (auto& val : m_mftLookupTables[i]) {
-                    if (val != 0xFFFFFFFF) val += recordIndexShift;
+                    if (val != kInvalidIndex) val += recordIndexShift;
                 }
             }
             m_drives[i].LastProcessedUsn = ctx.LastProcessedUsn;
@@ -1671,20 +1684,20 @@ void IndexingEngine::PropagateDirectorySizes() {
     for (int64_t i = (int64_t)GetRecordCount() - 1; i >= 0; --i) {
         FileRecord& child = m_recordPool.GetRecord((uint32_t)i);
         
-        uint32_t parentIdx = 0xFFFFFFFF;
+        uint32_t parentIdx = kInvalidIndex;
         uint8_t di = (uint8_t)child.DriveIndex;
         if (di < (uint8_t)m_mftLookupTables.size() && child.ParentMftIndex < (uint32_t)m_mftLookupTables[di].size()) {
             parentIdx = m_mftLookupTables[di][child.ParentMftIndex];
-            if (parentIdx != 0xFFFFFFFF && m_recordPool.GetRecord(parentIdx).MftSequence != child.ParentSequence) {
-                parentIdx = 0xFFFFFFFF;
+            if (parentIdx != kInvalidIndex && m_recordPool.GetRecord(parentIdx).MftSequence != child.ParentSequence) {
+                parentIdx = kInvalidIndex;
             }
         }
         child.ParentRecordIndex = parentIdx;
 
-        if (child.MftIndex == 0xFFFFFFFF) continue;        // deleted record slot
+        if (child.MftIndex == kInvalidIndex) continue;        // deleted record slot
         if (child.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue; // dirs themselves
 
-        if (parentIdx == 0xFFFFFFFF || parentIdx >= GetRecordCount()) continue;
+        if (parentIdx == kInvalidIndex || parentIdx >= GetRecordCount()) continue;
 
         FileRecord& parent = m_recordPool.GetRecord(parentIdx);
         if (!(parent.FileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
@@ -1762,7 +1775,7 @@ void IndexingEngine::ScanGenericDrive(DriveScanContext& ctx, const std::wstring&
             rec.IsGiantFile = fullSize >= 0xFFFFFFFFULL ? 1u : 0u;
             rec.FileAttributes = (uint16_t)fd.dwFileAttributes;
             rec.Reserved = 0;
-            rec.ParentRecordIndex = 0xFFFFFFFF;
+            rec.ParentRecordIndex = kInvalidIndex;
             ctx.Records.push_back(rec);
             if (rec.IsGiantFile) ctx.GiantFileSizes[myLocalIdx] = fullSize;
 
@@ -1780,7 +1793,7 @@ void IndexingEngine::ScanMftForDrive(DriveScanContext& ctx) {
     if (!DeviceIoControl(ctx.VolumeHandle, FSCTL_GET_NTFS_VOLUME_DATA, NULL, 0, &nt, sizeof(nt), &cb, NULL)) return;
     USN_JOURNAL_DATA_V0 uj; if (DeviceIoControl(ctx.VolumeHandle, FSCTL_QUERY_USN_JOURNAL, NULL, 0, &uj, sizeof(uj), &cb, NULL)) ctx.LastProcessedUsn = uj.NextUsn;
     uint64_t maxMft = nt.MftValidDataLength.QuadPart / nt.BytesPerFileRecordSegment;
-    ctx.LookupTable.assign((size_t)maxMft + 100000, 0xFFFFFFFF);
+    ctx.LookupTable.assign((size_t)maxMft + 100000, kInvalidIndex);
     std::vector<uint8_t> r0(nt.BytesPerFileRecordSegment); LARGE_INTEGER offs; offs.QuadPart = nt.MftStartLcn.QuadPart * nt.BytesPerCluster;
     if (!SetFilePointerEx(ctx.VolumeHandle, offs, NULL, FILE_BEGIN) || !ReadFile(ctx.VolumeHandle, r0.data(), nt.BytesPerFileRecordSegment, &cb, NULL)) return;
     MFT_RECORD_HEADER* h0 = (MFT_RECORD_HEADER*)r0.data(); uint32_t ao0 = h0->AttributeOffset;
@@ -1864,13 +1877,13 @@ void IndexingEngine::ScanMftForDrive(DriveScanContext& ctx) {
                 entry.DriveIndex       = ctx.DriveIndex;
                 entry.IsGiantFile      = sizeToUse >= 0xFFFFFFFFULL ? 1u : 0u;
                 entry.FileAttributes   = (uint16_t)fn->FileAttributes;
-                entry.Reserved = 0; entry.ParentRecordIndex = 0xFFFFFFFF;
+                entry.Reserved = 0; entry.ParentRecordIndex = kInvalidIndex;
                 if (rhFlags & 0x02) entry.FileAttributes |= 0x10;
                 uint32_t ri = (uint32_t)ctx.Records.size(); ctx.Records.push_back(entry);
                 if (entry.IsGiantFile) ctx.GiantFileSizes[ri] = sizeToUse;
                 // Only set if vacant: base-record 0x30 is processed before extension records
                 // (lower MFT index first), so a later extension must not overwrite it.
-                if (effectiveMftIdx < (uint32_t)ctx.LookupTable.size() && ctx.LookupTable[effectiveMftIdx] == 0xFFFFFFFF)
+                if (effectiveMftIdx < (uint32_t)ctx.LookupTable.size() && ctx.LookupTable[effectiveMftIdx] == kInvalidIndex)
                     ctx.LookupTable[effectiveMftIdx] = ri;
             };
 
@@ -1913,11 +1926,11 @@ void IndexingEngine::ScanMftForDrive(DriveScanContext& ctx) {
                         uint32_t ao = rh->AttributeOffset;
                         while (ao + sizeof(MFT_ATTRIBUTE) < nt.BytesPerFileRecordSegment) {
                             MFT_ATTRIBUTE* aa = (MFT_ATTRIBUTE*)&eb[k + ao];
-                            if (aa->Type == 0xFFFFFFFF) break;
+                            if (aa->Type == kInvalidIndex) break;
                             if (aa->Type == 0x80 && aa->NameLength == 0) {
                                 realDataSize = aa->NonResident ? ((MFT_NONRESIDENT_ATTRIBUTE*)aa)->DataSize : ((MFT_RESIDENT_ATTRIBUTE*)aa)->ValueLength;
                                 ctx.RealSizes[effectiveMftIdx] = realDataSize;
-                                if (effectiveMftIdx < (uint32_t)ctx.LookupTable.size() && ctx.LookupTable[effectiveMftIdx] != 0xFFFFFFFF) {
+                                if (effectiveMftIdx < (uint32_t)ctx.LookupTable.size() && ctx.LookupTable[effectiveMftIdx] != kInvalidIndex) {
                                     uint32_t ri = ctx.LookupTable[effectiveMftIdx];
                                     while (ri < ctx.Records.size() && ctx.Records[ri].MftIndex == effectiveMftIdx) {
                                         uint64_t currentSize = ctx.Records[ri].IsGiantFile ? ctx.GiantFileSizes[ri] : ctx.Records[ri].FileSize;
@@ -1941,7 +1954,7 @@ void IndexingEngine::ScanMftForDrive(DriveScanContext& ctx) {
                         ao = rh->AttributeOffset;
                         while (ao + sizeof(MFT_ATTRIBUTE) < nt.BytesPerFileRecordSegment) {
                             MFT_ATTRIBUTE* aa = (MFT_ATTRIBUTE*)&eb[k + ao];
-                            if (aa->Type == 0xFFFFFFFF) break;
+                            if (aa->Type == kInvalidIndex) break;
 
                             if (aa->Type == 0x30 && !aa->NonResident) {
                                 commitFileName(&eb[k], ao, effectiveMftIdx, effectiveSeq, rh->Flags, realDataSize);
@@ -1981,7 +1994,7 @@ void IndexingEngine::ScanMftForDrive(DriveScanContext& ctx) {
                 uint32_t ao = rh->AttributeOffset;
                 while (ao + sizeof(MFT_ATTRIBUTE) < nt.BytesPerFileRecordSegment) {
                     MFT_ATTRIBUTE* aa = (MFT_ATTRIBUTE*)&extBuf[ao];
-                    if (aa->Type == 0xFFFFFFFF) break;
+                    if (aa->Type == kInvalidIndex) break;
                     if (aa->Type == 0x30 && !aa->NonResident)
                         commitFileName(extBuf.data(), ao, baseMftIdx, baseSeq, rh->Flags, 0xFFFFFFFFFFFFFFFFULL);
                     if (!aa->Length) break; ao += aa->Length;

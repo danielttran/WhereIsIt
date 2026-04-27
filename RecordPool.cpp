@@ -30,7 +30,7 @@ void RecordPool::Reserve(size_t count) {
         if (m_shared) {
             wchar_t mapName[64];
             swprintf_s(mapName, L"Global\\WhereIsIt_RecordChunk_%zu", m_chunks.size());
-            c.hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, GetPermissiveSA(), PAGE_READWRITE, 0, (DWORD)allocSize, mapName);
+            c.hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, GetSharedMemoryReadOnlySA(), PAGE_READWRITE, 0, (DWORD)allocSize, mapName);
             if (!c.hMap && GetLastError() == ERROR_ACCESS_DENIED) {
                 // If we don't have permission to create it (because we are the UI process and the service already created it), just open it
                 c.hMap = OpenFileMappingW(FILE_MAP_READ, FALSE, mapName);
