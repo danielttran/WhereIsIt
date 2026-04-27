@@ -197,7 +197,7 @@ bool ParseSizeBytes(const std::string& raw, uint64_t& out) {
 
     try {
         uint64_t base = std::stoull(match[1].str());
-        if (base > (std::numeric_limits<uint64_t>::max() / mult)) return false;
+        if (base > ((std::numeric_limits<uint64_t>::max)() / mult)) return false;
         out = base * mult;
     } catch (...) {
         return false;

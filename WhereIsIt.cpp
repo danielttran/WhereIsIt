@@ -1192,8 +1192,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 sei.fMask = SEE_MASK_NOCLOSEPROCESS;
                 
                 if (ShellExecuteExW(&sei)) {
-                    WaitForSingleObject(sei.hProcess, INFINITE);
-                    CloseHandle(sei.hProcess);
+                    if (sei.hProcess) {
+                        WaitForSingleObject(sei.hProcess, INFINITE);
+                        CloseHandle(sei.hProcess);
+                    }
                     // Give the service a brief moment to start its named pipe server
                     Sleep(1000);
                     usePipe = IsNamedPipeServerAvailable();
