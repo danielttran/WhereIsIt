@@ -1046,7 +1046,8 @@ static void LoadSettings() {
     if (filt == IDM_FILTER_EVERYTHING || filt == IDM_FILTER_AUDIO ||
         filt == IDM_FILTER_COMPRESSED || filt == IDM_FILTER_DOCUMENT ||
         filt == IDM_FILTER_EXECUTABLE || filt == IDM_FILTER_FOLDER  ||
-        filt == IDM_FILTER_PICTURE    || filt == IDM_FILTER_VIDEO)
+        filt == IDM_FILTER_PICTURE    || filt == IDM_FILTER_VIDEO   ||
+        filt == IDM_FILTER_CODE)
         g_FileTypeFilter = filt;
 
     int view = (int)GetPrivateProfileIntW(L"View", L"Mode", IDM_VIEW_DETAILS, S);

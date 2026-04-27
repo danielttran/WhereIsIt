@@ -14,7 +14,6 @@
 #define IDM_EDIT_COPY           112
 #define IDM_EDIT_PASTE          113
 #define IDM_VIEW_STATUSBAR      114
-#define IDM_SEARCH_MATCHCASE    115
 #define IDM_BOOKMARKS_ADD       116
 #define IDM_TOOLS_OPTIONS       117
 #define IDC_SEARCH_EDIT         120

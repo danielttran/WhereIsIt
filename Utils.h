@@ -3,7 +3,6 @@
 #include <string>
 
 SECURITY_ATTRIBUTES* GetPermissiveSA();
-bool SetPrivilege(HANDLE hToken, LPCTSTR lpszPrivilege, bool bEnablePrivilege);
 
 bool RegisterContextMenu();
 bool UnregisterContextMenu();

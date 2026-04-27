@@ -96,7 +96,7 @@ private:
     wchar_t (*m_driveLettersShared)[4] = nullptr;
 
     // String pool dynamic mapping
-    mutable std::array<std::atomic<char*>, 100> m_uiChunks;
+    mutable std::array<std::atomic<char*>, 256> m_uiChunks;
     mutable std::mutex m_chunkMutex;
     const char* GetString(uint32_t offset) const;
 
