@@ -104,7 +104,7 @@ public:
     void Sort(QuerySortKey key, bool descending) override;
     std::shared_ptr<std::vector<uint32_t>> GetSearchResults() override;
     std::shared_ptr<std::vector<uint32_t>> WaitForNewResults(const std::shared_ptr<std::vector<uint32_t>>& prev, int timeoutMs);
-    void SetNotifyWindow(HWND hwnd) override { m_hwndNotify = hwnd; }
+    void SetNotifyWindow(HWND hwnd) override { m_hwndNotify.store(hwnd, std::memory_order_release); }
 
     FileRecord GetRecord(uint32_t recordIndex) const override;
     uint64_t GetRecordFileSize(uint32_t recordIndex) const override;
@@ -118,7 +118,8 @@ public:
         std::lock_guard<std::mutex> lock(m_statusMutex);
         m_status = status;
         // Post event-driven notification — no polling timer needed in the UI.
-        if (m_hwndNotify) PostMessage(m_hwndNotify, WM_USER_STATUS_CHANGED, 0, 0);
+        HWND hwnd = m_hwndNotify.load(std::memory_order_acquire);
+        if (hwnd) PostMessage(hwnd, WM_USER_STATUS_CHANGED, 0, 0);
     }
     std::wstring GetCurrentStatus() const override {
         std::lock_guard<std::mutex> lock(m_statusMutex);
@@ -200,7 +201,7 @@ private:
     std::atomic<bool> m_ready;
     mutable std::mutex m_statusMutex;
     std::wstring m_status;
-    HWND m_hwndNotify = NULL;
+    std::atomic<HWND> m_hwndNotify{ nullptr };
     HANDLE m_stopEvent = NULL;  // Manual-reset event; set on Stop() to wake MonitorChanges cleanly.
     
     struct DriveContext { 

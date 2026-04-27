@@ -546,43 +546,46 @@ void NamedPipeEngine::ApplySort(
         return;
     }
 
-    std::stable_sort(v.begin(), v.end(),
-        [this, key, descending](uint32_t a, uint32_t b) -> bool {
-            int cmp = 0;
-            switch (key) {
-            case QuerySortKey::Name: {
-                auto na = this->GetRecordName(a);
-                auto nb = this->GetRecordName(b);
-                cmp = _wcsicmp(na.c_str(), nb.c_str());
-                break;
-            }
-            case QuerySortKey::Path: {
-                // Path is handled via pre-computed vector; unreachable in the
-                // lambda below (the Path case short-circuits before stable_sort).
-                break;
-            }
-            case QuerySortKey::Size: {
-                uint64_t sa = this->GetRecordFileSize(a);
-                uint64_t sb = this->GetRecordFileSize(b);
-                if (sa != sb) { cmp = (sa < sb) ? -1 : 1; break; }
-                auto na = this->GetRecordName(a);
-                auto nb = this->GetRecordName(b);
-                cmp = _wcsicmp(na.c_str(), nb.c_str());
-                break;
-            }
-            case QuerySortKey::Date: {
-                uint64_t da = this->GetRecordLastModifiedFileTime(a);
-                uint64_t db = this->GetRecordLastModifiedFileTime(b);
-                if (da != db) { cmp = (da < db) ? -1 : 1; break; }
-                auto na = this->GetRecordName(a);
-                auto nb = this->GetRecordName(b);
-                cmp = _wcsicmp(na.c_str(), nb.c_str());
-                break;
-            }
-            }
-            // cmp == 0 → equal → return false (strict weak ordering)
+    // Pre-compute sort keys once per record to avoid redundant shared-memory
+    // accesses and atomic loads inside the O(N log N) comparator.
+    if (key == QuerySortKey::Name) {
+        struct NameKey { std::wstring name; uint32_t idx; };
+        std::vector<NameKey> keys;
+        keys.reserve(v.size());
+        for (uint32_t ri : v) keys.push_back({ GetRecordName(ri), ri });
+        std::stable_sort(keys.begin(), keys.end(), [descending](const NameKey& a, const NameKey& b) {
+            int cmp = _wcsicmp(a.name.c_str(), b.name.c_str());
             return descending ? (cmp > 0) : (cmp < 0);
         });
+        for (size_t i = 0; i < v.size(); ++i) v[i] = keys[i].idx;
+        return;
+    }
+    if (key == QuerySortKey::Size) {
+        struct SizeKey { uint64_t size; std::wstring name; uint32_t idx; };
+        std::vector<SizeKey> keys;
+        keys.reserve(v.size());
+        for (uint32_t ri : v) keys.push_back({ GetRecordFileSize(ri), GetRecordName(ri), ri });
+        std::stable_sort(keys.begin(), keys.end(), [descending](const SizeKey& a, const SizeKey& b) {
+            if (a.size != b.size) return descending ? (a.size > b.size) : (a.size < b.size);
+            int cmp = _wcsicmp(a.name.c_str(), b.name.c_str());
+            return descending ? (cmp > 0) : (cmp < 0);
+        });
+        for (size_t i = 0; i < v.size(); ++i) v[i] = keys[i].idx;
+        return;
+    }
+    if (key == QuerySortKey::Date) {
+        struct DateKey { uint64_t date; std::wstring name; uint32_t idx; };
+        std::vector<DateKey> keys;
+        keys.reserve(v.size());
+        for (uint32_t ri : v) keys.push_back({ GetRecordLastModifiedFileTime(ri), GetRecordName(ri), ri });
+        std::stable_sort(keys.begin(), keys.end(), [descending](const DateKey& a, const DateKey& b) {
+            if (a.date != b.date) return descending ? (a.date > b.date) : (a.date < b.date);
+            int cmp = _wcsicmp(a.name.c_str(), b.name.c_str());
+            return descending ? (cmp > 0) : (cmp < 0);
+        });
+        for (size_t i = 0; i < v.size(); ++i) v[i] = keys[i].idx;
+        return;
+    }
 }
 
 void NamedPipeEngine::SearchWorker()
@@ -797,21 +800,25 @@ std::wstring NamedPipeEngine::GetParentPath(uint32_t recordIdx) const {
     
     thread_local const char* parts[4096];
     int partsCount = 0;
-    thread_local uint32_t visited[4096];
-    int visitedCount = 0;
+
+    // O(1)-per-step cycle detection: same bitset approach as IndexingEngine::GetFullPathInternal.
+    // Slot collisions at depth > 4096 are astronomically rare; either way we stop safely.
+    static constexpr uint32_t kBitCap  = 4096;
+    static constexpr uint32_t kBitMask = kBitCap - 1;
+    thread_local bool     visitedBit[kBitCap] = {};
+    thread_local uint32_t resetSlots[kBitCap];
+    int resetCount = 0;
 
     uint32_t cur = recordIdx;
     uint8_t rootDrive = 0;
 
-    while (partsCount < 4096 && visitedCount < 4096) {
-        bool cycle = false;
-        for (int i = 0; i < visitedCount; i++) {
-            if (visited[i] == cur) { cycle = true; break; }
-        }
-        if (cycle) break;
-        visited[visitedCount++] = cur;
+    while (partsCount < (int)kBitCap) {
+        uint32_t slot = cur & kBitMask;
+        if (visitedBit[slot]) break;
+        visitedBit[slot] = true;
+        resetSlots[resetCount++] = slot;
 
-        FileRecord r = m_recordPool.GetRecord(cur); 
+        FileRecord r = m_recordPool.GetRecord(cur);
         rootDrive = r.DriveIndex;
         if (cur != recordIdx) {
             const char* name = GetString(r.NamePoolOffset);
@@ -824,7 +831,8 @@ std::wstring NamedPipeEngine::GetParentPath(uint32_t recordIdx) const {
         if (pi == 0xFFFFFFFF || pi >= count || pi == cur) break;
         cur = pi;
     }
-    
+    for (int i = 0; i < resetCount; ++i) visitedBit[resetSlots[i]] = false;
+
     std::string pa;
     for (int i = partsCount - 1; i >= 0; --i) {
         if (!pa.empty()) pa += "\\";
