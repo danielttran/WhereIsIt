@@ -1,6 +1,6 @@
-#include <array>
 #pragma once
 #include "Engine.h"
+#include <array>
 #include <atomic>
 #include <thread>
 #include <mutex>
@@ -96,7 +96,6 @@ private:
     wchar_t (*m_driveLettersShared)[4] = nullptr;
 
     // String pool dynamic mapping
-    #include <array>
     mutable std::array<std::atomic<char*>, 100> m_uiChunks;
     mutable std::mutex m_chunkMutex;
     const char* GetString(uint32_t offset) const;

@@ -23,16 +23,15 @@ void Logger::Log(const std::wstring& message) {
 }
 
 SECURITY_ATTRIBUTES* GetPermissiveSA() {
-    static SECURITY_ATTRIBUTES sa = { sizeof(SECURITY_ATTRIBUTES), nullptr, FALSE };
-    static bool initialized = false;
-    if (!initialized) {
+    // C++11 guarantees this static is initialized exactly once, thread-safely.
+    static SECURITY_ATTRIBUTES sa = []() -> SECURITY_ATTRIBUTES {
+        SECURITY_ATTRIBUTES attrs = { sizeof(SECURITY_ATTRIBUTES), nullptr, FALSE };
         PSECURITY_DESCRIPTOR pSD = nullptr;
         // D:(A;;GA;;;WD) = Allow Generic All to World (Everyone)
-        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;;GA;;;WD)", SDDL_REVISION_1, &pSD, nullptr)) {
-            sa.lpSecurityDescriptor = pSD;
-            initialized = true;
-        }
-    }
+        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;;GA;;;WD)", SDDL_REVISION_1, &pSD, nullptr))
+            attrs.lpSecurityDescriptor = pSD;
+        return attrs;
+    }();
     return &sa;
 }
 

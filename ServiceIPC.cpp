@@ -1,5 +1,6 @@
 #include "framework.h"
 #include "ServiceIPC.h"
+#include "QueryEngine.h"
 #include <chrono>
 #include <algorithm>
 #include <vector>
@@ -338,10 +339,6 @@ int RunAsService()
 // NamedPipeEngine — IIndexEngine proxy over WhereIsItIPC
 // ---------------------------------------------------------------------------
 
-static uint64_t UnixEpochSecondsToFileTime(uint32_t epochSeconds) {
-    return (uint64_t)epochSeconds * 10000000ULL + 116444736000000000ULL;
-}
-
 NamedPipeEngine::NamedPipeEngine()  = default;
 NamedPipeEngine::~NamedPipeEngine() { Stop(); }
 
@@ -431,6 +428,25 @@ void NamedPipeEngine::ApplySort(
     // resetting empty queries that return up to 1,000,000 records.
     if (key == QuerySortKey::Name && !descending) return;
 
+    // Path sort: pre-compute all parent paths once (O(N×depth)) so the
+    // comparator only does string comparisons (O(log N) calls to a cheap op)
+    // instead of walking the parent chain inside every comparator invocation.
+    if (key == QuerySortKey::Path) {
+        struct Entry { std::wstring path; std::wstring name; uint32_t idx; };
+        std::vector<Entry> entries;
+        entries.reserve(v.size());
+        for (uint32_t ri : v)
+            entries.push_back({ GetParentPath(ri), GetRecordName(ri), ri });
+        std::stable_sort(entries.begin(), entries.end(),
+            [descending](const Entry& a, const Entry& b) -> bool {
+                int cmp = _wcsicmp(a.path.c_str(), b.path.c_str());
+                if (cmp == 0) cmp = _wcsicmp(a.name.c_str(), b.name.c_str());
+                return descending ? (cmp > 0) : (cmp < 0);
+            });
+        for (size_t i = 0; i < v.size(); ++i) v[i] = entries[i].idx;
+        return;
+    }
+
     std::stable_sort(v.begin(), v.end(),
         [this, key, descending](uint32_t a, uint32_t b) -> bool {
             int cmp = 0;
@@ -442,14 +458,8 @@ void NamedPipeEngine::ApplySort(
                 break;
             }
             case QuerySortKey::Path: {
-                auto pa = this->GetParentPath(a);
-                auto pb = this->GetParentPath(b);
-                cmp = _wcsicmp(pa.c_str(), pb.c_str());
-                if (cmp == 0) {
-                    auto na = this->GetRecordName(a);
-                    auto nb = this->GetRecordName(b);
-                    cmp = _wcsicmp(na.c_str(), nb.c_str());
-                }
+                // Path is handled via pre-computed vector; unreachable in the
+                // lambda below (the Path case short-circuits before stable_sort).
                 break;
             }
             case QuerySortKey::Size: {
@@ -584,8 +594,8 @@ std::shared_ptr<std::vector<uint32_t>> NamedPipeEngine::GetSearchResults()
 }
 
 const char* NamedPipeEngine::GetString(uint32_t offset) const {
-    size_t chunkIdx = offset / 16777216; // StringPool::kChunkSize (16MB)
-    size_t pos      = offset % 16777216;
+    size_t chunkIdx = offset / StringPool::kChunkSize;
+    size_t pos      = offset % StringPool::kChunkSize;
 
     if (chunkIdx >= m_uiChunks.size()) return "";
 
@@ -653,17 +663,26 @@ std::pair<FileRecord, std::wstring> NamedPipeEngine::GetRecordAndName(uint32_t r
 
 IIndexEngine::RowDisplayData NamedPipeEngine::GetRowDisplayData(uint32_t recordIdx) const {
     RowDisplayData d;
+    // Fetch the record once; derive FileSize and FileTime from it directly
+    // rather than calling GetRecordFileSize / GetRecordLastModifiedFileTime,
+    // which each do a separate Reserve()+GetRecord() round-trip.
     auto [rec, name] = GetRecordAndName(recordIdx);
     d.Name       = std::move(name);
     d.Attributes = rec.FileAttributes;
-    d.FileSize   = GetRecordFileSize(recordIdx);
-    d.FileTime   = GetRecordLastModifiedFileTime(recordIdx);
+    d.FileSize   = rec.FileSize;
+    d.FileTime   = UnixEpochSecondsToFileTime(rec.LastModifiedEpoch);
     d.ParentPath = GetParentPath(recordIdx);
     return d;
 }
 
 std::wstring NamedPipeEngine::GetFullPath(uint32_t recordIdx) const {
-    return GetParentPath(recordIdx) + L"\\" + GetRecordName(recordIdx);
+    std::wstring parent = GetParentPath(recordIdx);
+    std::wstring name   = GetRecordName(recordIdx);
+    // GetParentPath returns "X:\" (with trailing backslash) for root-level files,
+    // so only insert a separator when the parent does not already end with one.
+    if (!parent.empty() && parent.back() == L'\\')
+        return parent + name;
+    return parent + L"\\" + name;
 }
 
 std::wstring NamedPipeEngine::GetParentPath(uint32_t recordIdx) const {
