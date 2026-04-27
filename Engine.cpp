@@ -105,8 +105,23 @@ uint32_t IndexingEngine::FetchVolumeSerialNumber(const std::wstring& drive) {
 }
 
 std::wstring IndexingEngine::ResolveIndexSavePath() {
-    wchar_t path[MAX_PATH]; GetModuleFileNameW(NULL, path, MAX_PATH);
-    std::wstring s(path); return s.substr(0, s.find_last_of(L'\\')) + L"\\index.dat";
+    // Store index in %LOCALAPPDATA%\WhereIsIt\ so the process works normally
+    // even when the exe lives in a UAC-protected location (e.g. Program Files).
+    wchar_t* pLocal = nullptr;
+    std::wstring dir;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &pLocal)) && pLocal) {
+        dir = pLocal;
+        CoTaskMemFree(pLocal);
+        dir += L"\\WhereIsIt";
+        CreateDirectoryW(dir.c_str(), nullptr);  // no-op if already exists
+    } else {
+        // Fallback: same directory as the executable.
+        wchar_t exePath[MAX_PATH];
+        GetModuleFileNameW(NULL, exePath, MAX_PATH);
+        std::wstring s(exePath);
+        dir = s.substr(0, s.find_last_of(L'\\'));
+    }
+    return dir + L"\\index.dat";
 }
 
 bool IndexingEngine::SaveIndex(const std::wstring& filePath) {
@@ -484,25 +499,31 @@ std::wstring IndexingEngine::GetFullPath(uint32_t recordIdx) const {
 
 std::wstring IndexingEngine::GetFullPathInternal(uint32_t recordIdx) const {
     if (recordIdx >= (uint32_t)GetRecordCount()) return L"";
-    
+
     thread_local const char* parts[4096];
     int partsCount = 0;
-    thread_local uint32_t visited[4096];
-    int visitedCount = 0;
-    
+
+    // O(1) per-step cycle detection using a thread-local reset-on-use bitset.
+    // The bitset is 4096 bits (512 bytes) — large enough that collisions in the
+    // power-of-2 slot mapping are astronomically rare for real MFT parent chains.
+    // We only reset the slots we touch, so the amortised cost per call is O(depth).
+    static constexpr uint32_t kBitCap = 4096;
+    static constexpr uint32_t kBitMask = kBitCap - 1;
+    thread_local bool visitedBit[kBitCap] = {};   // zero-initialised once per thread
+    thread_local uint32_t resetSlots[kBitCap];
+    int resetCount = 0;
+
     uint32_t cur = recordIdx;
     uint8_t di = m_recordPool.GetRecord(recordIdx).DriveIndex;
     if (di >= (uint8_t)m_drives.size() || di >= (uint8_t)m_mftLookupTables.size()) return L"";
 
-    while (partsCount < 4096 && visitedCount < 4096) {
-        bool cycle = false;
-        for (int i = 0; i < visitedCount; i++) {
-            if (visited[i] == cur) { cycle = true; break; }
-        }
-        if (cycle) break;
-        visited[visitedCount++] = cur;
+    while (partsCount < (int)kBitCap) {
+        uint32_t slot = cur & kBitMask;
+        if (visitedBit[slot]) break;   // cycle detected (or slot collision — either way, stop)
+        visitedBit[slot] = true;
+        resetSlots[resetCount++] = slot;
 
-        const FileRecord& r = m_recordPool.GetRecord(cur); 
+        const FileRecord& r = m_recordPool.GetRecord(cur);
         const char* name = m_pool.GetString(r.NamePoolOffset);
         if (name[0] != '.' || name[1] != '\0') {
             parts[partsCount++] = name;
@@ -512,10 +533,13 @@ std::wstring IndexingEngine::GetFullPathInternal(uint32_t recordIdx) const {
         if (pi == 0xFFFFFFFF || pi >= (uint32_t)GetRecordCount() || m_recordPool.GetRecord(pi).MftSequence != r.ParentSequence) break;
         if (pi == cur) break; cur = pi;
     }
-    
+    // Reset only the slots we used (not the full kBitCap array).
+    for (int i = 0; i < resetCount; ++i) visitedBit[resetSlots[i]] = false;
+
     std::string pa;
+    pa.reserve(256);
     for (int i = partsCount - 1; i >= 0; --i) {
-        if (!pa.empty()) pa += "\\";
+        if (!pa.empty()) pa += '\\';
         pa += parts[i];
     }
     return m_drives[di].Letter + Utf8ToWide(pa);
@@ -726,7 +750,10 @@ void IndexingEngine::SearchThread() {
         if (plan.Config.RegexMode && !plan.CompiledRegex.empty()) {
             for (const auto& rx : plan.CompiledRegex) {
                 if (rx.match(name)) return true;
-                if (rx.match(getFullPath())) return true;
+                // Only search the full path when the user has explicitly enabled
+                // MatchPath — otherwise e.g. "\.jpg$" would match any parent
+                // directory that happens to contain ".jpg" in its name.
+                if (plan.Config.MatchPath && rx.match(getFullPath())) return true;
             }
             return false;
         }
@@ -955,7 +982,12 @@ void IndexingEngine::SearchThread() {
                                 begin = end;
                             }
                             for (auto& t : workers) t.join();
-                            if (m_isSearchRequested.load(std::memory_order_relaxed)) return;
+                            // If any worker detected a new search request, discard all
+                            // partial results — publishing them would show a wrong/stale list.
+                            if (m_isSearchRequested.load(std::memory_order_relaxed)) {
+                                results->clear();
+                                return;
+                            }
 
                             size_t total = 0;
                             for (const auto& c : chunks) total += c.size();
@@ -1045,7 +1077,8 @@ void IndexingEngine::SearchThread() {
                                     uint32_t idx = getIndex(i);
                                     const auto& rec = m_recordPool.GetRecord(idx);
                                     if (rec.MftIndex == 0xFFFFFFFF) continue;
-                                    const std::string nameStr(m_pool.GetString(rec.NamePoolOffset));
+                                    const char* namePtr = m_pool.GetString(rec.NamePoolOffset);
+                                    const std::string nameStr(namePtr);
                                     std::string cachedPath;
                                     bool pathCached = false;
                                     auto getPath = [&]() -> std::string {
@@ -1053,7 +1086,7 @@ void IndexingEngine::SearchThread() {
                                         return cachedPath;
                                     };
                                     if (!evaluateTerm(plan.Root.get(), plan, idx, rec, nameStr, getPath)) continue;
-                                    if (hasExtFilter && !passesFilter(rec, nameStr.c_str())) continue;
+                                    if (hasExtFilter && !passesFilter(rec, namePtr)) continue;
                                     results->push_back(idx);
                                 }
                             };

@@ -47,7 +47,10 @@ bool g_SortDescending = false;
 int g_SearchEditHeight = 0;
 
 // Search term storage for highlighting
-wchar_t g_CurrentQueryW[256] = { 0 };
+// Query buffer: 1024 wide chars covers any realistic search term.
+// EN_CHANGE handler uses GetWindowTextLength to avoid silent truncation.
+static constexpr int kMaxQueryChars = 1024;
+wchar_t g_CurrentQueryW[kMaxQueryChars] = { 0 };
 std::vector<std::wstring> g_HighlightTokens;
 
 // Global UI Context
@@ -107,17 +110,32 @@ void UpdateHighlightTokens() {
     }
     if (tokens.empty()) tokens.push_back(searchStr);
 
+    // Operator keywords that must not be bolded in results.
+    static const wchar_t* const kOperators[] = { L"or", L"and", L"not" };
+
     for (auto& token : tokens) {
+        // Strip path prefix — only highlight the filename component.
         size_t slash = token.find_last_of(L"\\/");
         if (slash != std::wstring::npos) token = token.substr(slash + 1);
         token.erase(std::remove(token.begin(), token.end(), L'*'), token.end());
         token.erase(std::remove(token.begin(), token.end(), L'?'), token.end());
         token.erase(std::remove(token.begin(), token.end(), L'"'), token.end());
+        if (token.empty()) continue;
 
-        if (!token.empty()) {
-            for (auto& c : token) c = towlower(c);
-            g_HighlightTokens.push_back(token);
-        }
+        // Lower-case for comparison and storage.
+        for (auto& c : token) c = towlower(c);
+
+        // Skip bare operator keywords — they match every word that contains them.
+        bool isOperator = false;
+        for (const wchar_t* op : kOperators)
+            if (token == op) { isOperator = true; break; }
+        if (isOperator) continue;
+
+        // Skip engine flag tokens (case:true, extfilt:picture, etc.) that
+        // are prepended by TriggerSearch and must not reach the highlighter.
+        if (token.find(L':') != std::wstring::npos) continue;
+
+        g_HighlightTokens.push_back(token);
     }
 }
 HFONT g_FontNormal = NULL;
@@ -129,6 +147,11 @@ HFONT g_FontBold = NULL;
 int g_CurrentViewMode = LV_VIEW_DETAILS;
 int g_CurrentIconSize = 16;
 HIMAGELIST g_hCustomImageList = NULL;
+// Persisted view mode (loaded from settings.ini; applied after WM_CREATE).
+static int g_LastViewMode = IDM_VIEW_DETAILS;
+// Forward declaration — defined after WndProc (after all globals are available).
+static void SaveSettings(HWND hWnd);
+static void LoadSettings();
 
 // Maximum entries kept in the icon/thumbnail cache.
 // Beyond this the image list would consume too much GDI memory
@@ -168,26 +191,15 @@ static void EnqueueIconRequest(uint32_t recordIdx, bool priority) {
 
 int GetIconIndex(const std::wstring& /*filename*/, uint16_t attributes, uint32_t recordIdx) {
     if (g_CurrentViewMode == LV_VIEW_DETAILS) {
-        if (attributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (g_folderIconIdx != -1) return g_folderIconIdx;
-            SHFILEINFOW sfi = { 0 };
-            SHGetFileInfoW(L"C:\\Windows", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi), SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
-            return g_folderIconIdx = sfi.iIcon;
-        }
-        // Single lock: check cache and enqueue atomically.
+        if (attributes & FILE_ATTRIBUTE_DIRECTORY)
+            return (g_folderIconIdx != -1) ? g_folderIconIdx : 0;
         {
             std::lock_guard<std::mutex> lock(g_iconMutex);
             auto it = g_recordIconCache.find(recordIdx);
             if (it != g_recordIconCache.end()) return it->second;
-            if (g_fileIconIdx == -1) {
-                // Unlock scope so SHGetFileInfoW isn't called under the mutex.
-            }
         }
-        if (g_fileIconIdx == -1) {
-            SHFILEINFOW sfi = { 0 };
-            SHGetFileInfoW(L".txt", FILE_ATTRIBUTE_NORMAL, &sfi, sizeof(sfi), SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
-            g_fileIconIdx = sfi.iIcon;
-        }
+        // Return the generic file icon while the real one loads asynchronously.
+        return (g_fileIconIdx != -1) ? g_fileIconIdx : 0;
     } else {
         std::lock_guard<std::mutex> lock(g_iconMutex);
         auto it = g_recordIconCache.find(recordIdx);
@@ -252,82 +264,66 @@ static void OpenContainingFolder(HWND hwnd, int listIdx) {
 static void ShowShellContextMenu(HWND hwnd, int listIdx, POINT screenPt) {
     if (!g_ActiveResults || listIdx < 0 || listIdx >= (int)g_ActiveResults->size()) return;
     std::wstring path = g_Engine->GetFullPath((*g_ActiveResults)[listIdx]);
-    
-    wchar_t debugBuf[512];
-    swprintf_s(debugBuf, L"[WhereIsIt] ShowContextMenu for path: %s\n", path.c_str());
-    Logger::Log(debugBuf);
-
     if (path.empty()) return;
 
     PIDLIST_ABSOLUTE pidlFull = nullptr;
     HRESULT hr = SHParseDisplayName(path.c_str(), nullptr, &pidlFull, 0, nullptr);
-    if (FAILED(hr)) {
-#ifdef _DEBUG
-        swprintf_s(debugBuf, L"[WhereIsIt] SHParseDisplayName failed (0x%08X) for path: %s\n", hr, path.c_str());
-        Logger::Log(debugBuf);
-#endif
-        return;
-    }
+    if (FAILED(hr)) return;
+
+    // RAII guard ensures pidlFull is always freed, even on early returns.
+    struct PidlGuard { PIDLIST_ABSOLUTE p; ~PidlGuard() { if (p) ILFree(p); } };
+    PidlGuard fullGuard{ pidlFull };
 
     // Split pidlFull into parent folder + single-item child pidl.
-    PUIDLIST_RELATIVE pidlChild = (PUIDLIST_RELATIVE)ILFindLastID(pidlFull);
-    PIDLIST_ABSOLUTE pidlParent = ILClone(pidlFull);
+    // ILClone + ILRemoveLastID — guarded so the clone is always freed.
+    PUIDLIST_RELATIVE pidlChild  = (PUIDLIST_RELATIVE)ILFindLastID(pidlFull);
+    PIDLIST_ABSOLUTE  pidlParent = ILClone(pidlFull);
+    if (!pidlParent) return;
+    PidlGuard parentGuard{ pidlParent };
     ILRemoveLastID(pidlParent);
 
     IShellFolder* pDesktop = nullptr;
-    if (SUCCEEDED(SHGetDesktopFolder(&pDesktop))) {
-        IShellFolder* pParentFolder = nullptr;
-        // If pidlParent is empty, it means the item is on the desktop or is a drive root
-        if (ILIsEmpty(pidlParent)) {
-            pParentFolder = pDesktop;
-            pParentFolder->AddRef();
-        } else {
-            hr = pDesktop->BindToObject(pidlParent, nullptr, IID_PPV_ARGS(&pParentFolder));
-        }
+    if (FAILED(SHGetDesktopFolder(&pDesktop))) return;
 
-        if (SUCCEEDED(hr) && pParentFolder) {
-            PCUITEMID_CHILD pidlChildConst = pidlChild;
-            IContextMenu* pcm = nullptr;
-            hr = pParentFolder->GetUIObjectOf(hwnd, 1, &pidlChildConst, IID_IContextMenu, nullptr, (void**)&pcm);
-            if (SUCCEEDED(hr)) {
-                pcm->QueryInterface(IID_PPV_ARGS(&g_pCtxMenu3));
-                if (!g_pCtxMenu3) pcm->QueryInterface(IID_PPV_ARGS(&g_pCtxMenu2));
-
-                HMENU hMenu = CreatePopupMenu();
-                if (SUCCEEDED(pcm->QueryContextMenu(hMenu, 0, 1, 0x7FFF, CMF_NORMAL | CMF_EXPLORE))) {
-                    Logger::Log(L"[WhereIsIt] Context menu created, tracking popup...");
-                    int cmd = TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
-                                            screenPt.x, screenPt.y, 0, hwnd, nullptr);
-                    if (cmd > 0) {
-                        CMINVOKECOMMANDINFO ici = { sizeof(ici) };
-                        ici.fMask = 0; ici.hwnd = hwnd; ici.lpVerb = MAKEINTRESOURCEA(cmd - 1);
-                        ici.nShow = SW_SHOWNORMAL;
-                        hr = pcm->InvokeCommand(&ici);
-                        if (FAILED(hr)) {
-                            swprintf_s(debugBuf, L"[WhereIsIt] InvokeCommand failed (0x%08X)\n", hr);
-                            Logger::Log(debugBuf);
-                        }
-                    } else {
-                        Logger::Log(L"[WhereIsIt] Popup menu closed or failed.");
-                    }
-                }
-                DestroyMenu(hMenu);
-                if (g_pCtxMenu3) { g_pCtxMenu3->Release(); g_pCtxMenu3 = nullptr; }
-                if (g_pCtxMenu2) { g_pCtxMenu2->Release(); g_pCtxMenu2 = nullptr; }
-                pcm->Release();
-            } else {
-                swprintf_s(debugBuf, L"[WhereIsIt] GetUIObjectOf failed (0x%08X)\n", hr);
-                Logger::Log(debugBuf);
-            }
-            pParentFolder->Release();
-        } else {
-            swprintf_s(debugBuf, L"[WhereIsIt] BindToObject failed (0x%08X)\n", hr);
-            Logger::Log(debugBuf);
-        }
-        pDesktop->Release();
+    IShellFolder* pParentFolder = nullptr;
+    if (ILIsEmpty(pidlParent)) {
+        pParentFolder = pDesktop;
+        pParentFolder->AddRef();
+    } else {
+        hr = pDesktop->BindToObject(pidlParent, nullptr, IID_PPV_ARGS(&pParentFolder));
     }
-    ILFree(pidlParent);
-    ILFree(pidlFull);
+    pDesktop->Release();
+    if (FAILED(hr) || !pParentFolder) return;
+
+    PCUITEMID_CHILD pidlChildConst = pidlChild;
+    IContextMenu* pcm = nullptr;
+    hr = pParentFolder->GetUIObjectOf(hwnd, 1, &pidlChildConst, IID_IContextMenu, nullptr, (void**)&pcm);
+    pParentFolder->Release();
+    if (FAILED(hr) || !pcm) return;
+
+    pcm->QueryInterface(IID_PPV_ARGS(&g_pCtxMenu3));
+    if (!g_pCtxMenu3) pcm->QueryInterface(IID_PPV_ARGS(&g_pCtxMenu2));
+
+    HMENU hMenu = CreatePopupMenu();
+    if (SUCCEEDED(pcm->QueryContextMenu(hMenu, 0, 1, 0x7FFF, CMF_NORMAL | CMF_EXPLORE))) {
+        int cmd = TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                                 screenPt.x, screenPt.y, 0, hwnd, nullptr);
+        if (cmd > 0) {
+            CMINVOKECOMMANDINFO ici = { sizeof(ici) };
+            ici.fMask = 0; ici.hwnd = hwnd; ici.lpVerb = MAKEINTRESOURCEA(cmd - 1);
+            ici.nShow = SW_SHOWNORMAL;
+#ifdef _DEBUG
+            hr = pcm->InvokeCommand(&ici);
+            if (FAILED(hr)) Logger::Log(L"[WhereIsIt] InvokeCommand failed");
+#else
+            pcm->InvokeCommand(&ici);
+#endif
+        }
+    }
+    DestroyMenu(hMenu);
+    if (g_pCtxMenu3) { g_pCtxMenu3->Release(); g_pCtxMenu3 = nullptr; }
+    if (g_pCtxMenu2) { g_pCtxMenu2->Release(); g_pCtxMenu2 = nullptr; }
+    pcm->Release();
 }
 
 // --- CUSTOM DRAW ENGINE (Bolding Match) ---
@@ -486,6 +482,7 @@ void SetViewMode(HWND hWnd, int viewId) {
 
     HMENU hMenu = GetMenu(hWnd);
     CheckMenuRadioItem(hMenu, IDM_VIEW_EXTRALARGE, IDM_VIEW_DETAILS, viewId, MF_BYCOMMAND);
+    g_LastViewMode = viewId;  // persist this for settings save
 
     if (g_CurrentViewMode == newMode && g_CurrentIconSize == newSize) return;
 
@@ -539,7 +536,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         LOGFONT lf; GetObject(g_FontNormal, sizeof(lf), &lf);
         lf.lfWeight = FW_BOLD; g_FontBold = CreateFontIndirect(&lf);
         SendMessage(hSearchEdit, WM_SETFONT, (WPARAM)g_FontNormal, TRUE);
+        // Pre-warm both icon indices on the UI thread before workers start.
+        // This avoids a lazy-init race where multiple LVN_GETDISPINFO calls
+        // on different threads all see g_fileIconIdx == -1 simultaneously.
+        {
+            SHFILEINFOW sfi2 = { 0 };
+            SHGetFileInfoW(L".txt", FILE_ATTRIBUTE_NORMAL, &sfi2, sizeof(sfi2),
+                           SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+            g_fileIconIdx = sfi2.iIcon;
+            sfi2 = { 0 };
+            SHGetFileInfoW(L"C:\\Windows", FILE_ATTRIBUTE_DIRECTORY, &sfi2, sizeof(sfi2),
+                           SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+            g_folderIconIdx = sfi2.iIcon;
+        }
         g_Engine->SetNotifyWindow(hWnd);
+        // Start workers BEFORE SetViewMode so the worker threads are alive
+        // when SetViewMode bumps g_iconGeneration and may enqueue the first requests.
         g_iconWorkerRunning = true;
         auto workerFn = [hWnd]() {
             CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);  // STA required for IShellItemImageFactory
@@ -682,8 +694,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SetWindowTextW(hSearchEdit, g_InitialSearchPath.c_str());
         }
 
+        // Restore persisted view mode and sort direction now that all workers are running.
+        SetViewMode(hWnd, g_LastViewMode);
+        SetSortIcon(g_SortColumn, g_SortDescending);
+
+        // Sync the View menu radio item to the loaded view mode.
         HMENU hMenu = GetMenu(hWnd);
-        CheckMenuRadioItem(hMenu, IDM_VIEW_EXTRALARGE, IDM_VIEW_DETAILS, IDM_VIEW_DETAILS, MF_BYCOMMAND);
+        CheckMenuRadioItem(hMenu, IDM_VIEW_EXTRALARGE, IDM_VIEW_DETAILS, g_LastViewMode, MF_BYCOMMAND);
 
         break;
     }
@@ -773,26 +790,50 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
         }
         if (bValidSize && g_ActiveResults && g_CurrentViewMode != LV_VIEW_DETAILS && g_hCustomImageList) {
-            // Cap the image list at MAX_ICON_CACHE_ENTRIES to bound GDI memory usage.
-            // 500 × 256px × 256px × 4B ≈ 128 MB at the largest view size.
             int currentCount = ImageList_GetImageCount(g_hCustomImageList);
+            int imgIdx = -1;
             if (currentCount < MAX_ICON_CACHE_ENTRIES) {
-                int imgIdx = ImageList_Add(g_hCustomImageList, hBmp, NULL);
-                if (imgIdx >= 0) {
+                imgIdx = ImageList_Add(g_hCustomImageList, hBmp, NULL);
+            } else {
+                // LRU eviction: replace the first off-screen slot.
+                int top    = ListView_GetTopIndex(hFileList);
+                int perPg  = ListView_GetCountPerPage(hFileList);
+                int bottom = top + perPg + 1;
+                int evictSlot = 0;
+                uint32_t evictRecord = 0;
+                {
                     std::lock_guard<std::mutex> lock(g_iconMutex);
-                    g_recordIconCache[recordIdx] = imgIdx;
+                    for (auto& kv : g_recordIconCache) {
+                        if (!g_ActiveResults) break;
+                        auto& res = *g_ActiveResults;
+                        bool visible = false;
+                        for (int vi = top; vi < bottom && vi < (int)res.size(); ++vi) {
+                            if (res[vi] == kv.first) { visible = true; break; }
+                        }
+                        if (!visible) { evictSlot = kv.second; evictRecord = kv.first; break; }
+                    }
+                    // Erase old mapping under the same lock — avoids a second lock acquisition.
+                    g_recordIconCache.erase(evictRecord);
                 }
-                InvalidateRect(hFileList, NULL, FALSE);
+                imgIdx = evictSlot;
+                ImageList_Replace(g_hCustomImageList, evictSlot, hBmp, NULL);
             }
-            // If the cap is reached: bitmap is deleted below, item keeps showing default icon.
-            // This is intentional — memory safety over completeness.
+            if (imgIdx >= 0) {
+                std::lock_guard<std::mutex> lock(g_iconMutex);
+                g_recordIconCache[recordIdx] = imgIdx;
+            }
+            InvalidateRect(hFileList, NULL, FALSE);
         }
         if (hBmp) DeleteObject(hBmp);
         return 0;
     }
     case WM_COMMAND:
         if (LOWORD(wParam) == IDC_SEARCH_EDIT && HIWORD(wParam) == EN_CHANGE) {
-            GetWindowText(hSearchEdit, g_CurrentQueryW, 256);
+            // Use GetWindowTextLength to avoid silent truncation into a fixed buffer.
+            int len = GetWindowTextLengthW(hSearchEdit);
+            if (len >= kMaxQueryChars) len = kMaxQueryChars - 1;
+            GetWindowTextW(hSearchEdit, g_CurrentQueryW, len + 1);
+            g_CurrentQueryW[len] = L'\0';
             UpdateHighlightTokens();
             TriggerSearch();
         } else {
@@ -940,7 +981,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         MoveWindow(hFileList, 0, SEARCH_BAR_HEIGHT + 2 * SEARCH_BAR_MARGIN, w, h - (SEARCH_BAR_HEIGHT + 2 * SEARCH_BAR_MARGIN) - (rs.bottom - rs.top), TRUE);
         break;
     }
-    case WM_DESTROY: 
+    case WM_DESTROY:
         {
             std::lock_guard<std::mutex> lock(g_iconMutex);
             std::deque<uint32_t>().swap(g_iconRequestQueue);
@@ -951,12 +992,79 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         g_iconWorkers.clear();
         if (g_hCustomImageList) { ImageList_Destroy(g_hCustomImageList); g_hCustomImageList = NULL; }
         if (g_FontNormal) DeleteObject(g_FontNormal);
-        if (g_FontBold) DeleteObject(g_FontBold); 
-        PostQuitMessage(0); 
+        if (g_FontBold) DeleteObject(g_FontBold);
+        SaveSettings(hWnd);
+        PostQuitMessage(0);
         break;
     default: return DefWindowProc(hWnd, msg, wParam, lParam);
     }
     return 0;
+}
+
+// --- Persistent Settings (ini file in %LOCALAPPDATA%\WhereIsIt\) ---
+
+static std::wstring GetSettingsPath() {
+    wchar_t* pLocal = nullptr;
+    std::wstring dir;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &pLocal)) && pLocal) {
+        dir = pLocal;
+        CoTaskMemFree(pLocal);
+        dir += L"\\WhereIsIt";
+        CreateDirectoryW(dir.c_str(), nullptr);
+    } else {
+        wchar_t exePath[MAX_PATH];
+        GetModuleFileNameW(NULL, exePath, MAX_PATH);
+        std::wstring s(exePath);
+        dir = s.substr(0, s.find_last_of(L'\\'));
+    }
+    return dir + L"\\settings.ini";
+}
+
+static void LoadSettings() {
+    const std::wstring ini = GetSettingsPath();
+    const wchar_t* S = ini.c_str();
+    auto GetInt = [&](const wchar_t* key, int def) {
+        return (int)GetPrivateProfileIntW(L"Search", key, def, S);
+    };
+    g_MatchCase       = GetInt(L"MatchCase",     0) != 0;
+    g_MatchWholeWord  = GetInt(L"MatchWholeWord",0) != 0;
+    g_MatchPath       = GetInt(L"MatchPath",     0) != 0;
+    g_MatchDiacritics = GetInt(L"Diacritics",    0) != 0;
+    g_EnableRegex     = GetInt(L"Regex",         0) != 0;
+    int filt = (int)GetPrivateProfileIntW(L"Search", L"FileTypeFilter", IDM_FILTER_EVERYTHING, S);
+    // Validate against known filter IDs to guard against a corrupted ini.
+    if (filt == IDM_FILTER_EVERYTHING || filt == IDM_FILTER_AUDIO ||
+        filt == IDM_FILTER_COMPRESSED || filt == IDM_FILTER_DOCUMENT ||
+        filt == IDM_FILTER_EXECUTABLE || filt == IDM_FILTER_FOLDER  ||
+        filt == IDM_FILTER_PICTURE    || filt == IDM_FILTER_VIDEO)
+        g_FileTypeFilter = filt;
+
+    int view = (int)GetPrivateProfileIntW(L"View", L"Mode", IDM_VIEW_DETAILS, S);
+    if (view == IDM_VIEW_EXTRALARGE || view == IDM_VIEW_LARGE ||
+        view == IDM_VIEW_MEDIUM     || view == IDM_VIEW_DETAILS)
+        g_LastViewMode = view;  // applied after hWnd is created
+    g_SortColumn     = (int)GetPrivateProfileIntW(L"View", L"SortColumn",    0,     S);
+    g_SortDescending = (int)GetPrivateProfileIntW(L"View", L"SortDescending",0,     S) != 0;
+    if (g_SortColumn < 0 || g_SortColumn > 3) g_SortColumn = 0;
+}
+
+static void SaveSettings(HWND hWnd) {
+    const std::wstring ini = GetSettingsPath();
+    const wchar_t* S = ini.c_str();
+    auto WriteInt = [&](const wchar_t* sec, const wchar_t* key, int val) {
+        wchar_t buf[16]; swprintf_s(buf, L"%d", val);
+        WritePrivateProfileStringW(sec, key, buf, S);
+    };
+    WriteInt(L"Search", L"MatchCase",     g_MatchCase       ? 1 : 0);
+    WriteInt(L"Search", L"MatchWholeWord",g_MatchWholeWord  ? 1 : 0);
+    WriteInt(L"Search", L"MatchPath",     g_MatchPath       ? 1 : 0);
+    WriteInt(L"Search", L"Diacritics",    g_MatchDiacritics ? 1 : 0);
+    WriteInt(L"Search", L"Regex",         g_EnableRegex     ? 1 : 0);
+    WriteInt(L"Search", L"FileTypeFilter",g_FileTypeFilter);
+    WriteInt(L"View",   L"Mode",          g_LastViewMode);
+    WriteInt(L"View",   L"SortColumn",    g_SortColumn);
+    WriteInt(L"View",   L"SortDescending",g_SortDescending  ? 1 : 0);
+    UNREFERENCED_PARAMETER(hWnd);
 }
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nCmdShow) {
@@ -1000,6 +1108,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     INITCOMMONCONTROLSEX icex = { sizeof(INITCOMMONCONTROLSEX), ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES };
     InitCommonControlsEx(&icex);
     g_Engine->Start(); hInst = hInstance;
+    LoadSettings();
     int windowX = (GetSystemMetrics(SM_CXSCREEN) - WINDOW_WIDTH) / 2;
     int windowY = (GetSystemMetrics(SM_CYSCREEN) - WINDOW_HEIGHT) / 2;
     HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW, windowX, windowY, WINDOW_WIDTH, WINDOW_HEIGHT, nullptr, nullptr, hInstance, nullptr);
