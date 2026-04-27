@@ -644,7 +644,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             iconIdx = sfi.iIcon;
                     }
                     { std::lock_guard<std::mutex> lock(g_iconMutex); g_pendingIconRecords.erase(recordIdx); }
-                    PostMessage(hWnd, WM_USER_ICON_LOADED, (WPARAM)recordIdx, (LPARAM)iconIdx);
+                    if (IsRecordVisibleNow(recordIdx))
+                        PostMessage(hWnd, WM_USER_ICON_LOADED, (WPARAM)recordIdx, (LPARAM)iconIdx);
                 } else {
                     if (!IsRecordVisibleNow(recordIdx)) {
                         std::lock_guard<std::mutex> lock(g_iconMutex);
@@ -672,8 +673,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                 SIZE sz = { currentSize, currentSize };
                                 // Pass 1: fast cache-hit query (returns immediately if cached).
                                 HRESULT hr = pFac->GetImage(sz, SIIGBF_THUMBNAILONLY | SIIGBF_BIGGERSIZEOK, &hRaw);
-                                if (FAILED(hr)) {
+                                if (FAILED(hr) && IsRecordVisibleNow(recordIdx)) {
                                     // Pass 2: full decode (may take 50-300ms for large files).
+                                    // Only attempted if the item is still visible — avoids wasting
+                                    // 50-300ms on a full decode for an item the user already scrolled past.
                                     pFac->GetImage(sz, SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK, &hRaw);
                                 }
                                 pFac->Release();
@@ -714,13 +717,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     }
 
                     { std::lock_guard<std::mutex> lock(g_iconMutex); g_pendingIconRecords.erase(recordIdx); }
-                    // Only post if the generation hasn't changed since we started decoding.
-                    // If it changed the view switched or results refreshed; discard the bitmap.
+                    // Post only if generation is unchanged AND the item is still visible.
+                    // Generation change → view switched or results refreshed.
+                    // Visibility change → user scrolled away during decode.
+                    // Both cases: discard the bitmap to avoid stale UI updates and GDI leaks.
                     if (hComposited) {
-                        if (g_iconGeneration.load(std::memory_order_acquire) == genBefore)
+                        if (g_iconGeneration.load(std::memory_order_acquire) == genBefore && IsRecordVisibleNow(recordIdx))
                             PostMessage(hWnd, WM_USER_THUMBNAIL_LOADED, (WPARAM)recordIdx, (LPARAM)hComposited);
                         else
-                            DeleteObject(hComposited);  // stale — avoid leaking GDI bitmap
+                            DeleteObject(hComposited);
                     }
                 }
             }
