@@ -260,12 +260,6 @@ static bool WriteClientMessage(HANDLE hPipe, const void* buffer, DWORD bytesToWr
     return ok == TRUE && bytesWritten == bytesToWrite;
 }
 
-// Global Results mapping kept alive between transactions so the client can open
-// it after receiving the count response without a race against CloseHandle.
-// Protected by s_resultsMapMutex; only the most-recent transaction's map is held.
-static std::mutex s_resultsMapMutex;
-static HANDLE     s_hResultsMap = NULL;
-
 // Handles one connected client: read query → search → write results → close.
 // Runs in a detached thread so a slow client cannot block the accept loop.
 static void HandleClientTransaction(HANDLE hPipe, IndexingEngine* engine)
@@ -295,34 +289,15 @@ static void HandleClientTransaction(HANDLE hPipe, IndexingEngine* engine)
     uint32_t count = static_cast<uint32_t>(
         (std::min)(results->size(), static_cast<size_t>(kMaxResultCount)));
 
-    // Publish results into Global\WhereIsIt_Results shared memory.
-    HANDLE hNewMap = NULL;
-    if (count > 0) {
-        hNewMap = CreateFileMappingW(INVALID_HANDLE_VALUE, GetSharedMemoryReadOnlySA(),
-            PAGE_READWRITE, 0, count * sizeof(uint32_t), L"Global\\WhereIsIt_Results");
-        if (hNewMap) {
-            void* pView = MapViewOfFile(hNewMap, FILE_MAP_WRITE, 0, 0, count * sizeof(uint32_t));
-            if (pView) {
-                memcpy(pView, results->data(), count * sizeof(uint32_t));
-                UnmapViewOfFile(pView);
-            }
-        }
-    }
+    std::vector<uint8_t> response(sizeof(uint32_t) + static_cast<size_t>(count) * sizeof(uint32_t));
+    memcpy(response.data(), &count, sizeof(uint32_t));
+    if (count > 0)
+        memcpy(response.data() + sizeof(uint32_t), results->data(), count * sizeof(uint32_t));
 
-    WriteClientMessage(hPipe, &count, sizeof(count));
+    WriteClientMessage(hPipe, response.data(), static_cast<DWORD>(response.size()));
     FlushFileBuffers(hPipe);
     DisconnectNamedPipe(hPipe);
     CloseHandle(hPipe);
-
-    // Keep the new map alive until the next transaction replaces it,
-    // so the client can OpenFileMappingW after receiving the count without racing.
-    {
-        std::lock_guard<std::mutex> lk(s_resultsMapMutex);
-        HANDLE old    = s_hResultsMap;
-        s_hResultsMap = hNewMap;
-        hNewMap       = old;
-    }
-    if (hNewMap) CloseHandle(hNewMap);
 }
 
 void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
@@ -359,9 +334,6 @@ void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
                     CancelIo(hPipe);
                     CloseHandle(ov.hEvent);
                     CloseHandle(hPipe);
-                    // Drain the global Results map on clean shutdown.
-                    std::lock_guard<std::mutex> lk(s_resultsMapMutex);
-                    if (s_hResultsMap) { CloseHandle(s_hResultsMap); s_hResultsMap = NULL; }
                     return;
                 }
                 if (w == WAIT_OBJECT_0 + 1) {
@@ -380,10 +352,6 @@ void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
 
         std::thread(HandleClientTransaction, hPipe, engine).detach();
     }
-
-    // Drain the global Results map on loop exit.
-    std::lock_guard<std::mutex> lk(s_resultsMapMutex);
-    if (s_hResultsMap) { CloseHandle(s_hResultsMap); s_hResultsMap = NULL; }
 }
 
 // ---------------------------------------------------------------------------
