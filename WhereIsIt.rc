@@ -72,6 +72,7 @@ BEGIN
         MENUITEM SEPARATOR
         MENUITEM "&Everything",                  IDM_FILTER_EVERYTHING
         MENUITEM "&Audio",                       IDM_FILTER_AUDIO
+        MENUITEM "C&ode",                        IDM_FILTER_CODE
         MENUITEM "C&ompressed",                  IDM_FILTER_COMPRESSED
         MENUITEM "&Document",                    IDM_FILTER_DOCUMENT
         MENUITEM "E&xecutable",                  IDM_FILTER_EXECUTABLE

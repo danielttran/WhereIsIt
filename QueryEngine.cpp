@@ -336,6 +336,7 @@ QueryPlan BuildQueryPlan(const std::string& rawQuery) {
             // can apply the filter inline without constructing an OR-clause AST.
             std::string filt = low.substr(8);
             if      (filt == "audio")      plan.Config.ExtWhitelist = s_audioExts;
+            else if (filt == "code")       plan.Config.ExtWhitelist = s_codeExts;
             else if (filt == "compressed") plan.Config.ExtWhitelist = s_compressedExts;
             else if (filt == "document")   plan.Config.ExtWhitelist = s_documentExts;
             else if (filt == "executable") plan.Config.ExtWhitelist = s_executableExts;

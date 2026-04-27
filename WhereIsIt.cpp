@@ -89,6 +89,7 @@ static void TriggerSearch() {
     // so the engine's AVX2 fast loops apply the filter inline with zero AST overhead.
     const char* extFiltName = nullptr;
     if      (g_FileTypeFilter == IDM_FILTER_AUDIO)      extFiltName = "extfilt:audio";
+    else if (g_FileTypeFilter == IDM_FILTER_CODE)        extFiltName = "extfilt:code";
     else if (g_FileTypeFilter == IDM_FILTER_COMPRESSED)  extFiltName = "extfilt:compressed";
     else if (g_FileTypeFilter == IDM_FILTER_DOCUMENT)    extFiltName = "extfilt:document";
     else if (g_FileTypeFilter == IDM_FILTER_EXECUTABLE)  extFiltName = "extfilt:executable";
@@ -881,6 +882,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             case IDM_FILTER_FOLDER:
             case IDM_FILTER_PICTURE:
             case IDM_FILTER_VIDEO:
+            case IDM_FILTER_CODE:
                 g_FileTypeFilter = wmId;
                 TriggerSearch();
                 break;
@@ -954,7 +956,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             CheckMenuItem(hPopup, IDM_SEARCH_DIACRITICS, g_MatchDiacritics ? MF_CHECKED : MF_UNCHECKED);
             CheckMenuItem(hPopup, IDM_SEARCH_REGEX,      g_EnableRegex     ? MF_CHECKED : MF_UNCHECKED);
             // Radio bullet for active file-type filter
-            CheckMenuRadioItem(hPopup, IDM_FILTER_EVERYTHING, IDM_FILTER_VIDEO, g_FileTypeFilter, MF_BYCOMMAND);
+            CheckMenuRadioItem(hPopup, IDM_FILTER_EVERYTHING, IDM_FILTER_CODE, g_FileTypeFilter, MF_BYCOMMAND);
             return 0;
         }
         if (g_pCtxMenu3) { g_pCtxMenu3->HandleMenuMsg(WM_INITMENUPOPUP, wParam, lParam); return 0; }

@@ -43,6 +43,7 @@
 #define IDM_FILTER_FOLDER       165
 #define IDM_FILTER_PICTURE      166
 #define IDM_FILTER_VIDEO        167
+#define IDM_FILTER_CODE         168
 
 // Advanced search dialog
 #define IDD_ADVANCED_SEARCH     170
