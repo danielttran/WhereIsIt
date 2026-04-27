@@ -30,32 +30,50 @@
 
 IndexingEngine::IndexingEngine() : m_running(false), m_ready(false), m_pool(true), m_isSearchRequested(false), m_isSortOnlyRequested(false) {
     m_hDataMutex = CreateMutexW(GetSharedMemoryReadOnlySA(), FALSE, L"Global\\WhereIsIt_DataMutex");
+    if (!m_hDataMutex) m_hDataMutex = CreateMutexW(NULL, FALSE, L"Local\\WhereIsIt_DataMutex");
 
 
     m_hRecordsCountMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, GetSharedMemoryReadOnlySA(), PAGE_READWRITE, 0,
-        sizeof(std::atomic<uint32_t>), L"Global\\WhereIsIt_RecordsCount");
+        sizeof(LONG), L"Global\\WhereIsIt_RecordsCount");
+    if (!m_hRecordsCountMapping) {
+        m_hRecordsCountMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0,
+            sizeof(LONG), L"Local\\WhereIsIt_RecordsCount");
+    }
 
     if (m_hRecordsCountMapping) {
+        bool alreadyExists = (GetLastError() == ERROR_ALREADY_EXISTS);
         uint8_t* base = (uint8_t*)MapViewOfFile(m_hRecordsCountMapping, FILE_MAP_ALL_ACCESS, 0, 0, 0);
         if (base) {
-            m_recordsCount = (std::atomic<uint32_t>*)base;
-            m_recordsCount->store(0, std::memory_order_release);
+            m_recordsCount = (volatile LONG*)base;
+            if (!alreadyExists) {
+                InterlockedExchange(m_recordsCount, 0);
+            }
         }
     }
     
     m_hDrivesMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, GetSharedMemoryReadOnlySA(), PAGE_READWRITE,
         0, 64 * 4 * sizeof(wchar_t), L"Global\\WhereIsIt_Drives");
+    if (!m_hDrivesMapping) {
+        m_hDrivesMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+            0, 64 * 4 * sizeof(wchar_t), L"Local\\WhereIsIt_Drives");
+    }
     if (m_hDrivesMapping) {
         m_driveLettersShared = (wchar_t(*)[4])MapViewOfFile(m_hDrivesMapping, FILE_MAP_WRITE, 0, 0, 64 * 4 * sizeof(wchar_t));
         if (m_driveLettersShared && GetLastError() != ERROR_ALREADY_EXISTS) {
             memset(m_driveLettersShared, 0, 64 * 4 * sizeof(wchar_t));
         }
     }
+
+    m_hDataChangedEvent = CreateEventW(GetSharedMemoryReadOnlySA(), FALSE, FALSE, L"Global\\WhereIsIt_DataChanged");
+    if (!m_hDataChangedEvent) m_hDataChangedEvent = CreateEventW(NULL, FALSE, FALSE, L"Local\\WhereIsIt_DataChanged");
     
     m_currentResults = std::make_shared<std::vector<uint32_t>>();
 }
 
-IndexingEngine::~IndexingEngine() { Stop(); }
+IndexingEngine::~IndexingEngine() { 
+    Stop(); 
+    if (m_hDataChangedEvent) CloseHandle(m_hDataChangedEvent);
+}
 
 void IndexingEngine::Start() {
     if (m_running) return;
@@ -106,9 +124,15 @@ uint32_t IndexingEngine::FetchVolumeSerialNumber(const std::wstring& drive) {
 }
 
 std::wstring IndexingEngine::ResolveIndexSavePath() {
-    wchar_t exePath[MAX_PATH];
-    GetModuleFileNameW(NULL, exePath, MAX_PATH);
-    std::wstring s(exePath);
+    std::vector<wchar_t> exePathBuf(MAX_PATH);
+    DWORD len = 0;
+    while (true) {
+        len = GetModuleFileNameW(NULL, exePathBuf.data(), (DWORD)exePathBuf.size());
+        if (len == 0) return L"";
+        if (len < exePathBuf.size()) break;
+        exePathBuf.resize(exePathBuf.size() * 2);
+    }
+    std::wstring s(exePathBuf.data(), len);
     return s.substr(0, s.find_last_of(L'\\')) + L"\\index.dat";
 }
 
@@ -138,28 +162,20 @@ bool IndexingEngine::SaveIndex(const std::wstring& filePath) {
         poolSize +
         (uint64_t)giantCount  * (sizeof(uint32_t) + sizeof(uint64_t));
 
-    struct Handle {
-        HANDLE h = INVALID_HANDLE_VALUE;
-        Handle() = default;
-        explicit Handle(HANDLE h_) : h(h_) {}
-        ~Handle() { if (h != INVALID_HANDLE_VALUE && h != NULL) CloseHandle(h); }
-        Handle(const Handle&) = delete;
-        Handle& operator=(const Handle&) = delete;
-    };
-
-    Handle hFile(CreateFileW(tmpPath.c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL,
+    UniqueHandle hFile(CreateFileW(tmpPath.c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL,
                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL));
-    if (hFile.h == INVALID_HANDLE_VALUE) return false;
+    if (!hFile.is_valid()) return false;
 
     LARGE_INTEGER li; li.QuadPart = (LONGLONG)fileSize;
-    if (!SetFilePointerEx(hFile.h, li, NULL, FILE_BEGIN) || !SetEndOfFile(hFile.h)) {
+    if (!SetFilePointerEx(hFile.get(), li, NULL, FILE_BEGIN) || !SetEndOfFile(hFile.get())) {
         DeleteFileW(tmpPath.c_str()); return false;
     }
 
-    Handle hMap(CreateFileMappingW(hFile.h, NULL, PAGE_READWRITE, 0, 0, NULL));
-    if (!hMap.h) { DeleteFileW(tmpPath.c_str()); return false; }
+    UniqueHandle hMap(CreateFileMappingW(hFile.get(), NULL, PAGE_READWRITE, 0, 0, NULL));
+    if (!hMap.is_valid()) { DeleteFileW(tmpPath.c_str()); return false; }
 
-    uint8_t* base = (uint8_t*)MapViewOfFile(hMap.h, FILE_MAP_WRITE, 0, 0, 0);
+    UniqueMapView baseView(MapViewOfFile(hMap.get(), FILE_MAP_WRITE, 0, 0, 0));
+    uint8_t* base = (uint8_t*)baseView.get();
     if (!base) { DeleteFileW(tmpPath.c_str()); return false; }
 
     uint8_t* p = base;
@@ -190,9 +206,9 @@ bool IndexingEngine::SaveIndex(const std::wstring& filePath) {
     }
 
     FlushViewOfFile(base, 0);
-    UnmapViewOfFile(base);
-    CloseHandle(hMap.h);  hMap.h  = NULL;
-    CloseHandle(hFile.h); hFile.h = INVALID_HANDLE_VALUE;
+    baseView.reset();
+    hMap.reset();
+    hFile.reset();
 
     if (!MoveFileExW(tmpPath.c_str(), filePath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         DeleteFileW(tmpPath.c_str()); return false;
@@ -202,47 +218,38 @@ bool IndexingEngine::SaveIndex(const std::wstring& filePath) {
 
 bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
     auto clearState = [this]() {
-        if (m_recordsCount) m_recordsCount->store(0, std::memory_order_release);
+        if (m_recordsCount) InterlockedExchange(m_recordsCount, 0);
         m_mftLookupTables.clear(); m_pool.Clear(); m_giantFileSizes.clear();
         std::lock_guard<std::mutex> cacheLock(m_nameCacheMutex);
         m_nameCache.clear();
         m_nameCacheLru.clear();
     };
 
-    struct Handle {
-        HANDLE h = INVALID_HANDLE_VALUE;
-        Handle() = default;
-        explicit Handle(HANDLE h_) : h(h_) {}
-        ~Handle() { if (h != INVALID_HANDLE_VALUE && h != NULL) CloseHandle(h); }
-        Handle(const Handle&) = delete;
-        Handle& operator=(const Handle&) = delete;
-    };
-
-    Handle hFile(CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
+    UniqueHandle hFile(CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL));
-    if (hFile.h == INVALID_HANDLE_VALUE) {
+    if (!hFile.is_valid()) {
         Logger::Log(L"[WhereIsIt] index.dat not found or could not be opened.");
         return false;
     }
 
     LARGE_INTEGER fileSize = {};
-    if (!GetFileSizeEx(hFile.h, &fileSize) || fileSize.QuadPart < (LONGLONG)(sizeof(uint32_t) * 6)) {
+    if (!GetFileSizeEx(hFile.get(), &fileSize) || fileSize.QuadPart < (LONGLONG)(sizeof(uint32_t) * 6)) {
         Logger::Log(L"[WhereIsIt] index.dat too small.");
         return false;
     }
 
-    Handle hMap(CreateFileMappingW(hFile.h, NULL, PAGE_READONLY, 0, 0, NULL));
-    if (!hMap.h) {
+    UniqueHandle hMap(CreateFileMappingW(hFile.get(), NULL, PAGE_READONLY, 0, 0, NULL));
+    if (!hMap.is_valid()) {
         Logger::Log(L"[WhereIsIt] Failed to create file mapping.");
         return false;
     }
 
-    const uint8_t* base = (const uint8_t*)MapViewOfFile(hMap.h, FILE_MAP_READ, 0, 0, 0);
+    UniqueMapView baseView(MapViewOfFile(hMap.get(), FILE_MAP_READ, 0, 0, 0));
+    const uint8_t* base = (const uint8_t*)baseView.get();
     if (!base) {
         Logger::Log(L"[WhereIsIt] Failed to map index view.");
         return false;
     }
-    struct ViewGuard { const uint8_t* p; ~ViewGuard() { if (p) UnmapViewOfFile(p); } } vg{ base };
 
     const uint8_t* const end = base + (size_t)fileSize.QuadPart;
     const uint8_t* p = base;
@@ -322,9 +329,9 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
 
     // --- Commit under exclusive write lock ---
     std::unique_lock<std::shared_mutex> dataLock(m_dataMutex);
-    if (m_recordsCount) m_recordsCount->store(0, std::memory_order_relaxed);
+    if (m_recordsCount) InterlockedExchange(m_recordsCount, 0);
     m_recordPool.LoadFromVector(tempRecords);
-    if (m_recordsCount) m_recordsCount->store((uint32_t)tempRecords.size(), std::memory_order_release);
+    if (m_recordsCount) InterlockedExchange(m_recordsCount, (LONG)tempRecords.size());
     m_mftLookupTables = std::move(tempLookup);
     m_giantFileSizes  = std::move(tempGiant);
     return true;
@@ -759,27 +766,24 @@ void IndexingEngine::SearchThread() {
         // DEFAULT SEARCH WITH WILDCARDS AND PATHS
         size_t lastSlash = term.find_last_of("\\/");
         if (lastSlash != std::string::npos) {
-            // Path-based search
+            bool hasWildcard = term.find_first_of("*?") != std::string::npos;
+            if (!hasWildcard) {
+                // Just a path substring like "C:\Program" or "src\main"
+                return FastContains(getFullPath().c_str(), term, plan.Config.CaseSensitive);
+            }
+            
+            // Path-based search with wildcards
             std::string dirPart = term.substr(0, lastSlash + 1);
             std::string filePart = term.substr(lastSlash + 1);
 
             if (!filePart.empty()) {
-                bool matchName = false;
-                if (filePart.find_first_of("*?") != std::string::npos) {
-                    matchName = WildcardMatchIAscii(filePart.c_str(), name);
-                } else {
-                    // Exact filename match: C:\Windows\dd.exe must only match "dd.exe",
-                    // not substrings like "odd.exe". Wildcard form *dd.exe is handled above.
-                    if (plan.Config.CaseSensitive)
-                        matchName = (strcmp(name, filePart.c_str()) == 0);
-                    else
-                        matchName = (FastCompareIgnoreCase(name, filePart.c_str()) == 0);
-                }
-                if (!matchName) return false;
+                if (!WildcardMatchIAscii(filePart.c_str(), name)) return false;
             }
 
             std::string p = getFullPath();
-            if (!p.empty() && !FastContains(p.c_str(), dirPart, plan.Config.CaseSensitive)) return false;
+            if (!p.empty()) {
+                 if (!FastContains(p.c_str(), dirPart, plan.Config.CaseSensitive)) return false;
+            } else return false;
             return true;
         }
 
@@ -1014,12 +1018,12 @@ void IndexingEngine::SearchThread() {
                         // path lazily only for records whose filename already matched.
                         auto isPathQuery = [&]() -> bool {
                             if (plan.Tokens.size() != 1 || plan.Root == nullptr || plan.Root->Type != QueryNodeType::Term) return false;
-                            if (plan.Config.RegexMode || plan.Config.WholeWord || plan.Config.MatchPath) return false;
+                            if (plan.Config.RegexMode || plan.Config.WholeWord) return false;
                             bool hasSlash = false;
                             const std::string& exprTerm = plan.Tokens[0];
                             for (size_t ci = 0; ci < exprTerm.size(); ++ci) {
                                 char c = exprTerm[ci];
-                                if (c == ' ' || c == '\t' || c == '(' || c == ')' || c == '"') return false;
+                                if (c == ' ' || c == '\t' || c == '"') return false;
                                 if (c == '\\' || c == '/') { hasSlash = true; continue; }
                                 if (c == ':' && ci != 1) return false;
                             }
@@ -1035,69 +1039,115 @@ void IndexingEngine::SearchThread() {
                             bool caseSensitive   = plan.Config.CaseSensitive;
 
                             auto pathLoop = [&](uint32_t count, auto getIndex) {
-                                for (uint32_t i = 0; i < count; ++i) {
-                                    if ((i & 0x3F) == 0) {
-                                        if (m_isSearchRequested.load(std::memory_order_relaxed)) return;
-                                    }
-                                    uint32_t idx = getIndex(i);
-                                    const auto& rec = m_recordPool.GetRecord(idx);
-                                    if (rec.MftIndex == kInvalidIndex) continue;
-
-                                    const char* name = m_pool.GetString(rec.NamePoolOffset);
-
-                                    // 1. Check filename (no allocation, no full-path construction)
-                                    if (!filePart.empty()) {
-                                        bool matchName = false;
-                                        if (fileHasWildcard) {
-                                            matchName = WildcardMatchIAscii(filePart.c_str(), name);
-                                        } else {
-                                            matchName = caseSensitive
-                                                ? (strcmp(name, filePart.c_str()) == 0)
-                                                : (FastCompareIgnoreCase(name, filePart.c_str()) == 0);
+                                const unsigned int hw = std::thread::hardware_concurrency();
+                                const uint32_t workerCount = (std::min)((uint32_t)(hw ? hw : 4), (uint32_t)8);
+                                if (workerCount < 2 || count < 100000) {
+                                    for (uint32_t i = 0; i < count; ++i) {
+                                        if ((i & 0x3F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) return;
+                                        uint32_t idx = getIndex(i);
+                                        const auto& rec = m_recordPool.GetRecord(idx);
+                                        if (rec.MftIndex == kInvalidIndex) continue;
+                                        const char* name = m_pool.GetString(rec.NamePoolOffset);
+                                        if (!filePart.empty()) {
+                                            bool matchName = fileHasWildcard ? WildcardMatchIAscii(filePart.c_str(), name) : (caseSensitive ? (strcmp(name, filePart.c_str()) == 0) : (FastCompareIgnoreCase(name, filePart.c_str()) == 0));
+                                            if (!matchName) continue;
                                         }
-                                        if (!matchName) continue;
+                                        std::string fullPath = GetFullPathUTF8Internal(idx);
+                                        if (!dirPart.empty() && !FastContains(fullPath.c_str(), dirPart, caseSensitive)) continue;
+                                        if (hasExtFilter && !passesFilter(rec, name)) continue;
+                                        results->push_back(idx);
                                     }
-
-                                    // 2. Filename matched — now check dir (lazy, only for hits)
-                                    if (!dirPart.empty()) {
-                                        std::string fullPath = WideToUtf8(GetFullPathInternal(idx));
-                                        if (!FastContains(fullPath.c_str(), dirPart, caseSensitive)) continue;
-                                    }
-
-                                    if (hasExtFilter && !passesFilter(rec, name)) continue;
-                                    results->push_back(idx);
+                                    return;
                                 }
+
+                                std::vector<std::vector<uint32_t>> chunks(workerCount);
+                                std::vector<std::thread> workers;
+                                auto workerFn = [&](uint32_t b, uint32_t e, uint32_t wId) {
+                                    auto& local = chunks[wId];
+                                    for (uint32_t i = b; i < e; ++i) {
+                                        if ((i & 0x7F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) return;
+                                        uint32_t idx = getIndex(i);
+                                        const auto& rec = m_recordPool.GetRecord(idx);
+                                        if (rec.MftIndex == kInvalidIndex) continue;
+                                        const char* name = m_pool.GetString(rec.NamePoolOffset);
+                                        if (!filePart.empty()) {
+                                            bool matchName = fileHasWildcard ? WildcardMatchIAscii(filePart.c_str(), name) : (caseSensitive ? (strcmp(name, filePart.c_str()) == 0) : (FastCompareIgnoreCase(name, filePart.c_str()) == 0));
+                                            if (!matchName) continue;
+                                        }
+                                        std::string fullPath = GetFullPathUTF8Internal(idx);
+                                        if (!dirPart.empty() && !FastContains(fullPath.c_str(), dirPart, caseSensitive)) continue;
+                                        if (hasExtFilter && !passesFilter(rec, name)) continue;
+                                        local.push_back(idx);
+                                    }
+                                };
+                                uint32_t b = 0, sz = count / workerCount, r = count % workerCount;
+                                for (uint32_t w = 0; w < workerCount; ++w) {
+                                    uint32_t e = b + sz + (w < r ? 1 : 0);
+                                    if (w == 0) workerFn(b, e, w); else workers.emplace_back(workerFn, b, e, w);
+                                    b = e;
+                                }
+                                for (auto& t : workers) t.join();
+                                if (m_isSearchRequested.load(std::memory_order_relaxed)) { results->clear(); return; }
+                                for (auto& c : chunks) results->insert(results->end(), c.begin(), c.end());
                             };
-                            if (usePreSorted)
-                                pathLoop((uint32_t)m_preSortedByName.size(), [&](uint32_t i) { return m_preSortedByName[i]; });
-                            else
-                                pathLoop((uint32_t)GetRecordCount(), [&](uint32_t i) { return i; });
+                            if (usePreSorted) pathLoop((uint32_t)m_preSortedByName.size(), [&](uint32_t i) { return m_preSortedByName[i]; });
+                            else pathLoop((uint32_t)GetRecordCount(), [&](uint32_t i) { return i; });
                         } else {
                             // FULL PATH: complex query with operators/modifiers — uses evaluateTerm.
                             auto evalLoop = [&](uint32_t count, auto getIndex) {
-                                for (uint32_t i = 0; i < count; ++i) {
-                                    if ((i & 0x3F) == 0) {
-                                        if (m_isSearchRequested.load(std::memory_order_relaxed)) return;
+                                const unsigned int hw = std::thread::hardware_concurrency();
+                                const uint32_t workerCount = (std::min)((uint32_t)(hw ? hw : 4), (uint32_t)8);
+                                if (workerCount < 2 || count < 100000) {
+                                    for (uint32_t i = 0; i < count; ++i) {
+                                        if ((i & 0x3F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) return;
+                                        uint32_t idx = getIndex(i);
+                                        const auto& rec = m_recordPool.GetRecord(idx);
+                                        if (rec.MftIndex == kInvalidIndex) continue;
+                                        const char* namePtr = m_pool.GetString(rec.NamePoolOffset);
+                                        std::string cachedPath; bool pathCached = false;
+                                        auto getPath = [&]() -> std::string {
+                                            if (!pathCached) { cachedPath = GetFullPathUTF8Internal(idx); pathCached = true; }
+                                            return cachedPath;
+                                        };
+                                        if (!evaluateTerm(plan.Root.get(), plan, idx, rec, namePtr, getPath)) continue;
+                                        if (hasExtFilter && !passesFilter(rec, namePtr)) continue;
+                                        results->push_back(idx);
                                     }
-                                    uint32_t idx = getIndex(i);
-                                    const auto& rec = m_recordPool.GetRecord(idx);
-                                    if (rec.MftIndex == kInvalidIndex) continue;
-                                    const char* namePtr = m_pool.GetString(rec.NamePoolOffset);
-                                    std::string cachedPath;
-                                    bool pathCached = false;
-                                    auto getPath = [&]() -> std::string {
-                                        if (!pathCached) { cachedPath = WideToUtf8(GetFullPathInternal(idx)); pathCached = true; }
-                                        return cachedPath;
-                                    };
-                                    if (!evaluateTerm(plan.Root.get(), plan, idx, rec, namePtr, getPath)) continue;
-                                    if (hasExtFilter && !passesFilter(rec, namePtr)) continue;
-                                    results->push_back(idx);
+                                    return;
                                 }
+
+                                std::vector<std::vector<uint32_t>> chunks(workerCount);
+                                std::vector<std::thread> workers;
+                                auto workerFn = [&](uint32_t b, uint32_t e, uint32_t wId) {
+                                    auto& local = chunks[wId];
+                                    for (uint32_t i = b; i < e; ++i) {
+                                        if ((i & 0x7F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) return;
+                                        uint32_t idx = getIndex(i);
+                                        const auto& rec = m_recordPool.GetRecord(idx);
+                                        if (rec.MftIndex == kInvalidIndex) continue;
+                                        const char* namePtr = m_pool.GetString(rec.NamePoolOffset);
+                                        std::string cachedPath; bool pathCached = false;
+                                        auto getPath = [&]() -> std::string {
+                                            if (!pathCached) { cachedPath = GetFullPathUTF8Internal(idx); pathCached = true; }
+                                            return cachedPath;
+                                        };
+                                        if (!evaluateTerm(plan.Root.get(), plan, idx, rec, namePtr, getPath)) continue;
+                                        if (hasExtFilter && !passesFilter(rec, namePtr)) continue;
+                                        local.push_back(idx);
+                                    }
+                                };
+                                uint32_t b = 0, sz = count / workerCount, r = count % workerCount;
+                                for (uint32_t w = 0; w < workerCount; ++w) {
+                                    uint32_t e = b + sz + (w < r ? 1 : 0);
+                                    if (w == 0) workerFn(b, e, w); else workers.emplace_back(workerFn, b, e, w);
+                                    b = e;
+                                }
+                                for (auto& t : workers) t.join();
+                                if (m_isSearchRequested.load(std::memory_order_relaxed)) { results->clear(); return; }
+                                for (auto& c : chunks) results->insert(results->end(), c.begin(), c.end());
                             };
-                            if (usePreSorted)
-                                evalLoop((uint32_t)m_preSortedByName.size(), [&](uint32_t i) { return m_preSortedByName[i]; });
-                            else
-                                evalLoop((uint32_t)GetRecordCount(), [&](uint32_t i) { return i; });
+                            if (usePreSorted) evalLoop((uint32_t)m_preSortedByName.size(), [&](uint32_t i) { return m_preSortedByName[i]; });
+                            else evalLoop((uint32_t)GetRecordCount(), [&](uint32_t i) { return i; });
                         }
                     }
                 }
@@ -1124,7 +1174,7 @@ void IndexingEngine::SearchThread() {
                 bool aborted = false;
                 for (size_t pi = 0; pi < n; ++pi) {
                     if ((pi & 0xFF) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) { aborted = true; break; }
-                    pathEntries.push_back({WideToUtf8(GetFullPathInternal((*results)[pi])), (*results)[pi]});
+                    pathEntries.push_back({GetFullPathUTF8Internal((*results)[pi]), (*results)[pi]});
                 }
                 if (!aborted) {
                     try {
@@ -1230,14 +1280,16 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
     // massive file-system events (e.g., node_modules installs creating tens of thousands
     // of files at once).
     constexpr size_t kEpochSize = 256;
-    std::unique_lock<std::shared_mutex> lock(m_dataMutex);
+    // Acquire global named mutex FIRST, before local shared_mutex to maintain correct
+    // lock order hierarchy and avoid cross-process deadlocks.
     if (m_hDataMutex) {
         DWORD wr = WaitForSingleObject(m_hDataMutex, INFINITE);
         if (wr != WAIT_OBJECT_0 && wr != WAIT_ABANDONED) return;
     }
+    std::unique_lock<std::shared_mutex> lock(m_dataMutex);
     
     // Pre-reserve memory to prevent OOB chunk access during rapid fetch_add index generation
-    uint32_t currentCount = m_recordsCount ? m_recordsCount->load(std::memory_order_relaxed) : 0;
+    uint32_t currentCount = m_recordsCount ? InterlockedCompareExchange(m_recordsCount, 0, 0) : 0;
     m_recordPool.Reserve(currentCount + deltas.size());
 
     for (size_t i = 0; i < deltas.size(); ++i) {
@@ -1306,6 +1358,9 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
                 rec.ParentRecordIndex = pIdx;
             }
         }
+        if (d.MftIndex >= 100000000) {
+            continue; // Ignore impossibly large MFT indices to prevent OOM
+        }
         if (d.MftIndex >= (uint32_t)m_mftLookupTables[di].size()) {
             try { m_mftLookupTables[di].resize(d.MftIndex + 10000, kInvalidIndex); }
             catch (const std::bad_alloc&) { continue; }
@@ -1344,19 +1399,23 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
             }
         } else {
             try {
-                uint32_t newIdx = m_recordsCount ? m_recordsCount->fetch_add(1, std::memory_order_relaxed) : 0;
-                m_recordPool.GetRecord(newIdx) = rec;
-                if (!m_preSortedByName.empty()) {
-                    auto it = std::lower_bound(m_preSortedByName.begin(), m_preSortedByName.end(), newIdx, [this](uint32_t a, uint32_t b) {
-                        const char* s1 = m_pool.GetString(m_recordPool.GetRecord(a).NamePoolOffset);
-                        const char* s2 = m_pool.GetString(m_recordPool.GetRecord(b).NamePoolOffset);
-                        int cmp = FastCompareIgnoreCase(s1 ? s1 : "", s2 ? s2 : "");
-                        return cmp != 0 ? (cmp < 0) : (a < b);
-                    });
-                    m_preSortedByName.insert(it, newIdx);
+                if (m_recordsCount) {
+                    uint32_t newIdx = (uint32_t)InterlockedExchangeAdd(m_recordsCount, 1);
+                    m_recordPool.Reserve(newIdx + 1);
+                    m_recordPool.GetRecord(newIdx) = rec;
+
+                    if (!m_preSortedByName.empty()) {
+                        auto it = std::lower_bound(m_preSortedByName.begin(), m_preSortedByName.end(), newIdx, [this](uint32_t a, uint32_t b) {
+                            const char* s1 = m_pool.GetString(m_recordPool.GetRecord(a).NamePoolOffset);
+                            const char* s2 = m_pool.GetString(m_recordPool.GetRecord(b).NamePoolOffset);
+                            int cmp = FastCompareIgnoreCase(s1 ? s1 : "", s2 ? s2 : "");
+                            return cmp != 0 ? (cmp < 0) : (a < b);
+                        });
+                        m_preSortedByName.insert(it, newIdx);
+                    }
+                    m_mftLookupTables[di][d.MftIndex] = newIdx;
+                    if (rec.IsGiantFile) m_giantFileSizes[newIdx] = d.FileSize;
                 }
-                m_mftLookupTables[di][d.MftIndex] = newIdx;
-                if (rec.IsGiantFile) m_giantFileSizes[newIdx] = d.FileSize;
             } catch (const std::bad_alloc&) {
                 continue;
             }
@@ -1364,16 +1423,17 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
 
         // Yield the exclusive lock every kEpochSize operations so readers can proceed.
         if ((i & (kEpochSize - 1)) == (kEpochSize - 1) && i + 1 < deltas.size()) {
-            if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
             lock.unlock();
+            if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
             std::this_thread::yield();
-            lock.lock();
             if (m_hDataMutex) {
                 DWORD wr = WaitForSingleObject(m_hDataMutex, INFINITE);
                 if (wr != WAIT_OBJECT_0 && wr != WAIT_ABANDONED) break;
             }
+            lock.lock();
         }
     }
+    lock.unlock();
     if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
 }
 
@@ -1628,7 +1688,7 @@ void IndexingEngine::PerformFullDriveScan() {
 
     {
         std::unique_lock<std::shared_mutex> lock(m_dataMutex);
-        if (m_recordsCount) m_recordsCount->store(0, std::memory_order_relaxed); m_pool.Clear(); m_mftLookupTables.clear(); m_giantFileSizes.clear();
+        if (m_recordsCount) InterlockedExchange(m_recordsCount, 0); m_pool.Clear(); m_mftLookupTables.clear(); m_giantFileSizes.clear();
         {
             std::lock_guard<std::mutex> cacheLock(m_nameCacheMutex);
             m_nameCache.clear();
@@ -1652,7 +1712,7 @@ void IndexingEngine::PerformFullDriveScan() {
             m_mftLookupTables[i] = std::move(ctx.LookupTable);
             
             // Pre-reserve memory for all incoming records from this drive
-            uint32_t currentCount = m_recordsCount ? m_recordsCount->load(std::memory_order_relaxed) : 0;
+            uint32_t currentCount = m_recordsCount ? InterlockedCompareExchange(m_recordsCount, 0, 0) : 0;
             m_recordPool.Reserve(currentCount + ctx.Records.size());
 
             for (uint32_t localRecordIdx = 0; localRecordIdx < (uint32_t)ctx.Records.size(); ++localRecordIdx) {
@@ -1671,7 +1731,7 @@ void IndexingEngine::PerformFullDriveScan() {
                     m_mftLookupTables[i][localIdx] = rec.MftIndex;
                 }
                 {
-                    uint32_t __newIdx = m_recordsCount ? m_recordsCount->fetch_add(1, std::memory_order_relaxed) : 0;
+                    uint32_t __newIdx = m_recordsCount ? InterlockedExchangeAdd(m_recordsCount, 1) : 0;
                     m_recordPool.GetRecord(__newIdx) = rec;
                 }
             }
@@ -1734,9 +1794,65 @@ void IndexingEngine::PropagateDirectorySizes() {
                 m_giantFileSizes.erase(parentIdx);
                 parent.IsGiantFile = 0;
             }
-        }
         parent.DirSizeComputed = 1;
+        }
+        if (m_hDataChangedEvent) SetEvent(m_hDataChangedEvent);
+        }
+    if (m_hDataChangedEvent) SetEvent(m_hDataChangedEvent);
+}
+
+std::string IndexingEngine::GetFullPathUTF8Internal(uint32_t recordIdx) const {
+    if (recordIdx >= GetRecordCount()) return "";
+
+    thread_local char parts[4096][256];
+    int partsCount = 0;
+
+    static constexpr uint32_t kBitCap = 4096;
+    static constexpr uint32_t kBitMask = kBitCap - 1;
+    thread_local bool visitedBit[kBitCap] = {};
+    thread_local uint32_t resetSlots[kBitCap];
+    int resetCount = 0;
+
+    uint32_t cur = recordIdx;
+    uint8_t rootDrive = 0;
+
+    while (partsCount < (int)kBitCap) {
+        uint32_t slot = cur & kBitMask;
+        if (visitedBit[slot]) break;
+        visitedBit[slot] = true;
+        resetSlots[resetCount++] = slot;
+
+        const FileRecord& r = m_recordPool.GetRecord(cur);
+        rootDrive = r.DriveIndex;
+        if (cur != recordIdx) {
+            const char* name = m_pool.GetString(r.NamePoolOffset);
+            if (name && (name[0] != '.' || (name[1] != '\0' && (name[1] != '.' || name[2] != '\0')))) {
+                size_t len = strlen(name);
+                if (len < 256) {
+                    memcpy(parts[partsCount++], name, len + 1);
+                }
+            }
+        }
+
+        uint32_t pi = r.ParentRecordIndex;
+        if (pi == 0xFFFFFFFF || pi >= GetRecordCount() || pi == cur) break;
+        cur = pi;
     }
+    for (int i = 0; i < resetCount; ++i) visitedBit[resetSlots[i]] = false;
+
+    std::string pa;
+    if (rootDrive < m_drives.size()) {
+        pa = m_drives[rootDrive].LetterUTF8;
+    } else {
+        pa = "X:\\";
+    }
+
+    for (int i = partsCount - 1; i >= 0; --i) {
+        pa += parts[i];
+        if (i > 0) pa += "\\";
+    }
+    
+    return pa;
 }
 
 void IndexingEngine::ScanGenericDrive(DriveScanContext& ctx, const std::wstring& rootPath, uint32_t pIdx, uint16_t pSeq, std::unordered_set<uint64_t>& visitedDirs) {
@@ -1828,10 +1944,12 @@ void IndexingEngine::ScanMftForDrive(DriveScanContext& ctx) {
             // Store the MFT run list for targeted random-access reads during the post-scan pass.
             struct MftRun { uint64_t vcnStart; int64_t lcnStart; uint64_t length; };
             std::vector<MftRun> mftRuns;
+            uint8_t* rEnd = r0.data() + cb;
             {
                 uint8_t* rl2 = rlBase; uint64_t vcn = 0; int64_t lcn = 0;
-                while (*rl2) {
+                while (rl2 < rEnd && *rl2) {
                     uint8_t hb = *rl2++; int ls = hb & 0xF, os = hb >> 4;
+                    if (rl2 + ls + os > rEnd) break;
                     uint64_t len = 0; for (int j = 0; j < ls; j++) len |= (uint64_t)(*rl2++) << (j * 8);
                     int64_t runOff = 0; for (int j = 0; j < os; j++) runOff |= (int64_t)(*rl2++) << (j * 8);
                     if (os > 0 && (runOff >> (os * 8 - 1)) & 1) for (int j = os; j < 8; j++) runOff |= (int64_t)0xFF << (j * 8);
@@ -1911,8 +2029,9 @@ void IndexingEngine::ScanMftForDrive(DriveScanContext& ctx) {
             std::vector<uint8_t> eb(1024 * 1024);
             std::vector<uint8_t> extBuf(nt.BytesPerFileRecordSegment);
 
-            while (*rl) {
+            while (rl < rEnd && *rl) {
                 uint8_t hb = *rl++; int ls = hb & 0xF, os = hb >> 4;
+                if (rl + ls + os > rEnd) break;
                 uint64_t len = 0; for (int j=0; j<ls; j++) len |= (uint64_t)(*rl++) << (j*8);
                 int64_t runOff = 0; for (int j=0; j<os; j++) runOff |= (int64_t)(*rl++) << (j*8);
                 if (os > 0 && (runOff >> (os*8-1))&1) for (int j=os; j<8; j++) runOff |= (int64_t)0xFF << (j*8);
@@ -2049,6 +2168,7 @@ void IndexingEngine::WorkerThread() {
                 }
             }
         }
+        SaveIndex(ResolveIndexSavePath());
     } else {
         Logger::Log(L"[WhereIsIt] No index found or load failed. Performing parallel full scan.\n");
         PerformFullDriveScan();

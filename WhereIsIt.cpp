@@ -1078,9 +1078,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 // --- Persistent Settings (ini file in %LOCALAPPDATA%\WhereIsIt\) ---
 
 static std::wstring GetSettingsPath() {
-    wchar_t exePath[MAX_PATH];
-    GetModuleFileNameW(NULL, exePath, MAX_PATH);
-    std::wstring s(exePath);
+    std::vector<wchar_t> exePathBuf(MAX_PATH);
+    DWORD len = 0;
+    while (true) {
+        len = GetModuleFileNameW(NULL, exePathBuf.data(), (DWORD)exePathBuf.size());
+        if (len == 0) return L"";
+        if (len < exePathBuf.size()) break;
+        exePathBuf.resize(exePathBuf.size() * 2);
+    }
+    std::wstring s(exePathBuf.data(), len);
     return s.substr(0, s.find_last_of(L'\\')) + L"\\settings.ini";
 }
 
@@ -1179,14 +1185,20 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 return 0; // Exit if canceled or failed
             }
 
-            wchar_t exePath[MAX_PATH];
-            GetModuleFileNameW(NULL, exePath, MAX_PATH);
+            std::vector<wchar_t> exePathBuf(MAX_PATH);
+            DWORD len = 0;
+            while (true) {
+                len = GetModuleFileNameW(NULL, exePathBuf.data(), (DWORD)exePathBuf.size());
+                if (len == 0) return 0;
+                if (len < exePathBuf.size()) break;
+                exePathBuf.resize(exePathBuf.size() * 2);
+            }
 
             if (buttonClicked == 100) {
                 // Install Service
                 SHELLEXECUTEINFOW sei = { sizeof(SHELLEXECUTEINFOW) };
                 sei.lpVerb = L"runas";
-                sei.lpFile = exePath;
+                sei.lpFile = exePathBuf.data();
                 sei.lpParameters = L"-install";
                 sei.nShow = SW_SHOWNORMAL;
                 sei.fMask = SEE_MASK_NOCLOSEPROCESS;
@@ -1206,7 +1218,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 // Run as Administrator
                 SHELLEXECUTEINFOW sei = { sizeof(SHELLEXECUTEINFOW) };
                 sei.lpVerb = L"runas";
-                sei.lpFile = exePath;
+                sei.lpFile = exePathBuf.data();
                 sei.lpParameters = lpCmdLine;
                 sei.nShow = SW_SHOWNORMAL;
                 ShellExecuteExW(&sei);

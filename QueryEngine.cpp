@@ -108,37 +108,54 @@ bool FastContains(const char* haystack, const std::string& needle, bool caseSens
     return FastContainsIgnoreCase(haystack, needle.c_str());
 }
 
+static bool CheckAVX2() {
+    int cpuInfo[4];
+    __cpuid(cpuInfo, 1);
+    bool osxsave = (cpuInfo[2] & (1 << 27)) != 0;
+    bool avx = (cpuInfo[2] & (1 << 28)) != 0;
+    if (osxsave && avx) {
+        unsigned long long xcrFeatureMask = _xgetbv(_XCR_XFEATURE_ENABLED_MASK);
+        if ((xcrFeatureMask & 6) == 6) { // XMM and YMM state enabled
+            __cpuidex(cpuInfo, 7, 0);
+            return (cpuInfo[1] & (1 << 5)) != 0; // AVX2
+        }
+    }
+    return false;
+}
+
+static bool g_HasAVX2 = CheckAVX2();
+
 bool FastContainsCIPtr(const char* haystack, const char* needleLow, size_t needleLen) {
     if (!needleLen) return true;
     const unsigned char first = (unsigned char)needleLow[0];
-#if defined(__AVX2__)
-    const char lowerFirst = (char)first;
-    const char upperFirst = (lowerFirst >= 'a' && lowerFirst <= 'z') ? (char)(lowerFirst - 32) : lowerFirst;
-    const __m256i vLower = _mm256_set1_epi8(lowerFirst);
-    const __m256i vUpper = _mm256_set1_epi8(upperFirst);
-#endif
     const char* p = haystack;
-#if defined(__AVX2__)
-    size_t remaining = strlen(haystack);
-    while (remaining >= 32) {
-        __m256i v = _mm256_loadu_si256((const __m256i*)p);
-        __m256i eqLower = _mm256_cmpeq_epi8(v, vLower);
-        __m256i eqUpper = _mm256_cmpeq_epi8(v, vUpper);
-        unsigned mask = (unsigned)_mm256_movemask_epi8(_mm256_or_si256(eqLower, eqUpper));
-        while (mask) {
-            unsigned long bitScan = 0;
-            _BitScanForward(&bitScan, mask);
-            unsigned bit = (unsigned)bitScan;
-            const char* h = p + bit;
-            const char* n = needleLow;
-            while (*h && *n && g_ToLowerLookup[(unsigned char)*h] == (unsigned char)*n) { ++h; ++n; }
-            if (!*n) return true;
-            mask &= (mask - 1);
+
+    if (g_HasAVX2) {
+        const char lowerFirst = (char)first;
+        const char upperFirst = (lowerFirst >= 'a' && lowerFirst <= 'z') ? (char)(lowerFirst - 32) : lowerFirst;
+        const __m256i vLower = _mm256_set1_epi8(lowerFirst);
+        const __m256i vUpper = _mm256_set1_epi8(upperFirst);
+        size_t remaining = strlen(haystack);
+        while (remaining >= 32) {
+            __m256i v = _mm256_loadu_si256((const __m256i*)p);
+            __m256i eqLower = _mm256_cmpeq_epi8(v, vLower);
+            __m256i eqUpper = _mm256_cmpeq_epi8(v, vUpper);
+            unsigned mask = (unsigned)_mm256_movemask_epi8(_mm256_or_si256(eqLower, eqUpper));
+            while (mask) {
+                unsigned long bitScan = 0;
+                _BitScanForward(&bitScan, mask);
+                unsigned bit = (unsigned)bitScan;
+                const char* h = p + bit;
+                const char* n = needleLow;
+                while (*h && *n && g_ToLowerLookup[(unsigned char)*h] == (unsigned char)*n) { ++h; ++n; }
+                if (!*n) return true;
+                mask &= (mask - 1);
+            }
+            p += 32;
+            remaining -= 32;
         }
-        p += 32;
-        remaining -= 32;
     }
-#endif
+
     for (; *p; ++p) {
         if (g_ToLowerLookup[(unsigned char)*p] == first) {
             const char *h = p, *n = needleLow;
@@ -230,8 +247,53 @@ uint64_t UnixEpochSecondsToFileTime(uint32_t epoch) {
     return (uint64_t(epoch) + kEpochDiffSeconds) * kFileTimeTicksPerSecond;
 }
 
+
+// Returns true when the raw query string looks like a pure path expression
+// (e.g., "C:\Program Files (x86)\*.exe" or "\Windows\system32").
+// We declare it a path query when:
+//   1. It starts with a Windows drive path (letter + ":\") or a leading "\", AND
+//   2. It does NOT contain any explicit boolean operator words (" or ", " and ", " not ")
+//      that would indicate the user wants multi-term boolean logic.
+// This fires before any tokenization so spaces and parens inside the path are preserved.
+// We do NOT fire on queries that start with modifier tokens like "matchpath:true C:\..."
+// because those need to go through normal tokenization so the modifiers are parsed.
+static bool IsRawPathQuery(const std::string& q) {
+    if (q.size() < 3) return false;
+    // Strip leading whitespace.
+    size_t s = 0;
+    while (s < q.size() && (q[s] == ' ' || q[s] == '\t')) ++s;
+    if (s >= q.size()) return false;
+    // Must start with a Windows drive path like "C:\" or a bare backslash.
+    bool startsWithDrivePath = (q.size() > s + 2 &&
+                                std::isalpha((unsigned char)q[s]) &&
+                                q[s + 1] == ':' &&
+                                (q[s + 2] == '\\' || q[s + 2] == '/'));
+    bool startsWithBackslash = (q[s] == '\\' || q[s] == '/');
+    if (!startsWithDrivePath && !startsWithBackslash) return false;
+    // Disqualify if it contains explicit boolean operator words surrounded by spaces.
+    std::string lower(q.size(), '\0');
+    for (size_t i = 0; i < q.size(); ++i) lower[i] = (char)g_ToLowerLookup[(unsigned char)q[i]];
+    if (lower.find(" or ")  != std::string::npos) return false;
+    if (lower.find(" and ") != std::string::npos) return false;
+    if (lower.find(" not ") != std::string::npos) return false;
+    return true;
+}
+
+
 static std::vector<std::string> TokenizeQuery(const std::string& query) {
     std::vector<std::string> tokens;
+
+    // Fast path: pure path expression — return entire query as one token so
+    // spaces and parentheses (e.g., "Program Files (x86)") are preserved.
+    if (IsRawPathQuery(query)) {
+        // Strip leading/trailing whitespace only.
+        size_t s = query.find_first_not_of(" \t");
+        size_t e = query.find_last_not_of(" \t");
+        if (s != std::string::npos)
+            tokens.push_back(query.substr(s, e - s + 1));
+        return tokens;
+    }
+
     std::string current;
     bool inQuote = false;
     for (char c : query) {
@@ -254,6 +316,7 @@ static std::vector<std::string> TokenizeQuery(const std::string& query) {
     if (!current.empty()) tokens.push_back(current);
     return tokens;
 }
+
 
 class QueryParser {
 public:
@@ -371,6 +434,28 @@ QueryPlan BuildQueryPlan(const std::string& rawQuery) {
         if (low == "asc" || low == "sort:asc") { plan.Config.SortDescending = false; continue; }
         exprTokens.push_back(token);
     }
+    
+    if (!plan.Config.MatchPath && !plan.Config.RegexMode) {
+        for (const auto& t : exprTokens) {
+            if (t.find_first_of("\\/") != std::string::npos) {
+                plan.Config.MatchPath = true;
+                break;
+            }
+        }
+    }
+
+    std::stable_sort(exprTokens.begin(), exprTokens.end(), [](const std::string& a, const std::string& b) {
+        bool aHasExt = a.find('.') != std::string::npos || a.find('*') != std::string::npos || a.find('?') != std::string::npos;
+        bool bHasExt = b.find('.') != std::string::npos || b.find('*') != std::string::npos || b.find('?') != std::string::npos;
+        if (aHasExt != bHasExt) return aHasExt; // Wildcards/extensions first
+        
+        bool aHasSlash = a.find_first_of("\\/") != std::string::npos;
+        bool bHasSlash = b.find_first_of("\\/") != std::string::npos;
+        if (aHasSlash != bHasSlash) return !aHasSlash; // Paths last
+        
+        return false;
+    });
+
     plan.Tokens = exprTokens;
     QueryParser parser(exprTokens);
     plan.Root = parser.Parse(plan.Success, plan.ErrorMessage);
@@ -398,7 +483,46 @@ QueryPlan BuildQueryPlan(const std::string& rawQuery) {
             std::string low = ToLowerAscii(token);
             if (low == "and" || low == "or" || low == "not" || low == "(" || low == ")" || token.find(':') != std::string::npos) continue;
             try {
-                if (token.length() > 1000) throw std::runtime_error("Regex too long");
+                if (token.length() > 400) throw std::runtime_error("Regex too long");
+                
+                auto hasNestedQuantifiers = [](const std::string& pattern) {
+                    int depth = 0;
+                    std::vector<bool> groupHasQuantifier(1, false);
+                    for (size_t i = 0; i < pattern.length(); ++i) {
+                        char c = pattern[i];
+                        if (c == '\\') { ++i; continue; }
+                        if (c == '(') {
+                            depth++;
+                            groupHasQuantifier.push_back(false);
+                        } else if (c == ')') {
+                            bool hasQuant = groupHasQuantifier.back();
+                            if (depth > 0) {
+                                depth--;
+                                groupHasQuantifier.pop_back();
+                            }
+                            if (i + 1 < pattern.length()) {
+                                char next = pattern[i+1];
+                                if (next == '+' || next == '*' || next == '{') {
+                                    if (hasQuant) return true; // Nested!
+                                    groupHasQuantifier.back() = true;
+                                }
+                            }
+                        } else if (c == '+' || c == '*' || c == '{') {
+                            groupHasQuantifier.back() = true;
+                        }
+                    }
+                    if (pattern.find("++") != std::string::npos || pattern.find("**") != std::string::npos ||
+                        pattern.find("+*") != std::string::npos || pattern.find("*+") != std::string::npos ||
+                        pattern.find("?+") != std::string::npos || pattern.find("?*") != std::string::npos) {
+                        return true;
+                    }
+                    return false;
+                };
+
+                if (hasNestedQuantifiers(token)) {
+                    throw std::runtime_error("Nested quantifiers not allowed (ReDoS mitigation)");
+                }
+
                 plan.CompiledRegex.emplace_back(token, options);
             }
             catch (const std::regex_error& e) {

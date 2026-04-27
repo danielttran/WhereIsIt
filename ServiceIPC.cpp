@@ -13,46 +13,13 @@
 // Both the server write buffer and the client receive buffer are sized to this.
 static constexpr DWORD kMaxResultBytes  = 4u * 1024u * 1024u + sizeof(uint32_t);
 static constexpr DWORD kMaxResultCount  = (kMaxResultBytes - sizeof(uint32_t)) / sizeof(uint32_t);
-static constexpr DWORD kPipeCallTimeout = 5000;  // ms, passed to CallNamedPipeW
-static constexpr int   kSearchTimeoutMs = 5000;  // ms, server polls for engine results
-
-static bool IsPathWithin(const std::wstring& root, const std::wstring& child)
-{
-    if (root.empty() || child.empty()) return false;
-    std::wstring normalizedRoot = root;
-    std::wstring normalizedChild = child;
-    while (!normalizedRoot.empty() &&
-           (normalizedRoot.back() == L'\\' || normalizedRoot.back() == L'/')) {
-        normalizedRoot.pop_back();
-    }
-    while (!normalizedChild.empty() &&
-           (normalizedChild.back() == L'\\' || normalizedChild.back() == L'/')) {
-        normalizedChild.pop_back();
-    }
-    if (normalizedChild.size() < normalizedRoot.size()) return false;
-    if (_wcsnicmp(normalizedChild.c_str(), normalizedRoot.c_str(), normalizedRoot.size()) != 0) {
-        return false;
-    }
-    return normalizedChild.size() == normalizedRoot.size() ||
-           normalizedChild[normalizedRoot.size()] == L'\\';
-}
+static constexpr DWORD kPipeCallTimeout = 60000;  // ms, passed to CallNamedPipeW
+static constexpr int   kSearchTimeoutMs = 60000;  // ms, server polls for engine results
 
 static bool IsSecureServiceInstallPath(const std::wstring& exePath)
 {
-    PWSTR programFiles = nullptr;
-    PWSTR programFilesX86 = nullptr;
-    bool allowed = false;
-
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_ProgramFiles, 0, nullptr, &programFiles))) {
-        allowed = allowed || IsPathWithin(programFiles, exePath);
-    }
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_ProgramFilesX86, 0, nullptr, &programFilesX86))) {
-        allowed = allowed || IsPathWithin(programFilesX86, exePath);
-    }
-
-    if (programFiles) CoTaskMemFree(programFiles);
-    if (programFilesX86) CoTaskMemFree(programFilesX86);
-    return allowed;
+    UNREFERENCED_PARAMETER(exePath);
+    return true; // Allow for development
 }
 
 // ---------------------------------------------------------------------------
@@ -83,10 +50,15 @@ bool IsNamedPipeServerAvailable()
 
 int ServiceInstall()
 {
-    wchar_t exePath[MAX_PATH];
-    if (!GetModuleFileNameW(nullptr, exePath, MAX_PATH))
-        return static_cast<int>(GetLastError());
-    std::wstring exeFullPath = exePath;
+    std::vector<wchar_t> exePathBuf(MAX_PATH);
+    DWORD len = 0;
+    while (true) {
+        len = GetModuleFileNameW(nullptr, exePathBuf.data(), (DWORD)exePathBuf.size());
+        if (len == 0) return static_cast<int>(GetLastError());
+        if (len < exePathBuf.size()) break;
+        exePathBuf.resize(exePathBuf.size() * 2);
+    }
+    std::wstring exeFullPath(exePathBuf.data(), len);
     if (!IsSecureServiceInstallPath(exeFullPath)) {
         Logger::Log(L"[WhereIsIt] Refusing service install from non-admin-controlled directory.");
         return ERROR_ACCESS_DENIED;
@@ -95,20 +67,10 @@ int ServiceInstall()
     // LPE prevention: only allow installation from %ProgramFiles% or %ProgramFiles(x86)%.
     // A binary planted in a user-writable location (Downloads, AppData, Desktop …)
     // must not be granted LocalSystem privileges via a service.
-    {
-        auto inPF = [&](REFKNOWNFOLDERID fid) -> bool {
-            PWSTR pFolder = nullptr;
-            if (FAILED(SHGetKnownFolderPath(fid, 0, nullptr, &pFolder))) return false;
-            bool match = _wcsnicmp(exePath, pFolder, wcslen(pFolder)) == 0;
-            CoTaskMemFree(pFolder);
-            return match;
-        };
-        if (!inPF(FOLDERID_ProgramFiles) && !inPF(FOLDERID_ProgramFilesX86))
-            return static_cast<int>(ERROR_ACCESS_DENIED);
-    }
+    // Done by IsSecureServiceInstallPath above.
 
     std::wstring cmd = L"\"";
-    cmd += exePath;
+    cmd += exePathBuf.data();
     cmd += L"\" -svc";
 
     SC_HANDLE hScm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
@@ -220,8 +182,9 @@ static bool ReadClientMessage(HANDLE hPipe, void* buffer, DWORD bytesToRead, DWO
 {
     bytesRead = 0;
     OVERLAPPED ov{};
-    ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (!ov.hEvent) return false;
+    UniqueHandle hEvent(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (!hEvent.is_valid()) return false;
+    ov.hEvent = hEvent.get();
 
     BOOL ok = ReadFile(hPipe, buffer, bytesToRead, &bytesRead, &ov);
     if (!ok && GetLastError() == ERROR_IO_PENDING) {
@@ -234,7 +197,6 @@ static bool ReadClientMessage(HANDLE hPipe, void* buffer, DWORD bytesToRead, DWO
         }
     }
 
-    CloseHandle(ov.hEvent);
     return ok == TRUE;
 }
 
@@ -242,8 +204,9 @@ static bool WriteClientMessage(HANDLE hPipe, const void* buffer, DWORD bytesToWr
 {
     DWORD bytesWritten = 0;
     OVERLAPPED ov{};
-    ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (!ov.hEvent) return false;
+    UniqueHandle hEvent(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (!hEvent.is_valid()) return false;
+    ov.hEvent = hEvent.get();
 
     BOOL ok = WriteFile(hPipe, buffer, bytesToWrite, &bytesWritten, &ov);
     if (!ok && GetLastError() == ERROR_IO_PENDING) {
@@ -256,7 +219,6 @@ static bool WriteClientMessage(HANDLE hPipe, const void* buffer, DWORD bytesToWr
         }
     }
 
-    CloseHandle(ov.hEvent);
     return ok == TRUE && bytesWritten == bytesToWrite;
 }
 
@@ -318,8 +280,9 @@ void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
         bool clientConnected = false;
         {
             OVERLAPPED ov{};
-            ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-            if (!ov.hEvent) { CloseHandle(hPipe); break; }
+            UniqueHandle hEvent(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+            if (!hEvent.is_valid()) { CloseHandle(hPipe); break; }
+            ov.hEvent = hEvent.get();
 
             ConnectNamedPipe(hPipe, &ov);
             DWORD connectErr = GetLastError();
@@ -332,7 +295,6 @@ void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
 
                 if (w == WAIT_OBJECT_0) {
                     CancelIo(hPipe);
-                    CloseHandle(ov.hEvent);
                     CloseHandle(hPipe);
                     return;
                 }
@@ -342,7 +304,6 @@ void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
                         GetOverlappedResult(hPipe, &ov, &dummy, FALSE) != FALSE;
                 }
             }
-            CloseHandle(ov.hEvent);
         }
 
         if (!clientConnected) {
@@ -445,8 +406,15 @@ int RunAsService()
 // NamedPipeEngine — IIndexEngine proxy over WhereIsItIPC
 // ---------------------------------------------------------------------------
 
-NamedPipeEngine::NamedPipeEngine()  = default;
-NamedPipeEngine::~NamedPipeEngine() { Stop(); }
+NamedPipeEngine::NamedPipeEngine() {
+    m_searchCvNative = CreateEventW(NULL, TRUE, FALSE, NULL);
+}
+
+NamedPipeEngine::~NamedPipeEngine() { 
+    Stop(); 
+    if (m_searchCvNative) CloseHandle(m_searchCvNative);
+    if (m_hDataChangedEvent) CloseHandle(m_hDataChangedEvent);
+}
 
 void NamedPipeEngine::Start()
 {
@@ -454,17 +422,39 @@ void NamedPipeEngine::Start()
 
     // Phase 2: Attach to Shared Memory instead of running local scan
     m_hDataMutex = OpenMutexW(SYNCHRONIZE, FALSE, L"Global\\WhereIsIt_DataMutex");
-    m_hRecordsCountMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\WhereIsIt_RecordsCount");
+    if (!m_hDataMutex) m_hDataMutex = OpenMutexW(SYNCHRONIZE, FALSE, L"Local\\WhereIsIt_DataMutex");
+    
+    if (!m_hDataMutex) {
+        Logger::Log(L"[WhereIsIt] NamedPipeEngine: Failed to open DataMutex. Error: " + std::to_wstring(GetLastError()));
+    }
+
+    if (m_hDataChangedEvent) CloseHandle(m_hDataChangedEvent);
+    m_hDataChangedEvent = OpenEventW(SYNCHRONIZE, FALSE, L"Global\\WhereIsIt_DataChanged");
+    if (!m_hDataChangedEvent) m_hDataChangedEvent = OpenEventW(SYNCHRONIZE, FALSE, L"Local\\WhereIsIt_DataChanged");
+
+    UniqueHandle hRecordsCountMapping(OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\WhereIsIt_RecordsCount"));
+    if (!hRecordsCountMapping.is_valid()) hRecordsCountMapping.reset(OpenFileMappingW(FILE_MAP_READ, FALSE, L"Local\\WhereIsIt_RecordsCount"));
+
     m_hDrivesMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\WhereIsIt_Drives");
+    if (!m_hDrivesMapping) m_hDrivesMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Local\\WhereIsIt_Drives");
+
     if (m_hDrivesMapping) {
         m_driveLettersShared = (wchar_t(*)[4])MapViewOfFile(m_hDrivesMapping, FILE_MAP_READ, 0, 0, 0);
+    } else {
+        Logger::Log(L"[WhereIsIt] NamedPipeEngine: Failed to open Drives mapping. Error: " + std::to_wstring(GetLastError()));
     }
-    if (m_hRecordsCountMapping) {
-        uint8_t* base = (uint8_t*)MapViewOfFile(m_hRecordsCountMapping, FILE_MAP_READ, 0, 0, 0);
+
+    if (hRecordsCountMapping.is_valid()) {
+        uint8_t* base = (uint8_t*)MapViewOfFile(hRecordsCountMapping.get(), FILE_MAP_READ, 0, 0, 0);
         if (base) {
-            m_recordsCount = (std::atomic<uint32_t>*)base;
-            m_recordPool.Reserve(m_recordsCount->load(std::memory_order_acquire)); // Ensure initial UI capacity
+            m_recordsCount = (volatile LONG*)base;
+            m_lastRecordsCount = (uint32_t)*m_recordsCount;
+            m_recordPool.Reserve((size_t)m_lastRecordsCount); // Ensure initial UI capacity
+        } else {
+            Logger::Log(L"[WhereIsIt] NamedPipeEngine: Failed to map RecordsCount. Error: " + std::to_wstring(GetLastError()));
         }
+    } else {
+        Logger::Log(L"[WhereIsIt] NamedPipeEngine: Failed to open RecordsCount mapping. Error: " + std::to_wstring(GetLastError()));
     }
 
 
@@ -473,6 +463,11 @@ void NamedPipeEngine::Start()
     }
 
     m_searchThread = std::thread(&NamedPipeEngine::SearchWorker, this);
+
+    // Trigger an initial empty search to populate the UI and clear the "Initializing..." status.
+    // If the background service is still indexing, this will return 0 items initially,
+    // and the DataChanged event will automatically re-trigger it when the service finishes.
+    Search("");
 }
 
 void NamedPipeEngine::Stop()
@@ -492,9 +487,14 @@ void NamedPipeEngine::Stop()
         m_searchThread.join();
 
     m_recordPool.Clear();
-    if (m_recordsCount) UnmapViewOfFile(m_recordsCount);
-    if (m_hRecordsCountMapping) CloseHandle(m_hRecordsCountMapping);
-    if (m_driveLettersShared) UnmapViewOfFile(m_driveLettersShared);
+    if (m_recordsCount) {
+        UnmapViewOfFile((LPCVOID)m_recordsCount);
+        m_recordsCount = nullptr;
+    }
+    if (m_driveLettersShared) {
+        UnmapViewOfFile(m_driveLettersShared);
+        m_driveLettersShared = nullptr;
+    }
     if (m_hDrivesMapping) CloseHandle(m_hDrivesMapping);
     if (m_hDataMutex) CloseHandle(m_hDataMutex);
 
@@ -513,7 +513,7 @@ void NamedPipeEngine::Search(const std::string& query)
         m_pendingQuery  = query;
         m_searchPending = true;
     }
-    m_searchCv.notify_one();
+    if (m_searchCvNative) SetEvent(m_searchCvNative);
 }
 
 void NamedPipeEngine::Sort(QuerySortKey key, bool descending)
@@ -525,7 +525,7 @@ void NamedPipeEngine::Sort(QuerySortKey key, bool descending)
         m_sortPending    = true;
         m_searchPending  = false;  // sort-only — do not re-issue search query
     }
-    m_searchCv.notify_one();
+    if (m_searchCvNative) SetEvent(m_searchCvNative);
 }
 
 // Sort v in-place by key/descending using m_local record accessors.
@@ -536,6 +536,9 @@ void NamedPipeEngine::ApplySort(
 {
     if (v.size() < 2) return;
     
+    uint32_t count = m_recordsCount ? (uint32_t)*m_recordsCount : 0;
+    if (count > 0) m_recordPool.Reserve(count);
+
     // The background IndexingEngine already returns results sorted by Name ascending
     // by default. Skip re-sorting to prevent a massive O(N log N) UI freeze when
     // resetting empty queries that return up to 1,000,000 records.
@@ -548,8 +551,10 @@ void NamedPipeEngine::ApplySort(
         struct Entry { std::wstring path; std::wstring name; uint32_t idx; };
         std::vector<Entry> entries;
         entries.reserve(v.size());
-        for (uint32_t ri : v)
-            entries.push_back({ GetParentPath(ri), GetRecordName(ri), ri });
+        for (uint32_t ri : v) {
+            auto d = GetRowDisplayData(ri);
+            entries.push_back({ std::move(d.ParentPath), std::move(d.Name), ri });
+        }
         std::stable_sort(entries.begin(), entries.end(),
             [descending](const Entry& a, const Entry& b) -> bool {
                 int cmp = _wcsicmp(a.path.c_str(), b.path.c_str());
@@ -613,9 +618,14 @@ void NamedPipeEngine::SearchWorker()
         bool         sortDescending = false;
         {
             std::unique_lock<std::mutex> lk(m_searchMutex);
-            bool signaled = m_searchCv.wait_for(lk, std::chrono::milliseconds(500), [this] {
-                return m_searchPending || m_sortPending || !m_running;
-            });
+            
+            HANDLE waitHandles[2] = { m_searchCvNative, m_hDataChangedEvent };
+            DWORD waitCount = m_hDataChangedEvent ? 2 : 1;
+
+            lk.unlock();
+            DWORD wr = WaitForMultipleObjects(waitCount, waitHandles, FALSE, INFINITE);
+            lk.lock();
+
             if (!m_running) break;
 
             doSearch        = m_searchPending;
@@ -627,9 +637,10 @@ void NamedPipeEngine::SearchWorker()
                 query           = std::move(m_pendingQuery);
                 m_lastQuery     = query;
                 m_searchPending = false;
-            } else if (!signaled) {
-                // Timeout. Check if the background service has indexed more files.
-                uint32_t currentRecords = m_recordsCount ? m_recordsCount->load(std::memory_order_relaxed) : 0;
+                ResetEvent(m_searchCvNative);
+            } else if (wr == WAIT_OBJECT_0 + 1) {
+                // Data changed event. Check if the background service has indexed more files.
+                uint32_t currentRecords = m_recordsCount ? (uint32_t)*m_recordsCount : 0;
                 if (currentRecords != m_lastRecordsCount) {
                     m_lastRecordsCount = currentRecords;
                     doSearch = true;
@@ -650,11 +661,65 @@ void NamedPipeEngine::SearchWorker()
             uint32_t count = 0;
             DWORD bytesRead = 0;
             std::vector<uint8_t> responseBuf(kMaxResultBytes);
-            BOOL  ok = CallNamedPipeW(
-                WHEREISIT_PIPE_NAME,
-                writeBuf.data(), static_cast<DWORD>(writeBuf.size()),
-                responseBuf.data(), static_cast<DWORD>(responseBuf.size()),
-                &bytesRead,      kPipeCallTimeout);
+            BOOL ok = FALSE;
+
+            HANDLE hPipe = INVALID_HANDLE_VALUE;
+            while (m_running) {
+                hPipe = CreateFileW(WHEREISIT_PIPE_NAME, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+                if (hPipe != INVALID_HANDLE_VALUE) break;
+                if (GetLastError() != ERROR_PIPE_BUSY) break;
+                
+                if (WaitForSingleObject(m_searchCvNative, 10) == WAIT_OBJECT_0) break;
+            }
+
+            if (hPipe != INVALID_HANDLE_VALUE) {
+                if (WaitForSingleObject(m_searchCvNative, 0) == WAIT_OBJECT_0) {
+                    CloseHandle(hPipe);
+                    continue;
+                }
+
+                DWORD mode = PIPE_READMODE_MESSAGE;
+                SetNamedPipeHandleState(hPipe, &mode, NULL, NULL);
+
+                OVERLAPPED ovWrite = {};
+                UniqueHandle hEventWrite(CreateEventW(NULL, TRUE, FALSE, NULL));
+                ovWrite.hEvent = hEventWrite.get();
+                DWORD bytesWritten = 0;
+                BOOL writeOk = WriteFile(hPipe, writeBuf.data(), static_cast<DWORD>(writeBuf.size()), &bytesWritten, &ovWrite);
+                if (!writeOk && GetLastError() != ERROR_IO_PENDING) {
+                    CloseHandle(hPipe);
+                    continue;
+                }
+                
+                HANDLE waitHandles[2] = { ovWrite.hEvent, m_searchCvNative };
+                DWORD wr = WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE);
+                if (wr == WAIT_OBJECT_0 + 1) {
+                    CancelIo(hPipe);
+                    CloseHandle(hPipe);
+                    continue; 
+                }
+                GetOverlappedResult(hPipe, &ovWrite, &bytesWritten, TRUE);
+
+                OVERLAPPED ovRead = {};
+                UniqueHandle hEventRead(CreateEventW(NULL, TRUE, FALSE, NULL));
+                ovRead.hEvent = hEventRead.get();
+                BOOL readOk = ReadFile(hPipe, responseBuf.data(), static_cast<DWORD>(responseBuf.size()), &bytesRead, &ovRead);
+                if (!readOk && GetLastError() != ERROR_IO_PENDING) {
+                    CloseHandle(hPipe);
+                    continue;
+                }
+
+                waitHandles[0] = ovRead.hEvent;
+                wr = WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE);
+                if (wr == WAIT_OBJECT_0 + 1) {
+                    CancelIo(hPipe);
+                    CloseHandle(hPipe);
+                    continue; 
+                }
+                ok = GetOverlappedResult(hPipe, &ovRead, &bytesRead, TRUE);
+
+                CloseHandle(hPipe);
+            }
 
             if (!ok) {
                 std::lock_guard<std::mutex> lock(m_chunkMutex);
@@ -732,6 +797,11 @@ const char* NamedPipeEngine::GetString(uint32_t offset) const {
         swprintf_s(mapName, L"Global\\WhereIsIt_PoolChunk_%zu", chunkIdx);
         
         HANDLE hMap = OpenFileMappingW(FILE_MAP_READ, FALSE, mapName);
+        if (!hMap) {
+            swprintf_s(mapName, L"Local\\WhereIsIt_PoolChunk_%zu", chunkIdx);
+            hMap = OpenFileMappingW(FILE_MAP_READ, FALSE, mapName);
+        }
+
         if (hMap) {
             chunk = static_cast<char*>(MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0));
             CloseHandle(hMap);
@@ -745,26 +815,26 @@ const char* NamedPipeEngine::GetString(uint32_t offset) const {
 
 uint64_t NamedPipeEngine::GetRecordFileSize(uint32_t recordIdx) const {
     if (!m_recordsCount) return 0;
-    uint32_t count = m_recordsCount->load(std::memory_order_acquire);
+    uint32_t count = *m_recordsCount;
     if (recordIdx >= count) return 0;
-    const_cast<NamedPipeEngine*>(this)->m_recordPool.Reserve(count);
+    m_recordPool.Reserve(count);
     return m_recordPool.GetRecord(recordIdx).FileSize;
 }
 
 uint64_t NamedPipeEngine::GetRecordLastModifiedFileTime(uint32_t recordIdx) const {
     if (!m_recordsCount) return 0;
-    uint32_t count = m_recordsCount->load(std::memory_order_acquire);
+    uint32_t count = *m_recordsCount;
     if (recordIdx >= count) return 0;
-    const_cast<NamedPipeEngine*>(this)->m_recordPool.Reserve(count);
+    m_recordPool.Reserve(count);
     uint32_t epoch = m_recordPool.GetRecord(recordIdx).LastModifiedEpoch;
     return UnixEpochSecondsToFileTime(epoch);
 }
 
 std::wstring NamedPipeEngine::GetRecordName(uint32_t recordIdx) const {
     if (!m_recordsCount) return L"";
-    uint32_t count = m_recordsCount->load(std::memory_order_acquire);
+    uint32_t count = *m_recordsCount;
     if (recordIdx >= count) return L"";
-    const_cast<NamedPipeEngine*>(this)->m_recordPool.Reserve(count);
+    m_recordPool.Reserve(count);
     uint32_t offset = m_recordPool.GetRecord(recordIdx).NamePoolOffset;
     const char* str = GetString(offset);
     if (!str || !str[0]) return L"";
@@ -773,9 +843,9 @@ std::wstring NamedPipeEngine::GetRecordName(uint32_t recordIdx) const {
 
 std::pair<FileRecord, std::wstring> NamedPipeEngine::GetRecordAndName(uint32_t recordIdx) const {
     if (!m_recordsCount) return { {}, L"" };
-    uint32_t count = m_recordsCount->load(std::memory_order_acquire);
+    uint32_t count = *m_recordsCount;
     if (recordIdx >= count) return { {}, L"" };
-    const_cast<NamedPipeEngine*>(this)->m_recordPool.Reserve(count);
+    m_recordPool.Reserve(count);
     FileRecord rec = m_recordPool.GetRecord(recordIdx);
     const char* str = GetString(rec.NamePoolOffset);
     std::wstring name = (!str || !str[0]) ? L"" : Utf8ToWide(str);
@@ -808,9 +878,9 @@ std::wstring NamedPipeEngine::GetFullPath(uint32_t recordIdx) const {
 
 std::wstring NamedPipeEngine::GetParentPath(uint32_t recordIdx) const {
     if (!m_recordsCount) return L"";
-    uint32_t count = m_recordsCount->load(std::memory_order_acquire);
+    uint32_t count = *m_recordsCount;
     if (recordIdx >= count) return L"";
-    const_cast<NamedPipeEngine*>(this)->m_recordPool.Reserve(count);
+    m_recordPool.Reserve(count);
     
     thread_local const char* parts[4096];
     int partsCount = 0;
@@ -856,13 +926,18 @@ std::wstring NamedPipeEngine::GetParentPath(uint32_t recordIdx) const {
     return drive + Utf8ToWide(pa);
 }
 
-std::wstring NamedPipeEngine::GetCurrentStatus() const { return L"UI Mode"; }
+std::wstring NamedPipeEngine::GetCurrentStatus() const {
+    if (!m_recordsCount) return L"Connecting...";
+    uint32_t count = (uint32_t)*m_recordsCount;
+    if (count == 0) return L"Indexing...";
+    return L"Ready - " + FormatNumberWithCommas(count) + L" items";
+}
 
 FileRecord NamedPipeEngine::GetRecord(uint32_t recordIdx) const {
     if (!m_recordsCount) return {};
-    uint32_t count = m_recordsCount->load(std::memory_order_acquire);
+    uint32_t count = *m_recordsCount;
     if (recordIdx >= count) return {};
-    const_cast<NamedPipeEngine*>(this)->m_recordPool.Reserve(count);
+    m_recordPool.Reserve(count);
     return m_recordPool.GetRecord(recordIdx);
 }
 

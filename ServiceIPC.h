@@ -88,9 +88,8 @@ private:
     // Local engine used solely for record-accessor calls (GetRecord, GetFullPath…).
     // (Phase 2): Now eliminated. The UI directly maps the background service's memory.
     
-    RecordPool m_recordPool{true};
-    HANDLE m_hRecordsCountMapping = NULL;
-    std::atomic<uint32_t>* m_recordsCount = nullptr;
+    mutable RecordPool m_recordPool{true};
+    volatile LONG* m_recordsCount = nullptr;
     HANDLE m_hDataMutex = NULL;
     HANDLE m_hDrivesMapping = NULL;
     wchar_t (*m_driveLettersShared)[4] = nullptr;
@@ -106,6 +105,8 @@ private:
     // All fields below are protected by m_searchMutex.
     std::mutex               m_searchMutex;
     std::condition_variable  m_searchCv;
+    HANDLE                   m_searchCvNative = NULL;
+    HANDLE                   m_hDataChangedEvent = NULL;
     std::string              m_pendingQuery;
     bool                     m_searchPending = false;  // new query waiting
     bool                     m_sortPending   = false;  // sort-only re-sort needed

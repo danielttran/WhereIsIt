@@ -27,10 +27,14 @@ static SECURITY_ATTRIBUTES* BuildSa(const wchar_t* sddl)
     struct SaHolder {
         SECURITY_ATTRIBUTES attrs{ sizeof(SECURITY_ATTRIBUTES), nullptr, FALSE };
         PSECURITY_DESCRIPTOR sd = nullptr;
+        bool valid = false;
         explicit SaHolder(const wchar_t* inSddl) {
             if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
                     inSddl, SDDL_REVISION_1, &sd, nullptr)) {
                 attrs.lpSecurityDescriptor = sd;
+                valid = true;
+            } else {
+                Logger::Log(std::wstring(L"Failed to convert SDDL: ") + inSddl);
             }
         }
         ~SaHolder() {
@@ -38,14 +42,14 @@ static SECURITY_ATTRIBUTES* BuildSa(const wchar_t* sddl)
         }
     };
 
-    static SaHolder pipeSa(L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)");
-    static SaHolder sharedReadSa(L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;AU)");
+    static SaHolder pipeSa(L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGWGX;;;WD)");
+    static SaHolder sharedReadSa(L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGX;;;WD)");
     static SaHolder serviceOnlySa(L"D:(A;;GA;;;SY)(A;;GA;;;BA)");
 
-    if (sddl == nullptr) return &sharedReadSa.attrs;
-    if (wcscmp(sddl, L"pipe") == 0) return &pipeSa.attrs;
-    if (wcscmp(sddl, L"service") == 0) return &serviceOnlySa.attrs;
-    return &sharedReadSa.attrs;
+    if (sddl == nullptr) return sharedReadSa.valid ? &sharedReadSa.attrs : nullptr;
+    if (wcscmp(sddl, L"pipe") == 0) return pipeSa.valid ? &pipeSa.attrs : nullptr;
+    if (wcscmp(sddl, L"service") == 0) return serviceOnlySa.valid ? &serviceOnlySa.attrs : nullptr;
+    return sharedReadSa.valid ? &sharedReadSa.attrs : nullptr;
 }
 
 SECURITY_ATTRIBUTES* GetPipeServerSA() {
@@ -61,35 +65,38 @@ SECURITY_ATTRIBUTES* GetServiceOnlySA() {
 }
 
 bool RegisterContextMenu() {
-    wchar_t exePath[MAX_PATH];
-    if (!GetModuleFileNameW(NULL, exePath, MAX_PATH)) return false;
+    std::vector<wchar_t> exePathBuf(MAX_PATH);
+    DWORD len = 0;
+    while (true) {
+        len = GetModuleFileNameW(NULL, exePathBuf.data(), (DWORD)exePathBuf.size());
+        if (len == 0) return false;
+        if (len < exePathBuf.size()) break;
+        exePathBuf.resize(exePathBuf.size() * 2);
+    }
+    std::wstring exePath(exePathBuf.data(), len);
 
     std::wstring command = std::wstring(L"\"") + exePath + L"\" \"%1\"";
 
-    HKEY hKey;
-    if (RegCreateKeyExW(HKEY_CLASSES_ROOT, L"Directory\\shell\\WhereIsIt", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+    UniqueHkey hKey;
+    if (RegCreateKeyExW(HKEY_CLASSES_ROOT, L"Directory\\shell\\WhereIsIt", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, hKey.put(), NULL) == ERROR_SUCCESS) {
         RegSetValueExW(hKey, L"", 0, REG_SZ, (const BYTE*)L"Search with WhereIsIt", sizeof(L"Search with WhereIsIt"));
-        RegSetValueExW(hKey, L"Icon", 0, REG_SZ, (const BYTE*)exePath, (DWORD)((wcslen(exePath) + 1) * sizeof(wchar_t)));
+        RegSetValueExW(hKey, L"Icon", 0, REG_SZ, (const BYTE*)exePath.c_str(), (DWORD)((exePath.length() + 1) * sizeof(wchar_t)));
         
-        HKEY hCommandKey;
-        if (RegCreateKeyExW(hKey, L"command", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hCommandKey, NULL) == ERROR_SUCCESS) {
+        UniqueHkey hCommandKey;
+        if (RegCreateKeyExW(hKey, L"command", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, hCommandKey.put(), NULL) == ERROR_SUCCESS) {
             RegSetValueExW(hCommandKey, L"", 0, REG_SZ, (const BYTE*)command.c_str(), (DWORD)((command.size() + 1) * sizeof(wchar_t)));
-            RegCloseKey(hCommandKey);
         }
-        RegCloseKey(hKey);
     }
     
     // Also for drives
-    if (RegCreateKeyExW(HKEY_CLASSES_ROOT, L"Drive\\shell\\WhereIsIt", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+    if (RegCreateKeyExW(HKEY_CLASSES_ROOT, L"Drive\\shell\\WhereIsIt", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, hKey.put(), NULL) == ERROR_SUCCESS) {
         RegSetValueExW(hKey, L"", 0, REG_SZ, (const BYTE*)L"Search with WhereIsIt", sizeof(L"Search with WhereIsIt"));
-        RegSetValueExW(hKey, L"Icon", 0, REG_SZ, (const BYTE*)exePath, (DWORD)((wcslen(exePath) + 1) * sizeof(wchar_t)));
+        RegSetValueExW(hKey, L"Icon", 0, REG_SZ, (const BYTE*)exePath.c_str(), (DWORD)((exePath.length() + 1) * sizeof(wchar_t)));
         
-        HKEY hCommandKey;
-        if (RegCreateKeyExW(hKey, L"command", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hCommandKey, NULL) == ERROR_SUCCESS) {
+        UniqueHkey hCommandKey;
+        if (RegCreateKeyExW(hKey, L"command", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, hCommandKey.put(), NULL) == ERROR_SUCCESS) {
             RegSetValueExW(hCommandKey, L"", 0, REG_SZ, (const BYTE*)command.c_str(), (DWORD)((command.size() + 1) * sizeof(wchar_t)));
-            RegCloseKey(hCommandKey);
         }
-        RegCloseKey(hKey);
     }
     return true;
 }

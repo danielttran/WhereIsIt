@@ -4,6 +4,7 @@
 #include <windows.h>
 #include "CoreTypes.h"
 #include <algorithm>
+#include <mutex>
 
 class RecordPool {
 public:
@@ -17,12 +18,22 @@ public:
     
     // Get mutable reference to a record
     FileRecord& GetRecord(uint32_t index) {
-        return m_chunks[index / kRecordsPerChunk].data[index % kRecordsPerChunk];
+        size_t ci = index / kRecordsPerChunk;
+        if (ci >= m_chunks.size()) {
+            static FileRecord dummy{};
+            return dummy;
+        }
+        return m_chunks[ci].data[index % kRecordsPerChunk];
     }
     
     // Get const reference to a record
     const FileRecord& GetRecord(uint32_t index) const {
-        return m_chunks[index / kRecordsPerChunk].data[index % kRecordsPerChunk];
+        size_t ci = index / kRecordsPerChunk;
+        if (ci >= m_chunks.size()) {
+            static FileRecord dummy{};
+            return dummy;
+        }
+        return m_chunks[ci].data[index % kRecordsPerChunk];
     }
     
     void LoadFromVector(const std::vector<FileRecord>& records);
@@ -47,4 +58,5 @@ private:
     };
     std::vector<Chunk> m_chunks;
     bool m_shared = false;
+    mutable std::mutex m_reserveMutex;
 };

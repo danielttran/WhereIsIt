@@ -129,7 +129,7 @@ public:
     std::wstring GetFullPath(uint32_t recordIndex) const override;
     std::wstring GetParentPath(uint32_t recordIndex) const override;
 
-    uint32_t GetRecordCount() const { return m_recordsCount ? m_recordsCount->load(std::memory_order_acquire) : 0; }
+    uint32_t GetRecordCount() const { return m_recordsCount ? (uint32_t)*m_recordsCount : 0; }
 
     void             SetIndexScopeConfig(const IndexScopeConfig& config) override;
     IndexScopeConfig GetIndexScopeConfig() const override;
@@ -163,6 +163,7 @@ private:
     };
 
     std::wstring GetFullPathInternal(uint32_t recordIndex) const;
+    std::string GetFullPathUTF8Internal(uint32_t recordIndex) const;
     std::wstring GetParentPathInternal(uint32_t recordIndex) const;
 
     bool SaveIndex(const std::wstring& filePath);
@@ -203,6 +204,7 @@ private:
     std::wstring m_status;
     std::atomic<HWND> m_hwndNotify{ nullptr };
     HANDLE m_stopEvent = NULL;  // Manual-reset event; set on Stop() to wake MonitorChanges cleanly.
+    HANDLE m_hDataChangedEvent = NULL; // Auto-reset event; pulsed on data update.
     
     struct DriveContext { 
         std::wstring Letter; 
@@ -216,7 +218,7 @@ private:
     
     HANDLE m_hRecordsCountMapping = NULL;
     RecordPool m_recordPool{true};
-    std::atomic<uint32_t>* m_recordsCount = nullptr;
+    volatile LONG* m_recordsCount = nullptr;
 
     HANDLE m_hDrivesMapping = NULL;
     wchar_t (*m_driveLettersShared)[4] = nullptr;

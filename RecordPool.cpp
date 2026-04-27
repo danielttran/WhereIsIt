@@ -21,6 +21,7 @@ void RecordPool::Clear() {
 }
 
 void RecordPool::Reserve(size_t count) {
+    std::lock_guard<std::mutex> lock(m_reserveMutex);
     size_t requiredChunks = (count + kRecordsPerChunk - 1) / kRecordsPerChunk;
     if (requiredChunks == 0) requiredChunks = 1;
 
@@ -31,19 +32,28 @@ void RecordPool::Reserve(size_t count) {
             wchar_t mapName[64];
             swprintf_s(mapName, L"Global\\WhereIsIt_RecordChunk_%zu", m_chunks.size());
             c.hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, GetSharedMemoryReadOnlySA(), PAGE_READWRITE, 0, (DWORD)allocSize, mapName);
+            
             if (!c.hMap && GetLastError() == ERROR_ACCESS_DENIED) {
-                // If we don't have permission to create it (because we are the UI process and the service already created it), just open it
                 c.hMap = OpenFileMappingW(FILE_MAP_READ, FALSE, mapName);
-            } else if (!c.hMap && GetLastError() == ERROR_ALREADY_EXISTS) {
-                c.hMap = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, mapName);
             }
+
+            if (!c.hMap) {
+                // Try Local fallback if Global failed
+                swprintf_s(mapName, L"Local\\WhereIsIt_RecordChunk_%zu", m_chunks.size());
+                c.hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, (DWORD)allocSize, mapName);
+                if (!c.hMap && GetLastError() == ERROR_ACCESS_DENIED) {
+                    c.hMap = OpenFileMappingW(FILE_MAP_READ, FALSE, mapName);
+                }
+            }
+
             if (c.hMap) {
-                // Determine mapped access rights: the service gets WRITE, UI gets READ.
-                // We should actually map with FILE_MAP_READ if we are the UI process, but FILE_MAP_ALL_ACCESS is fine if it works. 
-                // However, UI only gets FILE_MAP_READ from OpenFileMappingW above if it failed to create.
-                // Let's just try FILE_MAP_ALL_ACCESS, and fallback to FILE_MAP_READ.
                 c.data = (FileRecord*)MapViewOfFile(c.hMap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
                 if (!c.data) c.data = (FileRecord*)MapViewOfFile(c.hMap, FILE_MAP_READ, 0, 0, 0);
+                if (!c.data) {
+                     Logger::Log(L"[WhereIsIt] RecordPool: MapViewOfFile failed. Error: " + std::to_wstring(GetLastError()));
+                }
+            } else {
+                 Logger::Log(L"[WhereIsIt] RecordPool: Failed to create or open mapping. Error: " + std::to_wstring(GetLastError()));
             }
         } else {
             c.data = new FileRecord[kRecordsPerChunk]();
