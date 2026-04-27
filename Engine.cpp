@@ -180,10 +180,11 @@ bool IndexingEngine::SaveIndex(const std::wstring& filePath) {
         memcpy(p, &di, sizeof(di)); p += sizeof(di);
     }
 
-    for (uint32_t i = 0; i < recordCount; ++i) {
-        FileRecord r = m_recordPool.GetRecord(i);
-        memcpy(p, &r, sizeof(FileRecord)); p += sizeof(FileRecord);
-    }
+    m_recordPool.ForEachChunk(recordCount, [&](const FileRecord* data, size_t count) {
+        size_t bytes = count * sizeof(FileRecord);
+        memcpy(p, data, bytes);
+        p += bytes;
+    });
 
     m_pool.WriteRawTo(p);
     p += poolSize;
@@ -915,8 +916,15 @@ void IndexingEngine::SearchThread() {
                             if (c == ' ' || c == '\t' || c == ':' || c == '*' || c == '?' ||
                                 c == '(' || c == ')' || c == '"') return false;
                         }
-                        std::string tLow = ToLowerAscii(t);
-                        return tLow != "and" && tLow != "or" && tLow != "not";
+                        // Avoid heap allocation: compare length-gated with the lookup table.
+                        auto ciEqLit = [](const std::string& s, const char* lit) {
+                            size_t n = strlen(lit);
+                            if (s.size() != n) return false;
+                            for (size_t i = 0; i < n; ++i)
+                                if (g_ToLowerLookup[(unsigned char)s[i]] != (unsigned char)lit[i]) return false;
+                            return true;
+                        };
+                        return !ciEqLit(t, "and") && !ciEqLit(t, "or") && !ciEqLit(t, "not");
                     };
 
                     // Precompute lowercase needle from the expression token (not the raw query
@@ -1583,15 +1591,25 @@ void IndexingEngine::PerformFullDriveScan() {
         });
     }
 
-    // Progress reporting thread
-    std::thread progressThread([this, &totalFound, &activeWorkers]() {
-        while (activeWorkers > 0) {
+    // Progress reporting thread — woken every 200 ms or immediately on stop.
+    std::mutex progressMtx;
+    std::condition_variable progressCv;
+    bool progressStop = false;
+
+    std::thread progressThread([this, &totalFound, &progressMtx, &progressCv, &progressStop]() {
+        std::unique_lock<std::mutex> lk(progressMtx);
+        while (!progressStop) {
             SetStatus(L"Indexing... " + FormatNumberWithCommas(totalFound.load()) + L" items");
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            progressCv.wait_for(lk, std::chrono::milliseconds(200), [&progressStop] { return progressStop; });
         }
     });
 
     for (auto& t : workers) t.join();
+    {
+        std::lock_guard<std::mutex> lk(progressMtx);
+        progressStop = true;
+    }
+    progressCv.notify_one();
     if (progressThread.joinable()) progressThread.join();
 
     {

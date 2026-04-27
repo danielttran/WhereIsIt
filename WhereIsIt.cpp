@@ -776,7 +776,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 std::lock_guard<std::mutex> lock(g_iconMutex);
                 g_recordIconCache[recordIdx] = iconIdx;
             }
-            InvalidateRect(hFileList, NULL, FALSE);
+            // Redraw only the visible rows rather than invalidating the entire control.
+            int top    = ListView_GetTopIndex(hFileList);
+            int bottom = top + ListView_GetCountPerPage(hFileList) + 1;
+            int count  = ListView_GetItemCount(hFileList);
+            if (bottom > count) bottom = count;
+            if (top <= bottom - 1)
+                ListView_RedrawItems(hFileList, top, bottom - 1);
         }
         break;
     case WM_USER_THUMBNAIL_LOADED: {
@@ -822,7 +828,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 std::lock_guard<std::mutex> lock(g_iconMutex);
                 g_recordIconCache[recordIdx] = imgIdx;
             }
-            InvalidateRect(hFileList, NULL, FALSE);
+            // Redraw only the visible rows rather than invalidating the entire control.
+            int top    = ListView_GetTopIndex(hFileList);
+            int bottom = top + ListView_GetCountPerPage(hFileList) + 1;
+            int count  = ListView_GetItemCount(hFileList);
+            if (bottom > count) bottom = count;
+            if (top <= bottom - 1)
+                ListView_RedrawItems(hFileList, top, bottom - 1);
         }
         if (hBmp) DeleteObject(hBmp);
         return 0;
@@ -991,7 +1003,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         for (auto& t : g_iconWorkers) if (t.joinable()) t.join();
         g_iconWorkers.clear();
         if (g_hCustomImageList) { ImageList_Destroy(g_hCustomImageList); g_hCustomImageList = NULL; }
-        if (g_FontNormal) DeleteObject(g_FontNormal);
+        // g_FontNormal is a stock object (GetStockObject); do not DeleteObject it.
         if (g_FontBold) DeleteObject(g_FontBold);
         SaveSettings(hWnd);
         PostQuitMessage(0);
@@ -1113,9 +1125,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     int windowY = (GetSystemMetrics(SM_CYSCREEN) - WINDOW_HEIGHT) / 2;
     HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW, windowX, windowY, WINDOW_WIDTH, WINDOW_HEIGHT, nullptr, nullptr, hInstance, nullptr);
     if (!hWnd) return FALSE;
+    HACCEL hAccel = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_WHEREISIT));
     ShowWindow(hWnd, nCmdShow); UpdateWindow(hWnd);
     MSG msg;
-    while (GetMessage(&msg, nullptr, 0, 0)) { TranslateMessage(&msg); DispatchMessage(&msg); }
+    while (GetMessage(&msg, nullptr, 0, 0)) {
+        if (!hAccel || !TranslateAcceleratorW(hWnd, hAccel, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+    }
     g_Engine->Stop();
     delete g_PipeEngineImpl;
     g_PipeEngineImpl = nullptr;
