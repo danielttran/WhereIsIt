@@ -1,7 +1,9 @@
 #include "framework.h"
 #include "QueryEngine.h"
 #include "StringUtils.h"
+#include <algorithm>
 #include <cctype>
+#include <limits>
 #include <immintrin.h>
 #include <intrin.h>
 #include <windows.h>
@@ -180,14 +182,26 @@ static bool ParseBool(const std::string& raw) {
 
 bool ParseSizeBytes(const std::string& raw, uint64_t& out) {
     std::string text = ToLowerAscii(raw);
+    text.erase(std::remove_if(text.begin(), text.end(), [](unsigned char c) { return std::isspace(c) != 0; }), text.end());
+    static const std::regex kSizePattern(R"(^([0-9]+)(b|kb|mb|gb)?$)", std::regex_constants::ECMAScript);
+    std::smatch match;
+    if (!std::regex_match(text, match, kSizePattern) || match.size() < 3) return false;
+
     uint64_t mult = 1;
-    if (text.size() > 2 && text.substr(text.size() - 2) == "kb") { mult = 1024; text.resize(text.size() - 2); }
-    else if (text.size() > 2 && text.substr(text.size() - 2) == "mb") { mult = 1024ULL * 1024ULL; text.resize(text.size() - 2); }
-    else if (text.size() > 2 && text.substr(text.size() - 2) == "gb") { mult = 1024ULL * 1024ULL * 1024ULL; text.resize(text.size() - 2); }
-    else if (!text.empty() && text.back() == 'b') text.pop_back();
-    if (text.empty()) return false;
-    for (char c : text) if (!std::isdigit((unsigned char)c)) return false;
-    out = std::stoull(text) * mult;
+    const std::string suffix = match[2].str();
+    if (suffix == "kb") mult = 1024ULL;
+    else if (suffix == "mb") mult = 1024ULL * 1024ULL;
+    else if (suffix == "gb") mult = 1024ULL * 1024ULL * 1024ULL;
+    else if (suffix.empty() || suffix == "b") mult = 1ULL;
+    else return false;
+
+    try {
+        uint64_t base = std::stoull(match[1].str());
+        if (base > (std::numeric_limits<uint64_t>::max() / mult)) return false;
+        out = base * mult;
+    } catch (...) {
+        return false;
+    }
     return true;
 }
 
@@ -207,7 +221,7 @@ uint32_t FileTimeToUnixEpochSeconds(uint64_t fileTime) {
     uint64_t seconds = fileTime / kFileTimeTicksPerSecond;
     if (seconds <= kEpochDiffSeconds) return 0;
     uint64_t epoch = seconds - kEpochDiffSeconds;
-    return epoch > 0xFFFFFFFFULL ? 0xFFFFFFFFu : (uint32_t)epoch;
+    return epoch > static_cast<uint64_t>(kInvalidIndex) ? kInvalidIndex : static_cast<uint32_t>(epoch);
 }
 
 uint64_t UnixEpochSecondsToFileTime(uint32_t epoch) {
