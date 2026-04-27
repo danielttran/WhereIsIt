@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <vector>
 #include <string>
+#include <shlobj.h>
 #include "StringUtils.h"
 
 // Max response payload: 1 M result indices × 4 bytes + 4-byte count header.
@@ -13,6 +14,45 @@ static constexpr DWORD kMaxResultBytes  = 4u * 1024u * 1024u + sizeof(uint32_t);
 static constexpr DWORD kMaxResultCount  = (kMaxResultBytes - sizeof(uint32_t)) / sizeof(uint32_t);
 static constexpr DWORD kPipeCallTimeout = 5000;  // ms, passed to CallNamedPipeW
 static constexpr int   kSearchTimeoutMs = 5000;  // ms, server polls for engine results
+
+static bool IsPathWithin(const std::wstring& root, const std::wstring& child)
+{
+    if (root.empty() || child.empty()) return false;
+    std::wstring normalizedRoot = root;
+    std::wstring normalizedChild = child;
+    while (!normalizedRoot.empty() &&
+           (normalizedRoot.back() == L'\\' || normalizedRoot.back() == L'/')) {
+        normalizedRoot.pop_back();
+    }
+    while (!normalizedChild.empty() &&
+           (normalizedChild.back() == L'\\' || normalizedChild.back() == L'/')) {
+        normalizedChild.pop_back();
+    }
+    if (normalizedChild.size() < normalizedRoot.size()) return false;
+    if (_wcsnicmp(normalizedChild.c_str(), normalizedRoot.c_str(), normalizedRoot.size()) != 0) {
+        return false;
+    }
+    return normalizedChild.size() == normalizedRoot.size() ||
+           normalizedChild[normalizedRoot.size()] == L'\\';
+}
+
+static bool IsSecureServiceInstallPath(const std::wstring& exePath)
+{
+    PWSTR programFiles = nullptr;
+    PWSTR programFilesX86 = nullptr;
+    bool allowed = false;
+
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_ProgramFiles, 0, nullptr, &programFiles))) {
+        allowed = allowed || IsPathWithin(programFiles, exePath);
+    }
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_ProgramFilesX86, 0, nullptr, &programFilesX86))) {
+        allowed = allowed || IsPathWithin(programFilesX86, exePath);
+    }
+
+    if (programFiles) CoTaskMemFree(programFiles);
+    if (programFilesX86) CoTaskMemFree(programFilesX86);
+    return allowed;
+}
 
 // ---------------------------------------------------------------------------
 // Availability check
@@ -45,6 +85,11 @@ int ServiceInstall()
     wchar_t exePath[MAX_PATH];
     if (!GetModuleFileNameW(nullptr, exePath, MAX_PATH))
         return static_cast<int>(GetLastError());
+    std::wstring exeFullPath = exePath;
+    if (!IsSecureServiceInstallPath(exeFullPath)) {
+        Logger::Log(L"[WhereIsIt] Refusing service install from non-admin-controlled directory.");
+        return ERROR_ACCESS_DENIED;
+    }
 
     std::wstring cmd = L"\"";
     cmd += exePath;
@@ -155,9 +200,91 @@ static std::shared_ptr<std::vector<uint32_t>> WaitForNewResults(
     return r ? r : std::make_shared<std::vector<uint32_t>>();
 }
 
+static bool ReadClientMessage(HANDLE hPipe, void* buffer, DWORD bytesToRead, DWORD& bytesRead)
+{
+    bytesRead = 0;
+    OVERLAPPED ov{};
+    ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!ov.hEvent) return false;
+
+    BOOL ok = ReadFile(hPipe, buffer, bytesToRead, &bytesRead, &ov);
+    if (!ok && GetLastError() == ERROR_IO_PENDING) {
+        DWORD wait = WaitForSingleObject(ov.hEvent, kPipeCallTimeout);
+        if (wait == WAIT_OBJECT_0) {
+            ok = GetOverlappedResult(hPipe, &ov, &bytesRead, FALSE);
+        } else {
+            CancelIo(hPipe);
+            ok = FALSE;
+        }
+    }
+
+    CloseHandle(ov.hEvent);
+    return ok == TRUE;
+}
+
+static bool WriteClientMessage(HANDLE hPipe, const void* buffer, DWORD bytesToWrite)
+{
+    DWORD bytesWritten = 0;
+    OVERLAPPED ov{};
+    ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!ov.hEvent) return false;
+
+    BOOL ok = WriteFile(hPipe, buffer, bytesToWrite, &bytesWritten, &ov);
+    if (!ok && GetLastError() == ERROR_IO_PENDING) {
+        DWORD wait = WaitForSingleObject(ov.hEvent, kPipeCallTimeout);
+        if (wait == WAIT_OBJECT_0) {
+            ok = GetOverlappedResult(hPipe, &ov, &bytesWritten, FALSE);
+        } else {
+            CancelIo(hPipe);
+            ok = FALSE;
+        }
+    }
+
+    CloseHandle(ov.hEvent);
+    return ok == TRUE && bytesWritten == bytesToWrite;
+}
+
+static void HandleClientTransaction(HANDLE hPipe, IndexingEngine* engine)
+{
+    char readBuf[4096];
+    DWORD bytesRead = 0;
+    if (!ReadClientMessage(hPipe, readBuf, sizeof(readBuf), bytesRead) ||
+        bytesRead < sizeof(uint32_t)) {
+        DisconnectNamedPipe(hPipe);
+        CloseHandle(hPipe);
+        return;
+    }
+
+    uint32_t queryLen = 0;
+    memcpy(&queryLen, readBuf, sizeof(queryLen));
+    if (queryLen > bytesRead - sizeof(uint32_t)) {
+        DisconnectNamedPipe(hPipe);
+        CloseHandle(hPipe);
+        return;
+    }
+
+    std::string query(readBuf + sizeof(uint32_t), queryLen);
+    auto prevResults = engine->GetSearchResults();
+    engine->Search(query);
+    auto results = WaitForNewResults(engine, prevResults);
+
+    uint32_t count = static_cast<uint32_t>(
+        (std::min)(results->size(), static_cast<size_t>(kMaxResultCount)));
+
+    std::vector<uint8_t> response(sizeof(uint32_t) + static_cast<size_t>(count) * sizeof(uint32_t));
+    memcpy(response.data(), &count, sizeof(uint32_t));
+    if (count > 0) {
+        memcpy(response.data() + sizeof(uint32_t), results->data(), count * sizeof(uint32_t));
+    }
+
+    WriteClientMessage(hPipe, response.data(), static_cast<DWORD>(response.size()));
+    FlushFileBuffers(hPipe);
+    DisconnectNamedPipe(hPipe);
+    CloseHandle(hPipe);
+}
+
 void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
 {
-    HANDLE hResultsMap = NULL;
     for (;;) {
         if (WaitForSingleObject(hStopEvent, 0) == WAIT_OBJECT_0) break;
 
@@ -166,7 +293,7 @@ void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
             PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
             PIPE_UNLIMITED_INSTANCES,
-            kMaxResultBytes, 4096, 0, GetPermissiveSA());
+            kMaxResultBytes, 4096, 0, GetPipeServerSA());
 
         if (hPipe == INVALID_HANDLE_VALUE) break;
 
@@ -209,88 +336,8 @@ void RunNamedPipeServerLoop(IndexingEngine* engine, HANDLE hStopEvent)
             continue;
         }
 
-        // ---- Read request: [uint32_t queryLen][char query[queryLen]] ----
-        char  readBuf[4096];
-        DWORD bytesRead = 0;
-        {
-            OVERLAPPED rdOv{};
-            rdOv.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-            if (!rdOv.hEvent) {
-                DisconnectNamedPipe(hPipe);
-                CloseHandle(hPipe);
-                continue;
-            }
-
-            BOOL ok = ReadFile(hPipe, readBuf, sizeof(readBuf), &bytesRead, &rdOv);
-            if (!ok && GetLastError() == ERROR_IO_PENDING) {
-                ok = GetOverlappedResult(hPipe, &rdOv, &bytesRead, TRUE);
-                if (!ok) CancelIo(hPipe);
-            } else if (!ok) {
-                CancelIo(hPipe);
-            }
-
-            CloseHandle(rdOv.hEvent);
-
-            if (!ok || bytesRead < sizeof(uint32_t)) {
-                DisconnectNamedPipe(hPipe);
-                CloseHandle(hPipe);
-                continue;
-            }
-        }
-
-        uint32_t queryLen = 0;
-        memcpy(&queryLen, readBuf, sizeof(queryLen));
-        if (queryLen > bytesRead - sizeof(uint32_t)) {
-            DisconnectNamedPipe(hPipe);
-            CloseHandle(hPipe);
-            continue;
-        }
-
-        std::string query(readBuf + sizeof(uint32_t), queryLen);
-
-        // ---- Run search and wait for results ----
-        auto prevResults = engine->GetSearchResults();
-        engine->Search(query);
-        auto results = WaitForNewResults(engine, prevResults);
-
-        // ---- Write response: [uint32_t count] ----
-        uint32_t count = static_cast<uint32_t>(
-            (std::min)(results->size(), static_cast<size_t>(kMaxResultCount)));
-
-        if (count > 0) {
-            if (hResultsMap) CloseHandle(hResultsMap);
-            hResultsMap = CreateFileMappingW(INVALID_HANDLE_VALUE, GetPermissiveSA(), PAGE_READWRITE, 0, count * sizeof(uint32_t), L"Global\\WhereIsIt_Results");
-            if (hResultsMap) {
-                void* pView = MapViewOfFile(hResultsMap, FILE_MAP_WRITE, 0, 0, count * sizeof(uint32_t));
-                if (pView) {
-                    memcpy(pView, results->data(), count * sizeof(uint32_t));
-                    UnmapViewOfFile(pView);
-                }
-            }
-        }
-
-        DWORD responseSize = sizeof(uint32_t);
-        {
-            OVERLAPPED wrOv{};
-            wrOv.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-            if (wrOv.hEvent) {
-                DWORD written = 0;
-                BOOL  ok = WriteFile(hPipe, &count, responseSize, &written, &wrOv);
-                if (!ok && GetLastError() == ERROR_IO_PENDING) {
-                    ok = GetOverlappedResult(hPipe, &wrOv, &written, TRUE);
-                    if (!ok) CancelIo(hPipe);
-                } else if (!ok) {
-                    CancelIo(hPipe);
-                }
-                CloseHandle(wrOv.hEvent);
-            }
-        }
-
-        FlushFileBuffers(hPipe);
-        DisconnectNamedPipe(hPipe);
-        CloseHandle(hPipe);
+        std::thread(HandleClientTransaction, hPipe, engine).detach();
     }
-    if (hResultsMap) CloseHandle(hResultsMap);
 }
 
 // ---------------------------------------------------------------------------
@@ -588,10 +635,11 @@ void NamedPipeEngine::SearchWorker()
 
             uint32_t count = 0;
             DWORD bytesRead = 0;
+            std::vector<uint8_t> responseBuf(kMaxResultBytes);
             BOOL  ok = CallNamedPipeW(
                 WHEREISIT_PIPE_NAME,
                 writeBuf.data(), static_cast<DWORD>(writeBuf.size()),
-                &count,          sizeof(count),
+                responseBuf.data(), static_cast<DWORD>(responseBuf.size()),
                 &bytesRead,      kPipeCallTimeout);
 
             if (!ok) {
@@ -604,16 +652,12 @@ void NamedPipeEngine::SearchWorker()
 
             auto results = std::make_shared<std::vector<uint32_t>>();
             if (ok && bytesRead >= sizeof(uint32_t)) {
-                if (count > 0) {
+                memcpy(&count, responseBuf.data(), sizeof(uint32_t));
+                const DWORD expected = sizeof(uint32_t) + count * sizeof(uint32_t);
+                if (expected <= bytesRead && count <= kMaxResultCount) {
                     results->resize(count);
-                    HANDLE hMap = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\WhereIsIt_Results");
-                    if (hMap) {
-                        void* pView = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, count * sizeof(uint32_t));
-                        if (pView) {
-                            memcpy(results->data(), pView, count * sizeof(uint32_t));
-                            UnmapViewOfFile(pView);
-                        }
-                        CloseHandle(hMap);
+                    if (count > 0) {
+                        memcpy(results->data(), responseBuf.data() + sizeof(uint32_t), count * sizeof(uint32_t));
                     }
                 }
             }

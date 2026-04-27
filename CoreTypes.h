@@ -9,6 +9,8 @@ enum class DriveFileSystem {
 
 enum class QuerySortKey { Name, Path, Size, Date };
 
+constexpr uint32_t kInvalidIndex = 0xFFFFFFFFu;
+
 #pragma pack(push, 1)
 struct FileRecord {
     uint32_t NamePoolOffset;

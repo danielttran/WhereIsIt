@@ -15,7 +15,7 @@ char* StringPool::Reserve(size_t needed) {
             pMapName = mapName;
         }
 
-        HANDLE hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, GetPermissiveSA(), PAGE_READWRITE,
+        HANDLE hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, GetSharedMemoryReadOnlySA(), PAGE_READWRITE,
             (DWORD)((allocSize + 32) >> 32), (DWORD)((allocSize + 32) & 0xFFFFFFFF), pMapName);        char* view = nullptr;
         if (hMap) {
             view = (char*)MapViewOfFile(hMap, FILE_MAP_WRITE, 0, 0, allocSize + 32);
