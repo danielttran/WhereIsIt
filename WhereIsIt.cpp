@@ -554,7 +554,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // when SetViewMode bumps g_iconGeneration and may enqueue the first requests.
         g_iconWorkerRunning = true;
         auto workerFn = [hWnd]() {
-            CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);  // STA required for IShellItemImageFactory
+            (void)CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);  // STA required for IShellItemImageFactory
             // Cache a compatible HDC once per worker thread — avoids GetDC(NULL)/ReleaseDC overhead
             // (which hits the GDI lock) on every single thumbnail compositing call.
             HDC hdcScreen = GetDC(NULL);

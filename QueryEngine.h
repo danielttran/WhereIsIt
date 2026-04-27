@@ -8,10 +8,10 @@
 extern const unsigned char g_ToLowerLookup[256];
 
 std::string ToLowerAscii(std::string value);
-bool IsWordBoundary(const std::string& text, size_t pos);
+bool IsWordBoundary(const char* text, size_t len, size_t pos);
 bool FastContainsCIPtr(const char* haystack, const char* needleLow, size_t needleLen);
-bool FastContains(const std::string& haystack, const std::string& needle, bool caseSensitive);
-bool ContainsWholeWord(const std::string& haystack, const std::string& needle, bool caseSensitive);
+bool FastContains(const char* haystack, const std::string& needle, bool caseSensitive);
+bool ContainsWholeWord(const char* haystack, const std::string& needle, bool caseSensitive);
 int FastCompareIgnoreCase(const char* s1, const char* s2);
 uint32_t FileTimeToUnixEpochSeconds(uint64_t fileTime);
 uint64_t UnixEpochSecondsToFileTime(uint32_t epoch);
@@ -36,6 +36,7 @@ struct CompiledPattern {
     CompiledPattern(const std::string& pattern, std::regex_constants::syntax_option_type opts)
         : re(pattern, opts) {}
     bool match(const std::string& text) const { return std::regex_search(text, re); }
+    bool match(const char* text) const { return std::regex_search(text, re); }
 };
 
 enum class QueryNodeType { Term, And, Or, Not };

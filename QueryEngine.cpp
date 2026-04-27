@@ -53,10 +53,10 @@ std::string ToLowerAscii(std::string value) {
     return value;
 }
 
-bool FastContains(const std::string& haystack, const std::string& needle, bool caseSensitive) {
+bool FastContains(const char* haystack, const std::string& needle, bool caseSensitive) {
     if (needle.empty()) return true;
-    if (caseSensitive) return haystack.find(needle) != std::string::npos;
-    return FastContainsIgnoreCase(haystack.c_str(), needle.c_str());
+    if (caseSensitive) return strstr(haystack, needle.c_str()) != nullptr;
+    return FastContainsIgnoreCase(haystack, needle.c_str());
 }
 
 bool FastContainsCIPtr(const char* haystack, const char* needleLow, size_t needleLen) {
@@ -100,15 +100,15 @@ bool FastContainsCIPtr(const char* haystack, const char* needleLow, size_t needl
     return false;
 }
 
-bool IsWordBoundary(const std::string& text, size_t pos) {
-    if (pos >= text.size()) return true;
+bool IsWordBoundary(const char* text, size_t len, size_t pos) {
+    if (pos >= len) return true;
     unsigned char c = (unsigned char)text[pos];
     return !(std::isalnum(c) || c == '_');
 }
 
-bool ContainsWholeWord(const std::string& haystack, const std::string& needle, bool caseSensitive) {
+bool ContainsWholeWord(const char* haystack, const std::string& needle, bool caseSensitive) {
     if (needle.empty()) return true;
-    const size_t hLen = haystack.size(), nLen = needle.size();
+    const size_t hLen = strlen(haystack), nLen = needle.size();
     if (nLen > hLen) return false;
     for (size_t i = 0; i <= hLen - nLen; ++i) {
         bool match = true;
@@ -118,8 +118,8 @@ bool ContainsWholeWord(const std::string& haystack, const std::string& needle, b
             match = caseSensitive ? (hc == nc) : (g_ToLowerLookup[hc] == g_ToLowerLookup[nc]);
         }
         if (match) {
-            bool left  = (i == 0)            || IsWordBoundary(haystack, i - 1);
-            bool right = (i + nLen >= hLen)  || IsWordBoundary(haystack, i + nLen);
+            bool left  = (i == 0)            || IsWordBoundary(haystack, hLen, i - 1);
+            bool right = (i + nLen >= hLen)  || IsWordBoundary(haystack, hLen, i + nLen);
             if (left && right) return true;
         }
     }

@@ -169,7 +169,7 @@ bool IndexingEngine::SaveIndex(const std::wstring& filePath) {
 
     uint8_t* p = base;
 
-    IndexHeader hdr = { 0x54494957, 8, driveCount, recordCount, poolSize, giantCount };
+    IndexHeader hdr = { 0x54494957, 9, driveCount, recordCount, poolSize, giantCount };
     memcpy(p, &hdr, sizeof(hdr)); p += sizeof(hdr);
 
     for (const auto& d : m_drives) {
@@ -257,7 +257,7 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
     if (p + sizeof(IndexHeader) > end) { Logger::Log(L"[WhereIsIt] Index too small for header."); return false; }
     const IndexHeader& h = *(const IndexHeader*)p; p += sizeof(IndexHeader);
 
-    if (h.Magic != 0x54494957 || h.Version != 8) {
+    if (h.Magic != 0x54494957 || h.Version != 9) {
         Logger::Log(L"[WhereIsIt] Index magic/version mismatch.");
         return false;
     }
@@ -684,8 +684,8 @@ namespace {
 }
 
 void IndexingEngine::SearchThread() {
-    std::function<bool(const QueryNode*, const QueryPlan&, uint32_t, const FileRecord&, const std::string&, const std::function<std::string()>&)> evaluateTerm;
-    evaluateTerm = [this, &evaluateTerm](const QueryNode* node, const QueryPlan& plan, uint32_t recIdx, const FileRecord& rec, const std::string& name, const std::function<std::string()>& getFullPath) -> bool {
+    std::function<bool(const QueryNode*, const QueryPlan&, uint32_t, const FileRecord&, const char*, const std::function<std::string()>&)> evaluateTerm;
+    evaluateTerm = [this, &evaluateTerm](const QueryNode* node, const QueryPlan& plan, uint32_t recIdx, const FileRecord& rec, const char* name, const std::function<std::string()>& getFullPath) -> bool {
         if (!node) return true;
         if (node->Type == QueryNodeType::And) return evaluateTerm(node->Left.get(), plan, recIdx, rec, name, getFullPath) && evaluateTerm(node->Right.get(), plan, recIdx, rec, name, getFullPath);
         if (node->Type == QueryNodeType::Or) return evaluateTerm(node->Left.get(), plan, recIdx, rec, name, getFullPath) || evaluateTerm(node->Right.get(), plan, recIdx, rec, name, getFullPath);
@@ -699,10 +699,10 @@ void IndexingEngine::SearchThread() {
         if (low.rfind("ext:", 0) == 0) {
             // Zero-allocation: use raw pointer into TermLower and scan name directly.
             const char* extNeedle = node->TermLower.c_str() + 4;
-            const char* dot = strrchr(name.c_str(), '.');
+            const char* dot = strrchr(name, '.');
             return dot && *(dot + 1) && (FastCompareIgnoreCase(dot + 1, extNeedle) == 0);
         }
-        if (low.rfind("path:", 0) == 0) return FastContains(getFullPath(), term.substr(5), false);
+        if (low.rfind("path:", 0) == 0) return FastContains(getFullPath().c_str(), term.substr(5), false);
         if (low.rfind("attr:", 0) == 0 || low.rfind("attrib:", 0) == 0) {
             size_t split = term.find(':');
             std::string attr = split == std::string::npos ? std::string() : ToLowerAscii(term.substr(split + 1));
@@ -768,34 +768,34 @@ void IndexingEngine::SearchThread() {
             if (!filePart.empty()) {
                 bool matchName = false;
                 if (filePart.find_first_of("*?") != std::string::npos) {
-                    matchName = WildcardMatchIAscii(filePart.c_str(), name.c_str());
+                    matchName = WildcardMatchIAscii(filePart.c_str(), name);
                 } else {
                     // Exact filename match: C:\Windows\dd.exe must only match "dd.exe",
                     // not substrings like "odd.exe". Wildcard form *dd.exe is handled above.
                     if (plan.Config.CaseSensitive)
-                        matchName = (name == filePart);
+                        matchName = (strcmp(name, filePart.c_str()) == 0);
                     else
-                        matchName = (FastCompareIgnoreCase(name.c_str(), filePart.c_str()) == 0);
+                        matchName = (FastCompareIgnoreCase(name, filePart.c_str()) == 0);
                 }
                 if (!matchName) return false;
             }
 
             std::string p = getFullPath();
-            if (!p.empty() && !FastContains(p, dirPart, plan.Config.CaseSensitive)) return false;
+            if (!p.empty() && !FastContains(p.c_str(), dirPart, plan.Config.CaseSensitive)) return false;
             return true;
         }
 
         if (term.find_first_of("*?") != std::string::npos) {
-            return WildcardMatchIAscii(term.c_str(), name.c_str());
+            return WildcardMatchIAscii(term.c_str(), name);
         }
         
         if (plan.Config.WholeWord) {
             if (ContainsWholeWord(name, term, plan.Config.CaseSensitive)) return true;
-            if (plan.Config.MatchPath && ContainsWholeWord(getFullPath(), term, plan.Config.CaseSensitive)) return true;
+            if (plan.Config.MatchPath && ContainsWholeWord(getFullPath().c_str(), term, plan.Config.CaseSensitive)) return true;
             return false;
         }
         if (FastContains(name, term, plan.Config.CaseSensitive)) return true;
-        if (plan.Config.MatchPath && FastContains(getFullPath(), term, plan.Config.CaseSensitive)) return true;
+        if (plan.Config.MatchPath && FastContains(getFullPath().c_str(), term, plan.Config.CaseSensitive)) return true;
         return false;
     };
 
@@ -1056,7 +1056,7 @@ void IndexingEngine::SearchThread() {
                                     // 2. Filename matched — now check dir (lazy, only for hits)
                                     if (!dirPart.empty()) {
                                         std::string fullPath = WideToUtf8(GetFullPathInternal(idx));
-                                        if (!FastContains(fullPath, dirPart, caseSensitive)) continue;
+                                        if (!FastContains(fullPath.c_str(), dirPart, caseSensitive)) continue;
                                     }
 
                                     if (hasExtFilter && !passesFilter(rec, name)) continue;
@@ -1078,14 +1078,13 @@ void IndexingEngine::SearchThread() {
                                     const auto& rec = m_recordPool.GetRecord(idx);
                                     if (rec.MftIndex == 0xFFFFFFFF) continue;
                                     const char* namePtr = m_pool.GetString(rec.NamePoolOffset);
-                                    const std::string nameStr(namePtr);
                                     std::string cachedPath;
                                     bool pathCached = false;
                                     auto getPath = [&]() -> std::string {
                                         if (!pathCached) { cachedPath = WideToUtf8(GetFullPathInternal(idx)); pathCached = true; }
                                         return cachedPath;
                                     };
-                                    if (!evaluateTerm(plan.Root.get(), plan, idx, rec, nameStr, getPath)) continue;
+                                    if (!evaluateTerm(plan.Root.get(), plan, idx, rec, namePtr, getPath)) continue;
                                     if (hasExtFilter && !passesFilter(rec, namePtr)) continue;
                                     results->push_back(idx);
                                 }
@@ -1840,26 +1839,30 @@ void IndexingEngine::ScanMftForDrive(DriveScanContext& ctx) {
             };
 
             // Commit a 0x30 $FILE_NAME attribute to ctx.Records under effectiveMftIdx.
-            auto commitFileName = [&](uint8_t* recBuf, uint32_t attrOff, uint32_t effectiveMftIdx, uint16_t seq, uint16_t rhFlags) {
+            auto commitFileName = [&](uint8_t* recBuf, uint32_t attrOff, uint32_t effectiveMftIdx, uint16_t seq, uint16_t rhFlags, uint64_t realDataSize) {
                 MFT_ATTRIBUTE* aa = (MFT_ATTRIBUTE*)(recBuf + attrOff);
                 if (aa->Type != 0x30 || aa->NonResident) return;
                 MFT_FILE_NAME* fn = (MFT_FILE_NAME*)(recBuf + attrOff + ((MFT_RESIDENT_ATTRIBUTE*)aa)->ValueOffset);
-                if (fn->NameNamespace == 2) return;  // skip DOS-only short names
+                uint64_t sizeToUse = fn->DataSize;
+                auto itSize = ctx.RealSizes.find(effectiveMftIdx);
+                if (itSize != ctx.RealSizes.end() && itSize->second > sizeToUse) sizeToUse = itSize->second;
+                else if (realDataSize != 0xFFFFFFFFFFFFFFFFULL && realDataSize > sizeToUse) sizeToUse = realDataSize;
+
                 FileRecord entry = {};
                 entry.NamePoolOffset   = ctx.Pool.AddString(fn->Name, fn->NameLength);
                 entry.ParentMftIndex   = (uint32_t)(fn->ParentDirectory & 0xFFFFFFFFFFFFLL);
                 entry.MftIndex         = effectiveMftIdx;
                 entry.LastModifiedEpoch = FileTimeToUnixEpochSeconds(fn->LastWriteTime);
-                entry.FileSize         = fn->DataSize >= 0xFFFFFFFFULL ? 0xFFFFFFFFu : (uint32_t)fn->DataSize;
+                entry.FileSize         = sizeToUse >= 0xFFFFFFFFULL ? 0xFFFFFFFFu : (uint32_t)sizeToUse;
                 entry.MftSequence      = seq;
                 entry.ParentSequence   = (uint16_t)(fn->ParentDirectory >> 48);
                 entry.DriveIndex       = ctx.DriveIndex;
-                entry.IsGiantFile      = fn->DataSize >= 0xFFFFFFFFULL ? 1u : 0u;
+                entry.IsGiantFile      = sizeToUse >= 0xFFFFFFFFULL ? 1u : 0u;
                 entry.FileAttributes   = (uint16_t)fn->FileAttributes;
                 entry.Reserved = 0; entry.ParentRecordIndex = 0xFFFFFFFF;
                 if (rhFlags & 0x02) entry.FileAttributes |= 0x10;
                 uint32_t ri = (uint32_t)ctx.Records.size(); ctx.Records.push_back(entry);
-                if (entry.IsGiantFile) ctx.GiantFileSizes[ri] = fn->DataSize;
+                if (entry.IsGiantFile) ctx.GiantFileSizes[ri] = sizeToUse;
                 // Only set if vacant: base-record 0x30 is processed before extension records
                 // (lower MFT index first), so a later extension must not overwrite it.
                 if (effectiveMftIdx < (uint32_t)ctx.LookupTable.size() && ctx.LookupTable[effectiveMftIdx] == 0xFFFFFFFF)
@@ -1901,13 +1904,42 @@ void IndexingEngine::ScanMftForDrive(DriveScanContext& ctx) {
                             ? (uint16_t)(rh->BaseRecord >> 48)
                             : rh->SequenceNumber;
 
+                        uint64_t realDataSize = 0xFFFFFFFFFFFFFFFFULL;
                         uint32_t ao = rh->AttributeOffset;
+                        while (ao + sizeof(MFT_ATTRIBUTE) < nt.BytesPerFileRecordSegment) {
+                            MFT_ATTRIBUTE* aa = (MFT_ATTRIBUTE*)&eb[k + ao];
+                            if (aa->Type == 0xFFFFFFFF) break;
+                            if (aa->Type == 0x80 && aa->NameLength == 0) {
+                                realDataSize = aa->NonResident ? ((MFT_NONRESIDENT_ATTRIBUTE*)aa)->DataSize : ((MFT_RESIDENT_ATTRIBUTE*)aa)->ValueLength;
+                                ctx.RealSizes[effectiveMftIdx] = realDataSize;
+                                if (effectiveMftIdx < (uint32_t)ctx.LookupTable.size() && ctx.LookupTable[effectiveMftIdx] != 0xFFFFFFFF) {
+                                    uint32_t ri = ctx.LookupTable[effectiveMftIdx];
+                                    while (ri < ctx.Records.size() && ctx.Records[ri].MftIndex == effectiveMftIdx) {
+                                        uint64_t currentSize = ctx.Records[ri].IsGiantFile ? ctx.GiantFileSizes[ri] : ctx.Records[ri].FileSize;
+                                        if (realDataSize > currentSize) {
+                                            ctx.Records[ri].FileSize = realDataSize >= 0xFFFFFFFFULL ? 0xFFFFFFFFu : (uint32_t)realDataSize;
+                                            if (realDataSize >= 0xFFFFFFFFULL) {
+                                                ctx.Records[ri].IsGiantFile = 1;
+                                                ctx.GiantFileSizes[ri] = realDataSize;
+                                            } else {
+                                                ctx.Records[ri].IsGiantFile = 0;
+                                                ctx.GiantFileSizes.erase(ri);
+                                            }
+                                        }
+                                        ri++;
+                                    }
+                                }
+                            }
+                            if (!aa->Length) break; ao += aa->Length;
+                        }
+
+                        ao = rh->AttributeOffset;
                         while (ao + sizeof(MFT_ATTRIBUTE) < nt.BytesPerFileRecordSegment) {
                             MFT_ATTRIBUTE* aa = (MFT_ATTRIBUTE*)&eb[k + ao];
                             if (aa->Type == 0xFFFFFFFF) break;
 
                             if (aa->Type == 0x30 && !aa->NonResident) {
-                                commitFileName(&eb[k], ao, effectiveMftIdx, effectiveSeq, rh->Flags);
+                                commitFileName(&eb[k], ao, effectiveMftIdx, effectiveSeq, rh->Flags, realDataSize);
                                 if (isExtension) processedExtensions.insert(tm);
                             } else if (aa->Type == 0x20 && !isExtension && !aa->NonResident) {
                                 // Parse $ATTRIBUTE_LIST: collect 0x30 attributes hosted in extension records
@@ -1946,7 +1978,7 @@ void IndexingEngine::ScanMftForDrive(DriveScanContext& ctx) {
                     MFT_ATTRIBUTE* aa = (MFT_ATTRIBUTE*)&extBuf[ao];
                     if (aa->Type == 0xFFFFFFFF) break;
                     if (aa->Type == 0x30 && !aa->NonResident)
-                        commitFileName(extBuf.data(), ao, baseMftIdx, baseSeq, rh->Flags);
+                        commitFileName(extBuf.data(), ao, baseMftIdx, baseSeq, rh->Flags, 0xFFFFFFFFFFFFFFFFULL);
                     if (!aa->Length) break; ao += aa->Length;
                 }
             }

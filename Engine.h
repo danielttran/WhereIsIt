@@ -151,12 +151,14 @@ private:
         std::vector<FileRecord> Records;
         std::vector<uint32_t> LookupTable;
         std::unordered_map<uint32_t, uint64_t> GiantFileSizes;
+        std::unordered_map<uint32_t, uint64_t> RealSizes; // effectiveMftIdx -> DataSize from 0x80 attribute
         StringPool Pool;
         uint8_t DriveIndex;
         std::wstring DriveLetter;
         HANDLE VolumeHandle;
         DriveFileSystem Type;
         uint64_t LastProcessedUsn = 0;
+        DriveScanContext() : Pool(false) {}
     };
 
     std::wstring GetFullPathInternal(uint32_t recordIndex) const;

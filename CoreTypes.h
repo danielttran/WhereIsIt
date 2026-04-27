@@ -40,6 +40,11 @@ struct MFT_ATTRIBUTE {
     uint16_t NameOffset; uint16_t Flags; uint16_t AttributeID;
 };
 struct MFT_RESIDENT_ATTRIBUTE { MFT_ATTRIBUTE Header; uint32_t ValueLength; uint16_t ValueOffset; uint8_t Flags; uint8_t Reserved; };
+struct MFT_NONRESIDENT_ATTRIBUTE {
+    MFT_ATTRIBUTE Header; uint64_t StartingVcn; uint64_t LastVcn; uint16_t RunArrayOffset;
+    uint16_t CompressionUnit; uint32_t Padding; uint64_t AllocatedSize; uint64_t DataSize;
+    uint64_t InitializedSize;
+};
 struct MFT_FILE_NAME {
     uint64_t ParentDirectory; uint64_t CreationTime; uint64_t ChangeTime; uint64_t LastWriteTime;
     uint64_t LastAccessTime; uint64_t AllocatedSize; uint64_t DataSize; uint32_t FileAttributes;
