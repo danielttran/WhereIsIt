@@ -242,7 +242,8 @@ int GetIconIndex(const std::wstring& /*filename*/, uint16_t attributes, uint32_t
                 return it->second.first;
             }
         }
-        // Return the generic file icon while the real one loads asynchronously.
+        // Cache miss: enqueue async load, return generic icon immediately.
+        EnqueueIconRequest(recordIdx, listIdx, /*priority=*/true);
         return (g_fileIconIdx != -1) ? g_fileIconIdx : 0;
     } else {
         std::lock_guard<std::mutex> lock(g_iconMutex);
@@ -253,10 +254,8 @@ int GetIconIndex(const std::wstring& /*filename*/, uint16_t attributes, uint32_t
         }
     }
 
-    // Visible item: priority = true so it jumps to the front of the queue.
+    // Icon-view cache miss: enqueue thumbnail decode.
     EnqueueIconRequest(recordIdx, listIdx, /*priority=*/true);
-    
-    if (g_CurrentViewMode == LV_VIEW_DETAILS) return g_fileIconIdx;
     return (attributes & FILE_ATTRIBUTE_DIRECTORY) ? g_customFolderIconIdx : g_customFileIconIdx;
 }
 
@@ -875,6 +874,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 } else {
                     auto lruIt = g_iconCacheLru.insert(g_iconCacheLru.begin(), recordIdx);
                     g_recordIconCache[recordIdx] = { iconIdx, lruIt };
+                    // Evict the LRU entry if the cache has grown too large.
+                    if ((int)g_recordIconCache.size() > MAX_ICON_CACHE_ENTRIES && !g_iconCacheLru.empty()) {
+                        uint32_t evictRecord = g_iconCacheLru.back();
+                        g_iconCacheLru.pop_back();
+                        g_recordIconCache.erase(evictRecord);
+                    }
                 }
             }
             // Redraw only the visible rows rather than invalidating the entire control.
@@ -1249,9 +1254,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                         WaitForSingleObject(sei.hProcess, INFINITE);
                         CloseHandle(sei.hProcess);
                     }
-                    // Give the service a brief moment to start its named pipe server
-                    Sleep(1000);
-                    usePipe = IsNamedPipeServerAvailable();
+                    // Poll until the service pipe is available (up to 5 s).
+                    for (int poll = 0; poll < 20; ++poll) {
+                        usePipe = IsNamedPipeServerAvailable();
+                        if (usePipe) break;
+                        Sleep(250);
+                    }
                 } else {
                     return 0; // Elevation canceled
                 }
