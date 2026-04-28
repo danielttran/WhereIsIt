@@ -1023,7 +1023,7 @@ void IndexingEngine::SearchThread() {
                             const std::string& exprTerm = plan.Tokens[0];
                             for (size_t ci = 0; ci < exprTerm.size(); ++ci) {
                                 char c = exprTerm[ci];
-                                if (c == ' ' || c == '\t' || c == '"') return false;
+                                if (c == '"') return false;
                                 if (c == '\\' || c == '/') { hasSlash = true; continue; }
                                 if (c == ':' && ci != 1) return false;
                             }
@@ -1824,7 +1824,7 @@ std::string IndexingEngine::GetFullPathUTF8Internal(uint32_t recordIdx) const {
 
         const FileRecord& r = m_recordPool.GetRecord(cur);
         rootDrive = r.DriveIndex;
-        if (cur != recordIdx) {
+        {
             const char* name = m_pool.GetString(r.NamePoolOffset);
             if (name && (name[0] != '.' || (name[1] != '\0' && (name[1] != '.' || name[2] != '\0')))) {
                 size_t len = strlen(name);
