@@ -115,13 +115,6 @@ void IndexingEngine::Stop() {
     joinWithTimeout(m_mainWorker, 5000);
     joinWithTimeout(m_searchWorker, 5000);
 
-    // If we've signalled stop and waited 5s, but threads are still blocked
-    // (e.g. on a kernel call like ReadFile), we terminate the process to
-    // prevent a "ghost" background process.
-    if (m_mainWorker.joinable() || m_searchWorker.joinable()) {
-        std::terminate();
-    }
-
     if (m_stopEvent) { CloseHandle(m_stopEvent); m_stopEvent = NULL; }
     CloseAllDriveHandles();
 }
@@ -429,7 +422,7 @@ uint64_t IndexingEngine::ResolveFileSize(const FileRecord& rec, uint32_t recordI
     if (!rec.IsGiantFile) return rec.FileSize;
     auto it = m_giantFileSizes.find(recordIndex);
     if (it != m_giantFileSizes.end()) return it->second;
-    return 0xFFFFFFFFULL;
+    return (uint64_t)kGiantFileMarker;
 }
 
 uint32_t IndexingEngine::FileTimeToEpoch(uint64_t fileTime) const {
@@ -640,73 +633,6 @@ void IndexingEngine::Sort(QuerySortKey key, bool descending) {
 
 namespace {
     class SortAbortedException : public std::exception {};
-
-    uint32_t ResolveParentRecordIndex(
-        const FileRecord& rec,
-        const std::vector<FileRecord>& records,
-        const std::vector<std::vector<uint32_t>>& mftLookupTables) {
-        const uint8_t di = rec.DriveIndex;
-        if (di >= (uint8_t)mftLookupTables.size()) return kInvalidIndex;
-        if (rec.ParentMftIndex < 5 || rec.ParentMftIndex >= (uint32_t)mftLookupTables[di].size()) return kInvalidIndex;
-        const uint32_t parentIdx = mftLookupTables[di][rec.ParentMftIndex];
-        if (parentIdx == kInvalidIndex || parentIdx >= (uint32_t)records.size()) return kInvalidIndex;
-        if (records[parentIdx].MftSequence != rec.ParentSequence) return kInvalidIndex;
-        return parentIdx;
-    }
-
-    int ComparePathByHierarchy(
-        uint32_t aIdx,
-        uint32_t bIdx,
-        const std::vector<FileRecord>& records,
-        const std::vector<std::string>& driveLetters,
-        const std::vector<std::vector<uint32_t>>& mftLookupTables,
-        const StringPool& pool) {
-        if (aIdx >= records.size() || bIdx >= records.size()) return (aIdx < bIdx) ? -1 : 1;
-
-        const FileRecord& aRec = records[aIdx];
-        const FileRecord& bRec = records[bIdx];
-
-        if (aRec.DriveIndex != bRec.DriveIndex) {
-            const char* aDrive = (aRec.DriveIndex < driveLetters.size()) ? driveLetters[aRec.DriveIndex].c_str() : "";
-            const char* bDrive = (bRec.DriveIndex < driveLetters.size()) ? driveLetters[bRec.DriveIndex].c_str() : "";
-            int driveCmp = FastCompareIgnoreCase(aDrive, bDrive);
-            if (driveCmp != 0) return driveCmp;
-            return (aRec.DriveIndex < bRec.DriveIndex) ? -1 : 1;
-        }
-
-        constexpr size_t kMaxDepth = 1024;
-        uint32_t aChain[kMaxDepth];
-        uint32_t bChain[kMaxDepth];
-        size_t aCount = 0, bCount = 0;
-
-        uint32_t cur = aIdx;
-        while (aCount < kMaxDepth && cur != kInvalidIndex) {
-            aChain[aCount++] = cur;
-            const uint32_t parent = ResolveParentRecordIndex(records[cur], records, mftLookupTables);
-            if (parent == cur) break;
-            cur = parent;
-        }
-        cur = bIdx;
-        while (bCount < kMaxDepth && cur != kInvalidIndex) {
-            bChain[bCount++] = cur;
-            const uint32_t parent = ResolveParentRecordIndex(records[cur], records, mftLookupTables);
-            if (parent == cur) break;
-            cur = parent;
-        }
-
-        size_t ai = aCount;
-        size_t bi = bCount;
-        while (ai > 0 && bi > 0) {
-            const char* aName = pool.GetString(records[aChain[ai - 1]].NamePoolOffset);
-            const char* bName = pool.GetString(records[bChain[bi - 1]].NamePoolOffset);
-            int cmp = FastCompareIgnoreCase(aName ? aName : "", bName ? bName : "");
-            if (cmp != 0) return cmp;
-            --ai;
-            --bi;
-        }
-        if (ai == 0 && bi == 0) return 0;
-        return (ai == 0) ? -1 : 1;
-    }
 }
 
 void IndexingEngine::SearchThread() {
@@ -1194,7 +1120,7 @@ void IndexingEngine::SearchThread() {
                 pathEntries.reserve(n);
                 bool aborted = false;
                 for (size_t pi = 0; pi < n; ++pi) {
-                    if ((pi & 0xFF) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) { aborted = true; break; }
+                    if ((pi & 0xFF) == 0 && (m_isSearchRequested.load(std::memory_order_relaxed) || m_isSortOnlyRequested.load(std::memory_order_relaxed))) { aborted = true; break; }
                     pathEntries.push_back({GetFullPathUTF8Internal((*results)[pi]), (*results)[pi]});
                 }
                 if (!aborted) {
@@ -1202,7 +1128,7 @@ void IndexingEngine::SearchThread() {
                         int cmpCount = 0;
                         std::sort(pathEntries.begin(), pathEntries.end(),
                             [sortDescending, &cmpCount, this](const PathEntry& a, const PathEntry& b) {
-                                if ((++cmpCount & 0x3F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) throw SortAbortedException();
+                                if ((++cmpCount & 0x3F) == 0 && (m_isSearchRequested.load(std::memory_order_relaxed) || m_isSortOnlyRequested.load(std::memory_order_relaxed))) throw SortAbortedException();
                                 int cmp = FastCompareIgnoreCase(a.path.c_str(), b.path.c_str());
                                 if (cmp == 0) cmp = (a.recIdx < b.recIdx) ? -1 : 1;
                                 return sortDescending ? (cmp > 0) : (cmp < 0);
@@ -1215,7 +1141,7 @@ void IndexingEngine::SearchThread() {
                 try {
                     int cmpCount = 0;
                     std::sort(results->begin(), results->end(), [this, sortKey, sortDescending, &cmpCount](uint32_t a, uint32_t b) {
-                        if ((++cmpCount & 0x3F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) throw SortAbortedException();
+                        if ((++cmpCount & 0x3F) == 0 && (m_isSearchRequested.load(std::memory_order_relaxed) || m_isSortOnlyRequested.load(std::memory_order_relaxed))) throw SortAbortedException();
                         const auto& ra = m_recordPool.GetRecord(a);
                         const auto& rb = m_recordPool.GetRecord(b);
                         
@@ -1301,17 +1227,34 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
     // massive file-system events (e.g., node_modules installs creating tens of thousands
     // of files at once).
     constexpr size_t kEpochSize = 256;
+
+    // Pre-reserve memory BEFORE acquiring the exclusive lock. CreateFileMappingW and
+    // MapViewOfFile are kernel calls that can stall; holding m_dataMutex during them
+    // blocks all readers (SearchThread, UI paint) for the full mapping duration.
+    {
+        uint32_t preCount = m_recordsCount ? InterlockedCompareExchange(m_recordsCount, 0, 0) : 0;
+        m_recordPool.Reserve(preCount + (uint32_t)deltas.size());
+    }
+
+    // RAII guard so m_hDataMutex is always released, even on exception or early break.
+    struct NamedMutexGuard {
+        HANDLE h;
+        bool   held = false;
+        explicit NamedMutexGuard(HANDLE h_) : h(h_) {}
+        bool acquire() {
+            if (!h) { held = true; return true; }
+            DWORD wr = WaitForSingleObject(h, INFINITE);
+            held = (wr == WAIT_OBJECT_0 || wr == WAIT_ABANDONED);
+            return held;
+        }
+        void release() { if (held && h) { ReleaseMutex(h); held = false; } }
+        ~NamedMutexGuard() { release(); }
+    } namedMtx(m_hDataMutex);
+
     // Acquire global named mutex FIRST, before local shared_mutex to maintain correct
     // lock order hierarchy and avoid cross-process deadlocks.
-    if (m_hDataMutex) {
-        DWORD wr = WaitForSingleObject(m_hDataMutex, INFINITE);
-        if (wr != WAIT_OBJECT_0 && wr != WAIT_ABANDONED) return;
-    }
+    if (!namedMtx.acquire()) return;
     std::unique_lock<std::shared_mutex> lock(m_dataMutex);
-    
-    // Pre-reserve memory to prevent OOB chunk access during rapid fetch_add index generation
-    uint32_t currentCount = m_recordsCount ? InterlockedCompareExchange(m_recordsCount, 0, 0) : 0;
-    m_recordPool.Reserve(currentCount + deltas.size());
 
     for (size_t i = 0; i < deltas.size(); ++i) {
         const auto& d = deltas[i];
@@ -1356,7 +1299,7 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
         if (nameOffset == 0) {
             if (incomingNameUtf8.empty()) continue;  // guard matches AddString's bytesNeeded<=1 path
             try { nameOffset = m_pool.AddRawData(incomingNameUtf8.c_str(), incomingNameUtf8.size() + 1); }
-            catch (const std::bad_alloc&) { continue; }
+            catch (const std::bad_alloc&) { m_indexDirty = true; continue; }
         }
 
         FileRecord rec = {};
@@ -1364,11 +1307,11 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
         rec.ParentMftIndex = d.ParentMftIndex;
         rec.MftIndex = d.MftIndex;
         rec.LastModifiedEpoch = FileTimeToEpoch(d.LastModified);
-        rec.FileSize = (d.FileSize >= 0xFFFFFFFFULL) ? kInvalidIndex : static_cast<uint32_t>(d.FileSize);
+        rec.FileSize = (d.FileSize >= (uint64_t)kGiantFileMarker) ? kGiantFileMarker : static_cast<uint32_t>(d.FileSize);
         rec.MftSequence = d.MftSequence;
         rec.ParentSequence = d.ParentSequence;
         rec.DriveIndex = di;
-        rec.IsGiantFile = d.FileSize >= 0xFFFFFFFFULL ? 1u : 0u;
+        rec.IsGiantFile = d.FileSize >= (uint64_t)kGiantFileMarker ? 1u : 0u;
         rec.FileAttributes = d.FileAttributes;
         rec.Reserved = 0;
         rec.ParentRecordIndex = kInvalidIndex;
@@ -1384,7 +1327,7 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
         }
         if (d.MftIndex >= (uint32_t)m_mftLookupTables[di].size()) {
             try { m_mftLookupTables[di].resize(d.MftIndex + 10000, kInvalidIndex); }
-            catch (const std::bad_alloc&) { continue; }
+            catch (const std::bad_alloc&) { m_indexDirty = true; continue; }
         }
         if (existing != kInvalidIndex && existing < GetRecordCount()) {
             if (m_recordPool.GetRecord(existing).MftSequence <= d.MftSequence) {
@@ -1422,7 +1365,6 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
             try {
                 if (m_recordsCount) {
                     uint32_t newIdx = (uint32_t)InterlockedExchangeAdd(m_recordsCount, 1);
-                    m_recordPool.Reserve(newIdx + 1);
                     m_recordPool.GetRecord(newIdx) = rec;
 
                     if (!m_preSortedByName.empty()) {
@@ -1438,6 +1380,7 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
                     if (rec.IsGiantFile) m_giantFileSizes[newIdx] = d.FileSize;
                 }
             } catch (const std::bad_alloc&) {
+                m_indexDirty = true;
                 continue;
             }
         }
@@ -1445,17 +1388,13 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
         // Yield the exclusive lock every kEpochSize operations so readers can proceed.
         if ((i & (kEpochSize - 1)) == (kEpochSize - 1) && i + 1 < deltas.size()) {
             lock.unlock();
-            if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
+            namedMtx.release();
             std::this_thread::yield();
-            if (m_hDataMutex) {
-                DWORD wr = WaitForSingleObject(m_hDataMutex, INFINITE);
-                if (wr != WAIT_OBJECT_0 && wr != WAIT_ABANDONED) break;
-            }
+            if (!namedMtx.acquire()) break;
             lock.lock();
         }
     }
-    lock.unlock();
-    if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
+    // Destructors release lock (unique_lock) then namedMtx (NamedMutexGuard) in LIFO order.
 }
 
 void IndexingEngine::HandleUsnJournalRecord(USN_RECORD_V2* r, uint8_t di) {
@@ -1571,6 +1510,12 @@ void IndexingEngine::MonitorChanges() {
 
         if (anyChanges) {
             ApplyPendingUsnDeltas();
+            if (m_indexDirty.load(std::memory_order_acquire)) {
+                // OOM during delta application — index is partially corrupt.
+                // Break so WorkerThread can schedule a full re-scan.
+                Logger::Log(L"[WhereIsIt] OOM during USN processing; exiting MonitorChanges for full re-scan.");
+                break;
+            }
             // Trigger a re-search immediately on every USN batch so changes appear
             // in the results without delay. The search thread coalesces rapid-fire
             // events via the atomic m_isSearchRequested flag — if a search is already
@@ -1806,8 +1751,8 @@ void IndexingEngine::PropagateDirectorySizes() {
         uint64_t parentSize = ResolveFileSize(parent, parentIdx);
         uint64_t newSize    = parentSize + childSize;
 
-        if (newSize >= 0xFFFFFFFFULL) {
-            parent.FileSize  = 0xFFFFFFFFu;
+        if (newSize >= (uint64_t)kGiantFileMarker) {
+            parent.FileSize  = kGiantFileMarker;
             parent.IsGiantFile = 1;
             m_giantFileSizes[parentIdx] = newSize;
         } else {
@@ -1819,7 +1764,6 @@ void IndexingEngine::PropagateDirectorySizes() {
             }
         }
         parent.DirSizeComputed = 1;
-        if (m_hDataChangedEvent) SetEvent(m_hDataChangedEvent);
         }
     if (m_hDataChangedEvent) SetEvent(m_hDataChangedEvent);
 }
@@ -1858,7 +1802,7 @@ std::string IndexingEngine::GetFullPathUTF8Internal(uint32_t recordIdx) const {
         }
 
         uint32_t pi = r.ParentRecordIndex;
-        if (pi == 0xFFFFFFFF || pi >= GetRecordCount() || pi == cur) break;
+        if (pi == kInvalidIndex || pi >= GetRecordCount() || pi == cur) break;
         cur = pi;
     }
     for (int i = 0; i < resetCount; ++i) visitedBit[resetSlots[i]] = false;
@@ -2207,5 +2151,22 @@ void IndexingEngine::WorkerThread() {
     SetStatus(L"Ready - " + FormatNumberWithCommas(GetRecordCount()) + L" items");
     m_ready = true;
     Search("");
-    MonitorChanges();
+
+    // Main monitor loop. Normally runs until Stop(). If an OOM event during USN
+    // processing sets m_indexDirty, MonitorChanges exits early so we can rebuild
+    // the index from scratch rather than serving a partially-corrupt dataset.
+    while (m_running) {
+        m_indexDirty = false;
+        MonitorChanges();
+        if (!m_running) break;
+        if (m_indexDirty.exchange(false)) {
+            Logger::Log(L"[WhereIsIt] OOM recovery: performing full re-scan.");
+            PerformFullDriveScan();
+            SaveIndex(ResolveIndexSavePath());
+            UpdatePreSortedIndex();
+            SetStatus(L"Ready - " + FormatNumberWithCommas(GetRecordCount()) + L" items");
+            Search("");
+            // Loop back to resume monitoring.
+        }
+    }
 }

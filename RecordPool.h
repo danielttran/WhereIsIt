@@ -4,6 +4,7 @@
 #include <windows.h>
 #include "CoreTypes.h"
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 
 class RecordPool {
@@ -59,4 +60,7 @@ private:
     std::vector<Chunk> m_chunks;
     bool m_shared = false;
     mutable std::mutex m_reserveMutex;
+    // Tracks the total capacity (in record count) already mapped; allows Reserve()
+    // to skip the mutex on the hot read path when no new chunks are needed.
+    mutable std::atomic<size_t> m_mappedCount{ 0 };
 };

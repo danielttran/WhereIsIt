@@ -1255,10 +1255,25 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                         CloseHandle(sei.hProcess);
                     }
                     // Poll until the service pipe is available (up to 5 s).
-                    for (int poll = 0; poll < 20; ++poll) {
-                        usePipe = IsNamedPipeServerAvailable();
-                        if (usePipe) break;
-                        Sleep(250);
+                    // Use the SCM to detect early failure so we don't waste the full
+                    // 5 s when the service stopped/failed immediately after install.
+                    {
+                        SC_HANDLE hScm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+                        SC_HANDLE hSvc = hScm ? OpenServiceW(hScm, WHEREISIT_SERVICE_NAME, SERVICE_QUERY_STATUS) : nullptr;
+                        for (int poll = 0; poll < 20; ++poll) {
+                            usePipe = IsNamedPipeServerAvailable();
+                            if (usePipe) break;
+                            if (hSvc) {
+                                SERVICE_STATUS ss = {};
+                                if (QueryServiceStatus(hSvc, &ss) &&
+                                    ss.dwCurrentState != SERVICE_RUNNING &&
+                                    ss.dwCurrentState != SERVICE_START_PENDING)
+                                    break;  // service failed or stopped — no point waiting further
+                            }
+                            Sleep(250);
+                        }
+                        if (hSvc) CloseServiceHandle(hSvc);
+                        if (hScm) CloseServiceHandle(hScm);
                     }
                 } else {
                     return 0; // Elevation canceled

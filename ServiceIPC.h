@@ -102,6 +102,7 @@ private:
 
     std::thread              m_searchThread;
     std::atomic<bool>        m_running{ false };
+    std::atomic<bool>        m_searchPendingFast{ false };  // lock-free mirror of m_searchPending for ApplySort abort
 
     // All fields below are protected by m_searchMutex.
     std::mutex               m_searchMutex;
