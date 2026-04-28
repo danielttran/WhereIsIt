@@ -175,10 +175,13 @@ static std::atomic<uint32_t> g_iconGeneration{ 0 };
 
 int g_folderIconIdx = -1;
 int g_fileIconIdx = -1;
+int g_customFolderIconIdx = -1;
+int g_customFileIconIdx = -1;
 std::unordered_map<uint32_t, std::pair<int, std::list<uint32_t>::iterator>> g_recordIconCache;
 std::list<uint32_t> g_iconCacheLru;
 std::unordered_set<uint32_t> g_pendingIconRecords;
-std::deque<uint32_t> g_iconRequestQueue;  // deque so visible items can push_front
+struct IconRequest { uint32_t recordIdx; int listIdx; };
+std::deque<IconRequest> g_iconRequestQueue;  // deque so visible items can push_front
 std::mutex g_iconMutex;
 std::condition_variable g_iconCv;
 std::vector<std::thread> g_iconWorkers;
@@ -189,33 +192,45 @@ HIMAGELIST g_hSIL_SmallCached = NULL;  // cached in CDDS_PREPAINT, valid for one
 
 // priority=true  => push_front (visible item, load ASAP)
 // priority=false => push_back  (prefetch, load when idle)
-static void EnqueueIconRequest(uint32_t recordIdx, bool priority) {
+static void EnqueueIconRequest(uint32_t recordIdx, int listIdx, bool priority) {
     // Caller must NOT hold g_iconMutex.
     std::lock_guard<std::mutex> lock(g_iconMutex);
     if (g_pendingIconRecords.insert(recordIdx).second) {
-        if (priority) g_iconRequestQueue.push_front(recordIdx);
-        else          g_iconRequestQueue.push_back(recordIdx);
+        if (priority) g_iconRequestQueue.push_front({ recordIdx, listIdx });
+        else          g_iconRequestQueue.push_back({ recordIdx, listIdx });
         g_iconCv.notify_one();
     }
 }
 
-static bool IsRecordVisibleNow(uint32_t recordIdx)
+static bool IsRecordVisibleNow(uint32_t recordIdx, int listIdxHint)
 {
     if (!hFileList || !g_ActiveResults || g_ActiveResults->empty()) return false;
+
     int top = ListView_GetTopIndex(hFileList);
     int perPage = ListView_GetCountPerPage(hFileList);
-    if (top < 0 || perPage <= 0) return false;
-    int bottom = top + perPage + 1;
-    if (bottom > static_cast<int>(g_ActiveResults->size()))
-        bottom = static_cast<int>(g_ActiveResults->size());
-    for (int i = top; i < bottom; ++i) {
+    if (top < 0) return false;
+    if (perPage <= 0) perPage = 100;
+
+    // Use a margin of one page above and below to be less aggressive with culling.
+    int margin = perPage;
+    int start = (std::max)(0, top - margin);
+    int end = (std::min)((int)g_ActiveResults->size(), top + perPage + margin);
+
+    // If we have a hint, check it first.
+    if (listIdxHint >= start && listIdxHint < end) {
+        if ((*g_ActiveResults)[listIdxHint] == recordIdx) return true;
+    }
+
+    // Fallback: scan the expanded visible range.
+    for (int i = start; i < end; ++i) {
         if ((*g_ActiveResults)[i] == recordIdx) return true;
     }
+
     return false;
 }
 
 
-int GetIconIndex(const std::wstring& /*filename*/, uint16_t attributes, uint32_t recordIdx) {
+int GetIconIndex(const std::wstring& /*filename*/, uint16_t attributes, uint32_t recordIdx, int listIdx) {
     if (g_CurrentViewMode == LV_VIEW_DETAILS) {
         if (attributes & FILE_ATTRIBUTE_DIRECTORY)
             return (g_folderIconIdx != -1) ? g_folderIconIdx : 0;
@@ -239,8 +254,10 @@ int GetIconIndex(const std::wstring& /*filename*/, uint16_t attributes, uint32_t
     }
 
     // Visible item: priority = true so it jumps to the front of the queue.
-    EnqueueIconRequest(recordIdx, /*priority=*/true);
-    return g_CurrentViewMode == LV_VIEW_DETAILS ? g_fileIconIdx : -1;
+    EnqueueIconRequest(recordIdx, listIdx, /*priority=*/true);
+    
+    if (g_CurrentViewMode == LV_VIEW_DETAILS) return g_fileIconIdx;
+    return (attributes & FILE_ATTRIBUTE_DIRECTORY) ? g_customFolderIconIdx : g_customFileIconIdx;
 }
 
 void FormatFileSize(wchar_t* buffer, size_t bufferLen, uint64_t bytes, uint16_t attributes) {
@@ -386,7 +403,7 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
             SetTextColor(pcd->nmcd.hdc, GetSysColor(isSelected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT));
 
             HIMAGELIST hSIL = g_hSIL_SmallCached;
-            int iconIdx = GetIconIndex(nameStr, rec.FileAttributes, recordIdx);
+            int iconIdx = GetIconIndex(nameStr, rec.FileAttributes, recordIdx, (int)listIdx);
             if (hSIL && iconIdx >= 0)
                 ImageList_Draw(hSIL, iconIdx, pcd->nmcd.hdc, rect.left + 2, rect.top + (rect.bottom - rect.top - 16)/2, ILD_TRANSPARENT);
             rect.left += 20;
@@ -475,7 +492,7 @@ void OnDisplayInfo(NMLVDISPINFO* pdi) {
     }
     if (pdi->item.mask & LVIF_IMAGE) {
         auto [rec, nameStr] = g_Engine->GetRecordAndName(rIdx);
-        pdi->item.iImage = GetIconIndex(nameStr, rec.FileAttributes, rIdx);
+        pdi->item.iImage = GetIconIndex(nameStr, rec.FileAttributes, rIdx, pdi->item.iItem);
     }
 }
 
@@ -543,6 +560,27 @@ void SetViewMode(HWND hWnd, int viewId) {
         if (g_hCustomImageList) ImageList_Destroy(g_hCustomImageList);
         g_hCustomImageList = ImageList_Create(newSize, newSize, ILC_COLOR32 | ILC_MASK,
                                               MAX_ICON_CACHE_ENTRIES, 100);
+
+        // Populate placeholders at indices 0 and 1 using the system image list.
+        // These are used as immediate returns from GetIconIndex before the real
+        // thumbnail is decoded asynchronously.
+        HIMAGELIST hSystemSIL = NULL;
+        SHFILEINFOW sfi = { 0 };
+        hSystemSIL = (HIMAGELIST)SHGetFileInfoW(L"C:\\", 0, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+        if (hSystemSIL) {
+            auto ExtractAndAdd = [&](int sysIdx) {
+                HICON hIcon = ImageList_GetIcon(hSystemSIL, sysIdx, ILD_TRANSPARENT);
+                int idx = -1;
+                if (hIcon) {
+                    idx = ImageList_AddIcon(g_hCustomImageList, hIcon);
+                    DestroyIcon(hIcon);
+                }
+                return idx;
+            };
+            g_customFolderIconIdx = ExtractAndAdd(g_folderIconIdx);
+            g_customFileIconIdx   = ExtractAndAdd(g_fileIconIdx);
+        }
+
         ListView_SetImageList(hFileList, g_hCustomImageList, LVSIL_NORMAL);
         ListView_SetView(hFileList, LV_VIEW_ICON);
         ListView_SetIconSpacing(hFileList, newSize + 16, newSize + 40);
@@ -597,13 +635,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             while (true) {
                 uint32_t recordIdx = 0;
+                int listIdx = -1;
                 int currentMode = LV_VIEW_DETAILS;
                 int currentSize = 16;
                 {
                     std::unique_lock<std::mutex> lock(g_iconMutex);
                     g_iconCv.wait(lock, [] { return !g_iconWorkerRunning || !g_iconRequestQueue.empty(); });
                     if (!g_iconWorkerRunning && g_iconRequestQueue.empty()) break;
-                    recordIdx = g_iconRequestQueue.front();
+                    auto req = g_iconRequestQueue.front();
+                    recordIdx = req.recordIdx;
+                    listIdx = req.listIdx;
                     g_iconRequestQueue.pop_front();
                     currentMode = g_CurrentViewMode;
                     currentSize = g_CurrentIconSize;
@@ -612,22 +653,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // Visibility culling: skip decode for items that have scrolled off-screen
                 // while waiting in the queue — avoids wasting SHGetFileInfoW/GetImage work
                 // on rows the user can no longer see.
-                {
-                    int top    = ListView_GetTopIndex(hFileList);
-                    int bottom = top + ListView_GetCountPerPage(hFileList) + 1;
-                    auto snap  = g_ActiveResults;  // snapshot shared_ptr (thread-safe refcount)
-                    bool visible = false;
-                    if (snap) {
-                        int n = (int)snap->size();
-                        for (int vi = top; vi < bottom && vi < n; ++vi) {
-                            if ((*snap)[vi] == recordIdx) { visible = true; break; }
-                        }
-                    }
-                    if (!visible) {
-                        std::lock_guard<std::mutex> lk(g_iconMutex);
-                        g_pendingIconRecords.erase(recordIdx);
-                        continue;
-                    }
+                if (!IsRecordVisibleNow(recordIdx, listIdx)) {
+                    std::lock_guard<std::mutex> lk(g_iconMutex);
+                    g_pendingIconRecords.erase(recordIdx);
+                    continue;
                 }
 
                 // Resolve the full path once — used both for SHGetFileInfoW (details)
@@ -644,10 +673,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             iconIdx = sfi.iIcon;
                     }
                     { std::lock_guard<std::mutex> lock(g_iconMutex); g_pendingIconRecords.erase(recordIdx); }
-                    if (IsRecordVisibleNow(recordIdx))
+                    if (IsRecordVisibleNow(recordIdx, listIdx))
                         PostMessage(hWnd, WM_USER_ICON_LOADED, (WPARAM)recordIdx, (LPARAM)iconIdx);
                 } else {
-                    if (!IsRecordVisibleNow(recordIdx)) {
+                    if (!IsRecordVisibleNow(recordIdx, listIdx)) {
                         std::lock_guard<std::mutex> lock(g_iconMutex);
                         g_pendingIconRecords.erase(recordIdx);
                         continue;
@@ -671,13 +700,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             IShellItemImageFactory* pFac = nullptr;
                             if (SUCCEEDED(pItem->QueryInterface(IID_PPV_ARGS(&pFac)))) {
                                 SIZE sz = { currentSize, currentSize };
-                                // Pass 1: fast cache-hit query (returns immediately if cached).
+                                // Pass 1: fast cache hit
                                 HRESULT hr = pFac->GetImage(sz, SIIGBF_THUMBNAILONLY | SIIGBF_BIGGERSIZEOK, &hRaw);
-                                if (FAILED(hr) && IsRecordVisibleNow(recordIdx)) {
-                                    // Pass 2: full decode (may take 50-300ms for large files).
-                                    // Only attempted if the item is still visible — avoids wasting
-                                    // 50-300ms on a full decode for an item the user already scrolled past.
-                                    pFac->GetImage(sz, SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK, &hRaw);
+                                if (FAILED(hr)) {
+                                    // Pass 2: full decode. We ALWAYS do this if Pass 1 fails,
+                                    // provided the generation is still valid.
+                                    // SIIGBF_ICONBACKGROUND ensures we get an icon if no thumb exists.
+                                    pFac->GetImage(sz, SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK | SIIGBF_ICONBACKGROUND, &hRaw);
                                 }
                                 pFac->Release();
                             }
@@ -722,7 +751,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     // Visibility change → user scrolled away during decode.
                     // Both cases: discard the bitmap to avoid stale UI updates and GDI leaks.
                     if (hComposited) {
-                        if (g_iconGeneration.load(std::memory_order_acquire) == genBefore && IsRecordVisibleNow(recordIdx))
+                        if (g_iconGeneration.load(std::memory_order_acquire) == genBefore && IsRecordVisibleNow(recordIdx, listIdx))
                             PostMessage(hWnd, WM_USER_THUMBNAIL_LOADED, (WPARAM)recordIdx, (LPARAM)hComposited);
                         else
                             DeleteObject(hComposited);
@@ -868,30 +897,37 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
         }
         if (bValidSize && g_ActiveResults && g_CurrentViewMode != LV_VIEW_DETAILS && g_hCustomImageList) {
-            int currentCount = ImageList_GetImageCount(g_hCustomImageList);
             int imgIdx = -1;
-            if (currentCount < MAX_ICON_CACHE_ENTRIES) {
-                imgIdx = ImageList_Add(g_hCustomImageList, hBmp, NULL);
-                if (imgIdx >= 0) {
-                    std::lock_guard<std::mutex> lock(g_iconMutex);
-                    auto lruIt = g_iconCacheLru.insert(g_iconCacheLru.begin(), recordIdx);
-                    g_recordIconCache[recordIdx] = { imgIdx, lruIt };
-                }
-            } else {
+            {
                 std::lock_guard<std::mutex> lock(g_iconMutex);
-                if (!g_iconCacheLru.empty()) {
-                    uint32_t evictRecord = g_iconCacheLru.back();
-                    g_iconCacheLru.pop_back();
-                    auto evictIt = g_recordIconCache.find(evictRecord);
-                    if (evictIt != g_recordIconCache.end()) {
-                        imgIdx = evictIt->second.first;
-                        g_recordIconCache.erase(evictIt);
-                    }
-                }
-                if (imgIdx >= 0) {
+                auto it = g_recordIconCache.find(recordIdx);
+                if (it != g_recordIconCache.end()) {
+                    // Update existing cache entry.
+                    imgIdx = it->second.first;
                     ImageList_Replace(g_hCustomImageList, imgIdx, hBmp, NULL);
-                    auto lruIt = g_iconCacheLru.insert(g_iconCacheLru.begin(), recordIdx);
-                    g_recordIconCache[recordIdx] = { imgIdx, lruIt };
+                    g_iconCacheLru.splice(g_iconCacheLru.begin(), g_iconCacheLru, it->second.second);
+                } else {
+                    // Create new cache entry.
+                    int currentCount = ImageList_GetImageCount(g_hCustomImageList);
+                    if (currentCount < MAX_ICON_CACHE_ENTRIES) {
+                        imgIdx = ImageList_Add(g_hCustomImageList, hBmp, NULL);
+                        if (imgIdx >= 0) {
+                            auto lruIt = g_iconCacheLru.insert(g_iconCacheLru.begin(), recordIdx);
+                            g_recordIconCache[recordIdx] = { imgIdx, lruIt };
+                        }
+                    } else if (!g_iconCacheLru.empty()) {
+                        // Evict LRU entry.
+                        uint32_t evictRecord = g_iconCacheLru.back();
+                        g_iconCacheLru.pop_back();
+                        auto evictIt = g_recordIconCache.find(evictRecord);
+                        if (evictIt != g_recordIconCache.end()) {
+                            imgIdx = evictIt->second.first;
+                            g_recordIconCache.erase(evictIt);
+                            ImageList_Replace(g_hCustomImageList, imgIdx, hBmp, NULL);
+                            auto lruIt = g_iconCacheLru.insert(g_iconCacheLru.begin(), recordIdx);
+                            g_recordIconCache[recordIdx] = { imgIdx, lruIt };
+                        }
+                    }
                 }
             }
             // Redraw only the visible rows rather than invalidating the entire control.
@@ -1063,7 +1099,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_DESTROY:
         {
             std::lock_guard<std::mutex> lock(g_iconMutex);
-            std::deque<uint32_t>().swap(g_iconRequestQueue);
+            g_iconRequestQueue.clear();
             g_iconWorkerRunning = false;
         }
         g_iconCv.notify_all();

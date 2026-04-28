@@ -420,43 +420,47 @@ void NamedPipeEngine::Start()
 {
     if (m_running.exchange(true)) return;
 
-    // Phase 2: Attach to Shared Memory instead of running local scan
-    m_hDataMutex = OpenMutexW(SYNCHRONIZE, FALSE, L"Global\\WhereIsIt_DataMutex");
-    if (!m_hDataMutex) m_hDataMutex = OpenMutexW(SYNCHRONIZE, FALSE, L"Local\\WhereIsIt_DataMutex");
-    
-    if (!m_hDataMutex) {
-        Logger::Log(L"[WhereIsIt] NamedPipeEngine: Failed to open DataMutex. Error: " + std::to_wstring(GetLastError()));
-    }
-
-    if (m_hDataChangedEvent) CloseHandle(m_hDataChangedEvent);
-    m_hDataChangedEvent = OpenEventW(SYNCHRONIZE, FALSE, L"Global\\WhereIsIt_DataChanged");
-    if (!m_hDataChangedEvent) m_hDataChangedEvent = OpenEventW(SYNCHRONIZE, FALSE, L"Local\\WhereIsIt_DataChanged");
-
-    UniqueHandle hRecordsCountMapping(OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\WhereIsIt_RecordsCount"));
-    if (!hRecordsCountMapping.is_valid()) hRecordsCountMapping.reset(OpenFileMappingW(FILE_MAP_READ, FALSE, L"Local\\WhereIsIt_RecordsCount"));
-
-    m_hDrivesMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\WhereIsIt_Drives");
-    if (!m_hDrivesMapping) m_hDrivesMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Local\\WhereIsIt_Drives");
-
-    if (m_hDrivesMapping) {
-        m_driveLettersShared = (wchar_t(*)[4])MapViewOfFile(m_hDrivesMapping, FILE_MAP_READ, 0, 0, 0);
-    } else {
-        Logger::Log(L"[WhereIsIt] NamedPipeEngine: Failed to open Drives mapping. Error: " + std::to_wstring(GetLastError()));
-    }
-
-    if (hRecordsCountMapping.is_valid()) {
-        uint8_t* base = (uint8_t*)MapViewOfFile(hRecordsCountMapping.get(), FILE_MAP_READ, 0, 0, 0);
-        if (base) {
-            m_recordsCount = (volatile LONG*)base;
-            m_lastRecordsCount = (uint32_t)*m_recordsCount;
-            m_recordPool.Reserve((size_t)m_lastRecordsCount); // Ensure initial UI capacity
-        } else {
-            Logger::Log(L"[WhereIsIt] NamedPipeEngine: Failed to map RecordsCount. Error: " + std::to_wstring(GetLastError()));
+    // Retry loop for shared memory mappings — the background service might still
+    // be initializing (LoadIndex) after we started it via SC Manager.
+    for (int retry = 0; retry < 20; ++retry) {
+        if (!m_hDataMutex) {
+            m_hDataMutex = OpenMutexW(SYNCHRONIZE, FALSE, L"Global\\WhereIsIt_DataMutex");
+            if (!m_hDataMutex) m_hDataMutex = OpenMutexW(SYNCHRONIZE, FALSE, L"Local\\WhereIsIt_DataMutex");
         }
-    } else {
-        Logger::Log(L"[WhereIsIt] NamedPipeEngine: Failed to open RecordsCount mapping. Error: " + std::to_wstring(GetLastError()));
+
+        if (!m_hDataChangedEvent) {
+            m_hDataChangedEvent = OpenEventW(SYNCHRONIZE, FALSE, L"Global\\WhereIsIt_DataChanged");
+            if (!m_hDataChangedEvent) m_hDataChangedEvent = OpenEventW(SYNCHRONIZE, FALSE, L"Local\\WhereIsIt_DataChanged");
+        }
+
+        if (!m_hRecordsCountMapping) {
+            m_hRecordsCountMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\WhereIsIt_RecordsCount");
+            if (!m_hRecordsCountMapping) m_hRecordsCountMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Local\\WhereIsIt_RecordsCount");
+            if (m_hRecordsCountMapping) {
+                m_recordsCount = (volatile LONG*)MapViewOfFile(m_hRecordsCountMapping, FILE_MAP_READ, 0, 0, 0);
+            }
+        }
+
+        if (!m_hDrivesMapping) {
+            m_hDrivesMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\WhereIsIt_Drives");
+            if (!m_hDrivesMapping) m_hDrivesMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Local\\WhereIsIt_Drives");
+            if (m_hDrivesMapping) {
+                m_driveLettersShared = (wchar_t(*)[4])MapViewOfFile(m_hDrivesMapping, FILE_MAP_READ, 0, 0, 0);
+            }
+        }
+
+        if (m_hRecordsCountMapping && m_hDrivesMapping && m_hDataChangedEvent) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
+    if (!m_hDataMutex) Logger::Log(L"[WhereIsIt] NamedPipeEngine: Failed to open DataMutex.");
+    if (!m_hDrivesMapping) Logger::Log(L"[WhereIsIt] NamedPipeEngine: Failed to open Drives mapping.");
+    if (m_recordsCount) {
+        m_lastRecordsCount = (uint32_t)*m_recordsCount;
+        m_recordPool.Reserve((size_t)m_lastRecordsCount);
+    } else {
+        Logger::Log(L"[WhereIsIt] NamedPipeEngine: Failed to open/map RecordsCount.");
+    }
 
     for (auto& c : m_uiChunks) {
         c.store(nullptr, std::memory_order_relaxed);
@@ -465,8 +469,6 @@ void NamedPipeEngine::Start()
     m_searchThread = std::thread(&NamedPipeEngine::SearchWorker, this);
 
     // Trigger an initial empty search to populate the UI and clear the "Initializing..." status.
-    // If the background service is still indexing, this will return 0 items initially,
-    // and the DataChanged event will automatically re-trigger it when the service finishes.
     Search("");
 }
 
@@ -478,6 +480,7 @@ void NamedPipeEngine::Stop()
         std::lock_guard<std::mutex> lk(m_searchMutex);
         m_searchPending = false;
         m_sortPending = false;
+        if (m_searchCvNative) SetEvent(m_searchCvNative);
     }
     m_searchCv.notify_all();
 
@@ -494,6 +497,10 @@ void NamedPipeEngine::Stop()
     if (m_driveLettersShared) {
         UnmapViewOfFile(m_driveLettersShared);
         m_driveLettersShared = nullptr;
+    }
+    if (m_hRecordsCountMapping) {
+        CloseHandle(m_hRecordsCountMapping);
+        m_hRecordsCountMapping = NULL;
     }
     if (m_hDrivesMapping) CloseHandle(m_hDrivesMapping);
     if (m_hDataMutex) CloseHandle(m_hDataMutex);
@@ -869,10 +876,11 @@ IIndexEngine::RowDisplayData NamedPipeEngine::GetRowDisplayData(uint32_t recordI
 std::wstring NamedPipeEngine::GetFullPath(uint32_t recordIdx) const {
     std::wstring parent = GetParentPath(recordIdx);
     std::wstring name   = GetRecordName(recordIdx);
-    // GetParentPath returns "X:\" (with trailing backslash) for root-level files,
-    // so only insert a separator when the parent does not already end with one.
-    if (!parent.empty() && parent.back() == L'\\')
-        return parent + name;
+    
+    // GetParentPath already returns a path ending with a backslash if it's a root (e.g. "C:\")
+    // or if it's a subpath we've concatenated. We need to be careful not to double up.
+    if (parent.empty()) return name;
+    if (parent.back() == L'\\') return parent + name;
     return parent + L"\\" + name;
 }
 

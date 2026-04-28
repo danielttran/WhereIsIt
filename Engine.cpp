@@ -96,11 +96,32 @@ void IndexingEngine::CloseAllDriveHandles() {
 void IndexingEngine::Stop() {
     m_running = false;
     // Signal m_stopEvent so MonitorChanges wakes from WaitForMultipleObjects immediately
-    // rather than blocking up to the next timeout.
     if (m_stopEvent) SetEvent(m_stopEvent);
     m_searchEvent.notify_all();
-    if (m_mainWorker.joinable()) m_mainWorker.join();
-    if (m_searchWorker.joinable()) m_searchWorker.join();
+
+    // Use a safety timeout for thread joins to prevent the process from hanging in the background.
+    auto joinWithTimeout = [](std::thread& t, DWORD timeoutMs) {
+        if (t.joinable()) {
+            HANDLE h = t.native_handle();
+            if (WaitForSingleObject(h, timeoutMs) == WAIT_TIMEOUT) {
+                // If it hangs, we detach it and let the OS clean up on process exit.
+                t.detach();
+            } else {
+                t.join();
+            }
+        }
+    };
+
+    joinWithTimeout(m_mainWorker, 5000);
+    joinWithTimeout(m_searchWorker, 5000);
+
+    // If we've signalled stop and waited 5s, but threads are still blocked
+    // (e.g. on a kernel call like ReadFile), we terminate the process to
+    // prevent a "ghost" background process.
+    if (m_mainWorker.joinable() || m_searchWorker.joinable()) {
+        std::terminate();
+    }
+
     if (m_stopEvent) { CloseHandle(m_stopEvent); m_stopEvent = NULL; }
     CloseAllDriveHandles();
 }
@@ -1862,7 +1883,7 @@ void IndexingEngine::ScanGenericDrive(DriveScanContext& ctx, const std::wstring&
 
     const IndexScopeConfig cfg = GetIndexScopeConfig();
 
-    while (!stack.empty()) {
+    while (!stack.empty() && m_running) {
         StackEntry current = std::move(stack.back());
         stack.pop_back();
 
@@ -2038,9 +2059,9 @@ void IndexingEngine::ScanMftForDrive(DriveScanContext& ctx) {
                 curLcn += runOff; LARGE_INTEGER eo; eo.QuadPart = curLcn * nt.BytesPerCluster;
                 SetFilePointerEx(ctx.VolumeHandle, eo, NULL, FILE_BEGIN); uint64_t bt = len * nt.BytesPerCluster;
                 DWORD br;
-                for (uint64_t r = 0; r < bt; r += br) {
+                for (uint64_t r = 0; r < bt && m_running; r += br) {
                     if (!ReadFile(ctx.VolumeHandle, eb.data(), (DWORD)min(bt - r, 1024 * 1024ULL), &br, NULL) || !br) break;
-                    for (uint32_t k = 0; k + nt.BytesPerFileRecordSegment <= br; k += nt.BytesPerFileRecordSegment) {
+                    for (uint32_t k = 0; k + nt.BytesPerFileRecordSegment <= br && m_running; k += nt.BytesPerFileRecordSegment) {
                         uint32_t tm = mftCounter++; MFT_RECORD_HEADER* rh = (MFT_RECORD_HEADER*)&eb[k];
                         if (rh->Magic != 0x454C4946 || !(rh->Flags & 0x01)) continue;
                         applyFixup(&eb[k]);

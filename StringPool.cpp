@@ -16,9 +16,17 @@ char* StringPool::Reserve(size_t needed) {
         }
 
         HANDLE hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, GetSharedMemoryReadOnlySA(), PAGE_READWRITE,
-            (DWORD)((allocSize + 32) >> 32), (DWORD)((allocSize + 32) & 0xFFFFFFFF), pMapName);        char* view = nullptr;
+            (DWORD)((allocSize + 32) >> 32), (DWORD)((allocSize + 32) & 0xFFFFFFFF), pMapName);
+        
+        if (!hMap && pMapName && GetLastError() == ERROR_ACCESS_DENIED) {
+            hMap = OpenFileMappingW(FILE_MAP_READ, FALSE, pMapName);
+        }
+
+        char* view = nullptr;
         if (hMap) {
             view = (char*)MapViewOfFile(hMap, FILE_MAP_WRITE, 0, 0, allocSize + 32);
+            if (!view) view = (char*)MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+            
             if (!view) {
                 CloseHandle(hMap);
                 hMap = NULL;

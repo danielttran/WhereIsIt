@@ -91,6 +91,7 @@ private:
     mutable RecordPool m_recordPool{true};
     volatile LONG* m_recordsCount = nullptr;
     HANDLE m_hDataMutex = NULL;
+    HANDLE m_hRecordsCountMapping = NULL;
     HANDLE m_hDrivesMapping = NULL;
     wchar_t (*m_driveLettersShared)[4] = nullptr;
 
