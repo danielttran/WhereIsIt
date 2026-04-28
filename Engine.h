@@ -234,7 +234,6 @@ private:
     HANDLE m_hDataMutex = NULL;
     std::mutex m_usnDeltaMutex;
     std::vector<PendingUsnDelta> m_pendingUsnDeltas;
-    std::chrono::steady_clock::time_point m_lastUsnMerge = std::chrono::steady_clock::now();
 
     mutable std::mutex m_nameCacheMutex;
     mutable std::list<uint32_t> m_nameCacheLru;

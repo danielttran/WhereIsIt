@@ -1571,15 +1571,14 @@ void IndexingEngine::MonitorChanges() {
 
         if (anyChanges) {
             ApplyPendingUsnDeltas();
-            // UpdatePreSortedIndex() is no longer needed here since ApplyPendingUsnDeltas dynamically maintains the list.
-            
-            // Throttle UI search trigger for background changes to 10Hz to prevent listview flicker.
-            auto now = std::chrono::steady_clock::now();
-            if (now - m_lastUsnMerge >= std::chrono::milliseconds(100)) {
+            // Trigger a re-search immediately on every USN batch so changes appear
+            // in the results without delay. The search thread coalesces rapid-fire
+            // events via the atomic m_isSearchRequested flag — if a search is already
+            // running it aborts and restarts, so no duplicate work accumulates.
+            {
                 std::lock_guard<std::mutex> lock(m_searchSyncMutex);
                 m_isSearchRequested = true;
                 m_searchEvent.notify_one();
-                m_lastUsnMerge = now;
             }
         }
 
@@ -1638,6 +1637,9 @@ bool IndexingEngine::DiscoverAllDrives() {
             std::string letterUTF8(utf8Len - 1, '\0');
             WideCharToMultiByte(CP_UTF8, 0, p, -1, &letterUTF8[0], utf8Len, NULL, NULL);
             m_drives.push_back({ p, letterUTF8, FetchVolumeSerialNumber(p), 0, h, type });
+            uint8_t di = (uint8_t)(m_drives.size() - 1);
+            if (m_driveLettersShared && di < 64)
+                wcsncpy_s(m_driveLettersShared[di], 4, p, _TRUNCATE);
             Logger::Log(L"[WhereIsIt] Drive added to list.\n");
         }
     }
@@ -1815,8 +1817,8 @@ void IndexingEngine::PropagateDirectorySizes() {
                 m_giantFileSizes.erase(parentIdx);
                 parent.IsGiantFile = 0;
             }
-        parent.DirSizeComputed = 1;
         }
+        parent.DirSizeComputed = 1;
         if (m_hDataChangedEvent) SetEvent(m_hDataChangedEvent);
         }
     if (m_hDataChangedEvent) SetEvent(m_hDataChangedEvent);
