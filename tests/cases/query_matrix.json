@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "description": "Phase 0 parity baseline matrix for admin/non-admin behavioral equivalence.",
+  "cases": [
+    {
+      "id": "name_contains_invoice",
+      "query": "invoice",
+      "sort": { "key": "name", "descending": false }
+    },
+    {
+      "id": "whole_word_report",
+      "query": "word:true report",
+      "sort": { "key": "name", "descending": false }
+    },
+    {
+      "id": "regex_log_files",
+      "query": "regex:true .*\\.log$",
+      "sort": { "key": "name", "descending": true }
+    },
+    {
+      "id": "path_match_projects",
+      "query": "matchpath:true projects",
+      "sort": { "key": "path", "descending": false }
+    },
+    {
+      "id": "filter_picture",
+      "query": "extfilt:picture",
+      "sort": { "key": "size", "descending": true }
+    }
+  ]
+}

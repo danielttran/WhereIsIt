@@ -13,6 +13,7 @@
 #include <cstring>
 #include <execution>
 #include "QueryEngine.h"
+#include "QueryDomain.h"
 
 // --- IndexingEngine Implementation ---
 
@@ -750,7 +751,7 @@ void IndexingEngine::SearchThread() {
         } else {
             // Logging removed from normal search path to avoid synchronous OutputDebugStringW overhead per keystroke.
 
-            QueryPlan plan = BuildQueryPlan(query);
+            QueryPlan plan = querydomain::CompilePlan(query);
             if (!plan.Success) {
                 SetStatus(L"Query Error: " + plan.ErrorMessage);
                 std::lock_guard<std::mutex> lock(m_resultBufferMutex);
@@ -758,7 +759,7 @@ void IndexingEngine::SearchThread() {
                 continue;
             }
 
-            if (query.find("sort:") != std::string::npos || query.find("desc") != std::string::npos || query.find("asc") != std::string::npos) {
+            if (querydomain::HasInlineSortDirective(query)) {
                 sortKey = plan.Config.SortKey;
                 sortDescending = plan.Config.SortDescending;
             }
