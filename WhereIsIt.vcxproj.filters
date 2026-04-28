@@ -48,6 +48,9 @@
     <ClInclude Include="Logging.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="PathSizeDomain.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="QueryDomain.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -60,6 +63,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Engine.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="PathSizeDomain.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="QueryEngine.cpp">

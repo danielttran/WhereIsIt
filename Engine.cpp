@@ -405,10 +405,8 @@ FileRecord IndexingEngine::GetRecord(uint32_t recordIdx) const {
 }
 
 uint64_t IndexingEngine::ResolveFileSize(const FileRecord& rec, uint32_t recordIndex) const {
-    if (!rec.IsGiantFile) return rec.FileSize;
     auto it = m_giantFileSizes.find(recordIndex);
-    if (it != m_giantFileSizes.end()) return it->second;
-    return (uint64_t)kGiantFileMarker;
+    return pathsize::ResolveFileSizeFromRecord(rec, it != m_giantFileSizes.end(), it != m_giantFileSizes.end() ? it->second : 0ull);
 }
 
 uint32_t IndexingEngine::FileTimeToEpoch(uint64_t fileTime) const {
