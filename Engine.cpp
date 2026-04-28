@@ -1,30 +1,16 @@
 #include "framework.h"
 #include "Engine.h"
-#include <iostream>
-#include <debugapi.h>
 #include <string>
-#include <fstream>
 #include <algorithm>
 #include <unordered_set>
 #include "StringUtils.h"
 #include <shlobj.h>
-#include <regex>
 #include <cctype>
 #include <cwctype>
 #include <functional>
 #include <immintrin.h>
 #include <intrin.h>
 #include "QueryEngine.h"
-
-
-
-
-
-
-
-
-
-
 
 // --- IndexingEngine Implementation ---
 
