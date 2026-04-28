@@ -519,6 +519,7 @@ void NamedPipeEngine::Search(const std::string& query)
         std::lock_guard<std::mutex> lk(m_searchMutex);
         m_pendingQuery  = query;
         m_searchPending = true;
+        m_searchPendingFast.store(true, std::memory_order_release);
     }
     if (m_searchCvNative) SetEvent(m_searchCvNative);
 }
@@ -538,11 +539,12 @@ void NamedPipeEngine::Sort(QuerySortKey key, bool descending)
 // Sort v in-place by key/descending using m_local record accessors.
 // Uses _wcsicmp for case-insensitive comparison, mirroring IndexingEngine.
 // Falls back to Name comparison when Size or Date values are equal.
+// Returns early (v unchanged) if m_searchPendingFast is set or bad_alloc occurs.
 void NamedPipeEngine::ApplySort(
     std::vector<uint32_t>& v, QuerySortKey key, bool descending)
 {
     if (v.size() < 2) return;
-    
+
     uint32_t count = m_recordsCount ? (uint32_t)*m_recordsCount : 0;
     if (count > 0) m_recordPool.Reserve(count);
 
@@ -551,66 +553,89 @@ void NamedPipeEngine::ApplySort(
     // resetting empty queries that return up to 1,000,000 records.
     if (key == QuerySortKey::Name && !descending) return;
 
-    // Path sort: pre-compute all parent paths once (O(N×depth)) so the
-    // comparator only does string comparisons (O(log N) calls to a cheap op)
-    // instead of walking the parent chain inside every comparator invocation.
-    if (key == QuerySortKey::Path) {
-        struct Entry { std::wstring path; std::wstring name; uint32_t idx; };
-        std::vector<Entry> entries;
-        entries.reserve(v.size());
-        for (uint32_t ri : v) {
-            auto d = GetRowDisplayData(ri);
-            entries.push_back({ std::move(d.ParentPath), std::move(d.Name), ri });
+    try {
+        // Path sort: pre-compute all parent paths once (O(N×depth)) so the
+        // comparator only does string comparisons (O(log N) calls to a cheap op)
+        // instead of walking the parent chain inside every comparator invocation.
+        if (key == QuerySortKey::Path) {
+            struct Entry { std::wstring path; std::wstring name; uint32_t idx; };
+            std::vector<Entry> entries;
+            entries.reserve(v.size());
+            size_t n = 0;
+            for (uint32_t ri : v) {
+                if ((n++ & 0xFF) == 0 && m_searchPendingFast.load(std::memory_order_acquire)) return;
+                auto d = GetRowDisplayData(ri);
+                entries.push_back({ std::move(d.ParentPath), std::move(d.Name), ri });
+            }
+            if (m_searchPendingFast.load(std::memory_order_acquire)) return;
+            std::stable_sort(entries.begin(), entries.end(),
+                [descending](const Entry& a, const Entry& b) -> bool {
+                    int cmp = _wcsicmp(a.path.c_str(), b.path.c_str());
+                    if (cmp == 0) cmp = _wcsicmp(a.name.c_str(), b.name.c_str());
+                    return descending ? (cmp > 0) : (cmp < 0);
+                });
+            for (size_t i = 0; i < v.size(); ++i) v[i] = entries[i].idx;
+            return;
         }
-        std::stable_sort(entries.begin(), entries.end(),
-            [descending](const Entry& a, const Entry& b) -> bool {
-                int cmp = _wcsicmp(a.path.c_str(), b.path.c_str());
-                if (cmp == 0) cmp = _wcsicmp(a.name.c_str(), b.name.c_str());
+
+        // Pre-compute sort keys once per record to avoid redundant shared-memory
+        // accesses and atomic loads inside the O(N log N) comparator.
+        if (key == QuerySortKey::Name) {
+            struct NameKey { std::wstring name; uint32_t idx; };
+            std::vector<NameKey> keys;
+            keys.reserve(v.size());
+            size_t n = 0;
+            for (uint32_t ri : v) {
+                if ((n++ & 0xFF) == 0 && m_searchPendingFast.load(std::memory_order_acquire)) return;
+                keys.push_back({ GetRecordName(ri), ri });
+            }
+            if (m_searchPendingFast.load(std::memory_order_acquire)) return;
+            std::stable_sort(keys.begin(), keys.end(), [descending](const NameKey& a, const NameKey& b) {
+                int cmp = _wcsicmp(a.name.c_str(), b.name.c_str());
                 return descending ? (cmp > 0) : (cmp < 0);
             });
-        for (size_t i = 0; i < v.size(); ++i) v[i] = entries[i].idx;
-        return;
-    }
-
-    // Pre-compute sort keys once per record to avoid redundant shared-memory
-    // accesses and atomic loads inside the O(N log N) comparator.
-    if (key == QuerySortKey::Name) {
-        struct NameKey { std::wstring name; uint32_t idx; };
-        std::vector<NameKey> keys;
-        keys.reserve(v.size());
-        for (uint32_t ri : v) keys.push_back({ GetRecordName(ri), ri });
-        std::stable_sort(keys.begin(), keys.end(), [descending](const NameKey& a, const NameKey& b) {
-            int cmp = _wcsicmp(a.name.c_str(), b.name.c_str());
-            return descending ? (cmp > 0) : (cmp < 0);
-        });
-        for (size_t i = 0; i < v.size(); ++i) v[i] = keys[i].idx;
-        return;
-    }
-    if (key == QuerySortKey::Size) {
-        struct SizeKey { uint64_t size; std::wstring name; uint32_t idx; };
-        std::vector<SizeKey> keys;
-        keys.reserve(v.size());
-        for (uint32_t ri : v) keys.push_back({ GetRecordFileSize(ri), GetRecordName(ri), ri });
-        std::stable_sort(keys.begin(), keys.end(), [descending](const SizeKey& a, const SizeKey& b) {
-            if (a.size != b.size) return descending ? (a.size > b.size) : (a.size < b.size);
-            int cmp = _wcsicmp(a.name.c_str(), b.name.c_str());
-            return descending ? (cmp > 0) : (cmp < 0);
-        });
-        for (size_t i = 0; i < v.size(); ++i) v[i] = keys[i].idx;
-        return;
-    }
-    if (key == QuerySortKey::Date) {
-        struct DateKey { uint64_t date; std::wstring name; uint32_t idx; };
-        std::vector<DateKey> keys;
-        keys.reserve(v.size());
-        for (uint32_t ri : v) keys.push_back({ GetRecordLastModifiedFileTime(ri), GetRecordName(ri), ri });
-        std::stable_sort(keys.begin(), keys.end(), [descending](const DateKey& a, const DateKey& b) {
-            if (a.date != b.date) return descending ? (a.date > b.date) : (a.date < b.date);
-            int cmp = _wcsicmp(a.name.c_str(), b.name.c_str());
-            return descending ? (cmp > 0) : (cmp < 0);
-        });
-        for (size_t i = 0; i < v.size(); ++i) v[i] = keys[i].idx;
-        return;
+            for (size_t i = 0; i < v.size(); ++i) v[i] = keys[i].idx;
+            return;
+        }
+        if (key == QuerySortKey::Size) {
+            struct SizeKey { uint64_t size; std::wstring name; uint32_t idx; };
+            std::vector<SizeKey> keys;
+            keys.reserve(v.size());
+            size_t n = 0;
+            for (uint32_t ri : v) {
+                if ((n++ & 0xFF) == 0 && m_searchPendingFast.load(std::memory_order_acquire)) return;
+                keys.push_back({ GetRecordFileSize(ri), GetRecordName(ri), ri });
+            }
+            if (m_searchPendingFast.load(std::memory_order_acquire)) return;
+            std::stable_sort(keys.begin(), keys.end(), [descending](const SizeKey& a, const SizeKey& b) {
+                if (a.size != b.size) return descending ? (a.size > b.size) : (a.size < b.size);
+                int cmp = _wcsicmp(a.name.c_str(), b.name.c_str());
+                return descending ? (cmp > 0) : (cmp < 0);
+            });
+            for (size_t i = 0; i < v.size(); ++i) v[i] = keys[i].idx;
+            return;
+        }
+        if (key == QuerySortKey::Date) {
+            struct DateKey { uint64_t date; std::wstring name; uint32_t idx; };
+            std::vector<DateKey> keys;
+            keys.reserve(v.size());
+            size_t n = 0;
+            for (uint32_t ri : v) {
+                if ((n++ & 0xFF) == 0 && m_searchPendingFast.load(std::memory_order_acquire)) return;
+                keys.push_back({ GetRecordLastModifiedFileTime(ri), GetRecordName(ri), ri });
+            }
+            if (m_searchPendingFast.load(std::memory_order_acquire)) return;
+            std::stable_sort(keys.begin(), keys.end(), [descending](const DateKey& a, const DateKey& b) {
+                if (a.date != b.date) return descending ? (a.date > b.date) : (a.date < b.date);
+                int cmp = _wcsicmp(a.name.c_str(), b.name.c_str());
+                return descending ? (cmp > 0) : (cmp < 0);
+            });
+            for (size_t i = 0; i < v.size(); ++i) v[i] = keys[i].idx;
+            return;
+        }
+    } catch (const std::bad_alloc&) {
+        // OOM during sort — leave v in original order; SearchWorker will
+        // discard these results if a new query is already pending.
     }
 }
 
@@ -644,6 +669,7 @@ void NamedPipeEngine::SearchWorker()
                 query           = std::move(m_pendingQuery);
                 m_lastQuery     = query;
                 m_searchPending = false;
+                m_searchPendingFast.store(false, std::memory_order_release);
                 ResetEvent(m_searchCvNative);
             } else if (wr == WAIT_OBJECT_0 + 1) {
                 // Data changed event. Check if the background service has indexed more files.
@@ -702,8 +728,10 @@ void NamedPipeEngine::SearchWorker()
                 DWORD wr = WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE);
                 if (wr == WAIT_OBJECT_0 + 1) {
                     CancelIo(hPipe);
+                    // Wait for the kernel to finish with ovWrite before it goes out of scope.
+                    GetOverlappedResult(hPipe, &ovWrite, &bytesWritten, TRUE);
                     CloseHandle(hPipe);
-                    continue; 
+                    continue;
                 }
                 GetOverlappedResult(hPipe, &ovWrite, &bytesWritten, TRUE);
 
@@ -720,8 +748,10 @@ void NamedPipeEngine::SearchWorker()
                 wr = WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE);
                 if (wr == WAIT_OBJECT_0 + 1) {
                     CancelIo(hPipe);
+                    // Wait for the kernel to finish with ovRead before it goes out of scope.
+                    GetOverlappedResult(hPipe, &ovRead, &bytesRead, TRUE);
                     CloseHandle(hPipe);
-                    continue; 
+                    continue;
                 }
                 ok = GetOverlappedResult(hPipe, &ovRead, &bytesRead, TRUE);
 
@@ -752,6 +782,9 @@ void NamedPipeEngine::SearchWorker()
             // the column headers immediately after a search.
             ApplySort(*results, sortKey, sortDescending);
 
+            // Discard stale results if a new query arrived while sorting.
+            if (m_searchPendingFast.load(std::memory_order_acquire)) continue;
+
             {
                 std::lock_guard<std::mutex> lk(m_resultsMutex);
                 m_results = std::move(results);
@@ -771,11 +804,15 @@ void NamedPipeEngine::SearchWorker()
             }
             if (sorted) {
                 ApplySort(*sorted, sortKey, sortDescending);
-                std::lock_guard<std::mutex> lk(m_resultsMutex);
-                m_results = std::move(sorted);
+                if (!m_searchPendingFast.load(std::memory_order_acquire)) {
+                    std::lock_guard<std::mutex> lk(m_resultsMutex);
+                    m_results = std::move(sorted);
+                }
             }
-            HWND hwnd = m_hwndNotify.load(std::memory_order_acquire);
-            if (hwnd) PostMessage(hwnd, WM_USER_SEARCH_FINISHED, 0, 0);
+            if (!m_searchPendingFast.load(std::memory_order_acquire)) {
+                HWND hwnd = m_hwndNotify.load(std::memory_order_acquire);
+                if (hwnd) PostMessage(hwnd, WM_USER_SEARCH_FINISHED, 0, 0);
+            }
         }
     }
 }
@@ -920,7 +957,7 @@ std::wstring NamedPipeEngine::GetParentPath(uint32_t recordIdx) const {
         }
 
         uint32_t pi = r.ParentRecordIndex;
-        if (pi == 0xFFFFFFFF || pi >= count || pi == cur) break;
+        if (pi == kInvalidIndex || pi >= count || pi == cur) break;
         cur = pi;
     }
     for (int i = 0; i < resetCount; ++i) visitedBit[resetSlots[i]] = false;

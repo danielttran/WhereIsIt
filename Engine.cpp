@@ -1236,12 +1236,24 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
         m_recordPool.Reserve(preCount + (uint32_t)deltas.size());
     }
 
+    // RAII guard so m_hDataMutex is always released, even on exception or early break.
+    struct NamedMutexGuard {
+        HANDLE h;
+        bool   held = false;
+        explicit NamedMutexGuard(HANDLE h_) : h(h_) {}
+        bool acquire() {
+            if (!h) { held = true; return true; }
+            DWORD wr = WaitForSingleObject(h, INFINITE);
+            held = (wr == WAIT_OBJECT_0 || wr == WAIT_ABANDONED);
+            return held;
+        }
+        void release() { if (held && h) { ReleaseMutex(h); held = false; } }
+        ~NamedMutexGuard() { release(); }
+    } namedMtx(m_hDataMutex);
+
     // Acquire global named mutex FIRST, before local shared_mutex to maintain correct
     // lock order hierarchy and avoid cross-process deadlocks.
-    if (m_hDataMutex) {
-        DWORD wr = WaitForSingleObject(m_hDataMutex, INFINITE);
-        if (wr != WAIT_OBJECT_0 && wr != WAIT_ABANDONED) return;
-    }
+    if (!namedMtx.acquire()) return;
     std::unique_lock<std::shared_mutex> lock(m_dataMutex);
 
     for (size_t i = 0; i < deltas.size(); ++i) {
@@ -1376,17 +1388,13 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
         // Yield the exclusive lock every kEpochSize operations so readers can proceed.
         if ((i & (kEpochSize - 1)) == (kEpochSize - 1) && i + 1 < deltas.size()) {
             lock.unlock();
-            if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
+            namedMtx.release();
             std::this_thread::yield();
-            if (m_hDataMutex) {
-                DWORD wr = WaitForSingleObject(m_hDataMutex, INFINITE);
-                if (wr != WAIT_OBJECT_0 && wr != WAIT_ABANDONED) break;
-            }
+            if (!namedMtx.acquire()) break;
             lock.lock();
         }
     }
-    lock.unlock();
-    if (m_hDataMutex) ReleaseMutex(m_hDataMutex);
+    // Destructors release lock (unique_lock) then namedMtx (NamedMutexGuard) in LIFO order.
 }
 
 void IndexingEngine::HandleUsnJournalRecord(USN_RECORD_V2* r, uint8_t di) {
@@ -1756,7 +1764,6 @@ void IndexingEngine::PropagateDirectorySizes() {
             }
         }
         parent.DirSizeComputed = 1;
-        if (m_hDataChangedEvent) SetEvent(m_hDataChangedEvent);
         }
     if (m_hDataChangedEvent) SetEvent(m_hDataChangedEvent);
 }
