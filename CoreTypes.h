@@ -9,7 +9,10 @@ enum class DriveFileSystem {
 
 enum class QuerySortKey { Name, Path, Size, Date };
 
-constexpr uint32_t kInvalidIndex = 0xFFFFFFFFu;
+constexpr uint32_t kInvalidIndex   = 0xFFFFFFFFu;
+// Sentinel stored in FileRecord::FileSize when the file/dir is >=4 GB.
+// The actual size is then held in IndexingEngine::m_giantFileSizes.
+constexpr uint32_t kGiantFileMarker = 0xFFFFFFFFu;
 
 #pragma pack(push, 1)
 struct FileRecord {

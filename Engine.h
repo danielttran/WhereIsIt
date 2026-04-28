@@ -200,6 +200,7 @@ private:
     std::thread m_searchWorker;
     std::atomic<bool> m_running;
     std::atomic<bool> m_ready;
+    std::atomic<bool> m_indexDirty{ false };  // set on bad_alloc during USN processing; triggers full re-scan
     mutable std::mutex m_statusMutex;
     std::wstring m_status;
     std::atomic<HWND> m_hwndNotify{ nullptr };
