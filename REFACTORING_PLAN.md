@@ -210,14 +210,14 @@ Design all tests so an agent can run, parse, patch, and re-run with no manual ap
 - `tests/fixtures/` dataset generator script
 - `tests/cases/query_matrix.json` (shared query/sort scenarios)
 - `tests/parity/run_parity.ps1` (single entrypoint)
-- `tests/parity/compare_results.py` (strict diff + helpful diagnostics)
+- `tests/parity/parity_comparator.cpp` (strict diff + helpful diagnostics)
+- `tests/unit/run_unit_tests.ps1` (C++ unit-test entrypoint for fast agent loops)
 
 ### Single-command workflow
 ```powershell
 pwsh ./tests/parity/run_parity.ps1 `
-  -ExePath ./build/Release/WhereIsIt.exe `
-  -ServiceExePath ./build/Release/WhereIsIt.exe `
-  -Cases ./tests/cases/query_matrix.json `
+  -AdminResults ./artifacts/parity/admin/results.jsonl `
+  -NonAdminResults ./artifacts/parity/non_admin/results.jsonl `
   -OutDir ./artifacts/parity
 ```
 
