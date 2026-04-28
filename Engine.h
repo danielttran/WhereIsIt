@@ -10,8 +10,6 @@
 #include <condition_variable>
 #include <memory>
 #include <unordered_set>
-#include <unordered_map>
-#include <list>
 #include <chrono>
 
 #define WIN32_LEAN_AND_MEAN
@@ -191,7 +189,7 @@ private:
     void EnqueueUsnDelta(PendingUsnDelta&& delta);
     void ApplyPendingUsnDeltas();
     void PropagateDirectorySizes(); // bottom-up directory size accumulation
-    std::wstring GetWideNameFromPoolOffsetCached(uint32_t namePoolOffset) const;
+    std::wstring GetWideNameFromPoolOffset(uint32_t namePoolOffset) const;
     uint32_t FileTimeToEpoch(uint64_t fileTime) const;
     uint64_t EpochToFileTime(uint32_t epoch) const;
     uint64_t ResolveFileSize(const FileRecord& rec, uint32_t recordIndex) const;
@@ -236,10 +234,6 @@ private:
     std::mutex m_usnDeltaMutex;
     std::vector<PendingUsnDelta> m_pendingUsnDeltas;
 
-    mutable std::mutex m_nameCacheMutex;
-    mutable std::list<uint32_t> m_nameCacheLru;
-    mutable std::unordered_map<uint32_t, std::pair<std::wstring, std::list<uint32_t>::iterator>> m_nameCache;
-    static constexpr size_t kWideNameCacheCapacity = 256;
     std::string m_pendingSearchQuery;
     QuerySortKey m_currentSortKey = QuerySortKey::Name;
     bool m_currentSortDescending = false;

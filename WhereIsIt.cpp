@@ -19,6 +19,7 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <cwctype>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -60,6 +61,19 @@ int g_SearchEditHeight = 0;
 static constexpr int kMaxQueryChars = 1024;
 wchar_t g_CurrentQueryW[kMaxQueryChars] = { 0 };
 std::vector<std::wstring> g_HighlightTokens;
+
+static size_t FastFindHighlight(const std::wstring& haystack, const std::wstring& needle) {
+    if (needle.empty() || needle.size() > haystack.size()) return std::wstring::npos;
+    const size_t limit = haystack.size() - needle.size();
+    for (size_t i = 0; i <= limit; ++i) {
+        size_t j = 0;
+        for (; j < needle.size(); ++j) {
+            if (towlower(haystack[i + j]) != towlower(needle[j])) break;
+        }
+        if (j == needle.size()) return i;
+    }
+    return std::wstring::npos;
+}
 
 // Global UI Context
 std::wstring g_InitialSearchPath;
@@ -187,6 +201,8 @@ std::condition_variable g_iconCv;
 std::vector<std::thread> g_iconWorkers;
 bool g_iconWorkerRunning = false;
 HIMAGELIST g_hSIL_SmallCached = NULL;  // cached in CDDS_PREPAINT, valid for one paint pass
+std::atomic<int> g_VisibleTopIndex{ 0 };
+std::atomic<int> g_VisibleCountPerPage{ 100 };
 
 // --- UI FORMATTING HELPERS ---
 
@@ -204,11 +220,10 @@ static void EnqueueIconRequest(uint32_t recordIdx, int listIdx, bool priority) {
 
 static bool IsRecordVisibleNow(uint32_t recordIdx, int listIdxHint)
 {
-    if (!hFileList || !g_ActiveResults || g_ActiveResults->empty()) return false;
+    if (!g_ActiveResults || g_ActiveResults->empty()) return false;
 
-    int top = ListView_GetTopIndex(hFileList);
-    int perPage = ListView_GetCountPerPage(hFileList);
-    if (top < 0) return false;
+    int top = g_VisibleTopIndex.load(std::memory_order_relaxed);
+    int perPage = g_VisibleCountPerPage.load(std::memory_order_relaxed);
     if (perPage <= 0) perPage = 100;
 
     // Use a margin of one page above and below to be less aggressive with culling.
@@ -234,19 +249,15 @@ int GetIconIndex(const std::wstring& /*filename*/, uint16_t attributes, uint32_t
     if (g_CurrentViewMode == LV_VIEW_DETAILS) {
         if (attributes & FILE_ATTRIBUTE_DIRECTORY)
             return (g_folderIconIdx != -1) ? g_folderIconIdx : 0;
-        {
-            std::lock_guard<std::mutex> lock(g_iconMutex);
-            auto it = g_recordIconCache.find(recordIdx);
-            if (it != g_recordIconCache.end()) {
-                g_iconCacheLru.splice(g_iconCacheLru.begin(), g_iconCacheLru, it->second.second);
-                return it->second.first;
-            }
+        auto it = g_recordIconCache.find(recordIdx);
+        if (it != g_recordIconCache.end()) {
+            g_iconCacheLru.splice(g_iconCacheLru.begin(), g_iconCacheLru, it->second.second);
+            return it->second.first;
         }
         // Cache miss: enqueue async load, return generic icon immediately.
         EnqueueIconRequest(recordIdx, listIdx, /*priority=*/true);
         return (g_fileIconIdx != -1) ? g_fileIconIdx : 0;
     } else {
-        std::lock_guard<std::mutex> lock(g_iconMutex);
         auto it = g_recordIconCache.find(recordIdx);
         if (it != g_recordIconCache.end()) {
             g_iconCacheLru.splice(g_iconCacheLru.begin(), g_iconCacheLru, it->second.second);
@@ -412,8 +423,8 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
 
             if (!g_HighlightTokens.empty()) {
                 for (const auto& token : g_HighlightTokens) {
-                    const wchar_t* found = StrStrIW(nameStr.c_str(), token.c_str());
-                    if (found) { matchPos = (size_t)(found - nameStr.c_str()); matchLen = token.size(); break; }
+                    matchPos = FastFindHighlight(nameStr, token);
+                    if (matchPos != std::wstring::npos) { matchLen = token.size(); break; }
                 }
             }
 
@@ -460,8 +471,12 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
 // --- MESSAGE HANDLERS ---
 
 void OnDisplayInfo(NMLVDISPINFO* pdi) {
+    g_VisibleTopIndex.store(ListView_GetTopIndex(hFileList), std::memory_order_relaxed);
+    g_VisibleCountPerPage.store(ListView_GetCountPerPage(hFileList), std::memory_order_relaxed);
     if (!g_ActiveResults || pdi->item.iItem >= (int)g_ActiveResults->size()) return;
     uint32_t rIdx = (*g_ActiveResults)[pdi->item.iItem];
+    static uint32_t s_lastRowIdx = 0xFFFFFFFFu;
+    static IIndexEngine::RowDisplayData s_lastRowData;
 
     if (pdi->item.mask & LVIF_TEXT) {
         switch (pdi->item.iSubItem) {
@@ -479,13 +494,16 @@ void OnDisplayInfo(NMLVDISPINFO* pdi) {
             case 3: {
                 // Fetch all four columns atomically in one lock acquisition so that
                 // size, attributes, and date are always consistent with each other.
-                auto d = g_Engine->GetRowDisplayData(rIdx);
+                if (s_lastRowIdx != rIdx) {
+                    s_lastRowData = g_Engine->GetRowDisplayData(rIdx);
+                    s_lastRowIdx = rIdx;
+                }
                 if (pdi->item.iSubItem == 1) {
-                    wcsncpy_s(pdi->item.pszText, pdi->item.cchTextMax, d.ParentPath.c_str(), _TRUNCATE);
+                    wcsncpy_s(pdi->item.pszText, pdi->item.cchTextMax, s_lastRowData.ParentPath.c_str(), _TRUNCATE);
                 } else if (pdi->item.iSubItem == 2) {
-                    FormatFileSize(pdi->item.pszText, pdi->item.cchTextMax, d.FileSize, d.Attributes);
+                    FormatFileSize(pdi->item.pszText, pdi->item.cchTextMax, s_lastRowData.FileSize, s_lastRowData.Attributes);
                 } else {
-                    FormatFileTime(pdi->item.pszText, pdi->item.cchTextMax, d.FileTime);
+                    FormatFileTime(pdi->item.pszText, pdi->item.cchTextMax, s_lastRowData.FileTime);
                 }
                 break;
             }
