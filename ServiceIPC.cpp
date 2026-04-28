@@ -9,6 +9,7 @@
 #include <shlobj.h>
 #include "StringUtils.h"
 #include "SortService.h"
+#include "PathSizeDomain.h"
 
 // Max response payload: 1 M result indices × 4 bytes + 4-byte count header.
 // Both the server write buffer and the client receive buffer are sized to this.
@@ -807,7 +808,7 @@ uint64_t NamedPipeEngine::GetRecordFileSize(uint32_t recordIdx) const {
     // the service's IndexingEngine::m_giantFileSizes map which is not in shared memory.
     // We return kGiantFileMarker (≈4 GB) as a lower-bound indicator; size queries and size
     // sorts for files >=4 GB are correct on the service side where ResolveFileSize is used.
-    return rec.FileSize;
+    return pathsize::ResolveFileSizeFromRecord(rec, false, 0ull);
 }
 
 uint64_t NamedPipeEngine::GetRecordLastModifiedFileTime(uint32_t recordIdx) const {
@@ -852,7 +853,7 @@ IIndexEngine::RowDisplayData NamedPipeEngine::GetRowDisplayData(uint32_t recordI
     // Giant files (IsGiantFile==1) carry kGiantFileMarker here; the true size is only
     // available via the service's IndexingEngine::m_giantFileSizes (not in shared memory).
     // Admin mode calls ResolveFileSize() and shows the actual size; service mode shows ~4 GB.
-    d.FileSize   = rec.FileSize;
+    d.FileSize   = pathsize::ResolveFileSizeFromRecord(rec, false, 0ull);
     d.FileTime   = UnixEpochSecondsToFileTime(rec.LastModifiedEpoch);
     d.ParentPath = GetParentPath(recordIdx);
     return d;
@@ -861,12 +862,7 @@ IIndexEngine::RowDisplayData NamedPipeEngine::GetRowDisplayData(uint32_t recordI
 std::wstring NamedPipeEngine::GetFullPath(uint32_t recordIdx) const {
     std::wstring parent = GetParentPath(recordIdx);
     std::wstring name   = GetRecordName(recordIdx);
-    
-    // GetParentPath already returns a path ending with a backslash if it's a root (e.g. "C:\")
-    // or if it's a subpath we've concatenated. We need to be careful not to double up.
-    if (parent.empty()) return name;
-    if (parent.back() == L'\\') return parent + name;
-    return parent + L"\\" + name;
+    return pathsize::JoinParentAndName(parent, name);
 }
 
 std::wstring NamedPipeEngine::GetParentPath(uint32_t recordIdx) const {

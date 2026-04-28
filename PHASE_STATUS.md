@@ -12,11 +12,18 @@
   - Extracted reusable sort module (`SortService`) and wired service-side sorting through it.
   - Refactored parity comparator into reusable C++ library (`ParityComparatorLib`).
   - Added dedicated C++ unit tests for comparator core and sort behavior.
+- **Phase 3 (path/size domain extraction)**
+  - Added `PathSizeDomain` seam for giant-file size fallback and mapped-size resolution.
+  - Centralized path join behavior through `JoinParentAndName` and covered with C++ unit tests.
+
+- **Phase 4 (ports for scan/USN boundaries)**
+  - Introduced `IDriveEnumerator` + `DriveEnumeratorWin32` and `IUsnJournalReader` + `UsnJournalReaderWin32` seams.
+  - Adopted `IDriveEnumerator` in drive discovery path with default Win32 adapter.
 
 ## In Progress
-- **Phase 3 (path/size domain extraction)**
-  - Planning extraction boundaries and parity checks for path and file-size resolution.
+- **Phase 5 (persistence and IPC boundaries)**
+  - Planning `IIndexStorage` boundary and IPC response canonicalization/logging.
 
 ## Next
-- Move parser/tokenization internals behind `QueryDomain` implementation while preserving `BuildQueryPlan` compatibility.
+- Introduce `IIndexStorage` abstraction and move save/load code behind adapter.
 - Add Windows CI step that runs parity comparator on captured admin/non-admin outputs.

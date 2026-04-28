@@ -28,6 +28,7 @@ std::wstring FormatNumberWithCommas(size_t n);
 #include "StringPool.h"
 #include "RecordPool.h"
 #include "Utils.h"
+#include "IDriveEnumerator.h"
 
 // ---------------------------------------------------------------------------
 // IIndexEngine — pure-virtual interface
@@ -132,6 +133,8 @@ public:
     void             SetIndexScopeConfig(const IndexScopeConfig& config) override;
     IndexScopeConfig GetIndexScopeConfig() const override;
 
+    void SetDriveEnumeratorForTesting(std::unique_ptr<IDriveEnumerator> driveEnumerator);
+
 private:
     struct PendingUsnDelta {
         enum class Kind { Upsert, Delete } Type = Kind::Upsert;
@@ -202,6 +205,7 @@ private:
     mutable std::mutex m_statusMutex;
     std::wstring m_status;
     std::atomic<HWND> m_hwndNotify{ nullptr };
+    std::unique_ptr<IDriveEnumerator> m_driveEnumerator;
     HANDLE m_stopEvent = NULL;  // Manual-reset event; set on Stop() to wake MonitorChanges cleanly.
     HANDLE m_hDataChangedEvent = NULL; // Auto-reset event; pulsed on data update.
     
