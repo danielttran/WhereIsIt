@@ -1771,7 +1771,9 @@ void IndexingEngine::PropagateDirectorySizes() {
 std::string IndexingEngine::GetFullPathUTF8Internal(uint32_t recordIdx) const {
     if (recordIdx >= GetRecordCount()) return "";
 
-    thread_local char parts[4096][256];
+    // Store raw pointers into the string pool — no length limit, no copy overhead.
+    // Pool memory is stable for the lifetime of the shared_lock held by SearchThread.
+    thread_local const char* parts[4096];
     int partsCount = 0;
 
     static constexpr uint32_t kBitCap = 4096;
@@ -1793,11 +1795,8 @@ std::string IndexingEngine::GetFullPathUTF8Internal(uint32_t recordIdx) const {
         rootDrive = r.DriveIndex;
         {
             const char* name = m_pool.GetString(r.NamePoolOffset);
-            if (name && (name[0] != '.' || (name[1] != '\0' && (name[1] != '.' || name[2] != '\0')))) {
-                size_t len = strlen(name);
-                if (len < 256) {
-                    memcpy(parts[partsCount++], name, len + 1);
-                }
+            if (name && (name[0] != '.' || name[1] != '\0')) {
+                parts[partsCount++] = name;
             }
         }
 

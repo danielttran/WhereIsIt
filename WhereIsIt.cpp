@@ -420,6 +420,9 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
             SetBkMode(pcd->nmcd.hdc, TRANSPARENT);
             const wchar_t* pName = nameStr.c_str();
             int nameLen = (int)nameStr.size();
+            // Save the original HFONT so we can restore it before returning CDRF_SKIPDEFAULT.
+            // Not restoring it leaks HDC state and corrupts rendering during heavy scrolling.
+            HFONT hOldFont = (HFONT)SelectObject(pcd->nmcd.hdc, g_FontNormal);
             if (matchPos != std::wstring::npos && matchLen > 0) {
                 // Draw the three segments using raw pointer + explicit length:
                 // no heap allocation, no wstring copies.
@@ -428,7 +431,6 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
                 int post = nameLen - pre - mid;
 
                 RECT r1 = rect;
-                SelectObject(pcd->nmcd.hdc, g_FontNormal);
                 if (pre > 0) {
                     DrawTextW(pcd->nmcd.hdc, pName, pre, &r1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
                     DrawTextW(pcd->nmcd.hdc, pName, pre, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
@@ -445,9 +447,9 @@ LRESULT OnCustomDraw(NMLVCUSTOMDRAW* pcd) {
                 if (post > 0)
                     DrawTextW(pcd->nmcd.hdc, pName + pre + mid, post, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             } else {
-                SelectObject(pcd->nmcd.hdc, g_FontNormal);
                 DrawTextW(pcd->nmcd.hdc, pName, nameLen, &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             }
+            SelectObject(pcd->nmcd.hdc, hOldFont);
             return CDRF_SKIPDEFAULT;
         }
         break;
