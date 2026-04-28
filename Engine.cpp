@@ -13,10 +13,12 @@
 #include <cstring>
 #include <execution>
 #include "QueryEngine.h"
+#include "QueryDomain.h"
+#include "DriveEnumeratorWin32.h"
 
 // --- IndexingEngine Implementation ---
 
-IndexingEngine::IndexingEngine() : m_running(false), m_ready(false), m_pool(true), m_isSearchRequested(false), m_isSortOnlyRequested(false) {
+IndexingEngine::IndexingEngine() : m_running(false), m_ready(false), m_pool(true), m_isSearchRequested(false), m_isSortOnlyRequested(false), m_driveEnumerator(std::make_unique<DriveEnumeratorWin32>()) {
     m_hDataMutex = CreateMutexW(GetSharedMemoryReadOnlySA(), FALSE, L"Global\\WhereIsIt_DataMutex");
     if (!m_hDataMutex) m_hDataMutex = CreateMutexW(NULL, FALSE, L"Local\\WhereIsIt_DataMutex");
 
@@ -336,6 +338,10 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
     return true;
 }
 
+void IndexingEngine::SetDriveEnumeratorForTesting(std::unique_ptr<IDriveEnumerator> driveEnumerator) {
+    if (driveEnumerator) m_driveEnumerator = std::move(driveEnumerator);
+}
+
 void IndexingEngine::SetIndexScopeConfig(const IndexScopeConfig& config) {
     std::lock_guard<std::mutex> lock(m_scopeConfigMutex);
     m_scopeConfig = config;
@@ -404,10 +410,9 @@ FileRecord IndexingEngine::GetRecord(uint32_t recordIdx) const {
 }
 
 uint64_t IndexingEngine::ResolveFileSize(const FileRecord& rec, uint32_t recordIndex) const {
-    if (!rec.IsGiantFile) return rec.FileSize;
     auto it = m_giantFileSizes.find(recordIndex);
-    if (it != m_giantFileSizes.end()) return it->second;
-    return (uint64_t)kGiantFileMarker;
+    const bool hasMapped = (it != m_giantFileSizes.end());
+    return pathsize::ResolveFileSizeFromRecord(rec, hasMapped, hasMapped ? it->second : 0ull);
 }
 
 uint32_t IndexingEngine::FileTimeToEpoch(uint64_t fileTime) const {
@@ -750,7 +755,7 @@ void IndexingEngine::SearchThread() {
         } else {
             // Logging removed from normal search path to avoid synchronous OutputDebugStringW overhead per keystroke.
 
-            QueryPlan plan = BuildQueryPlan(query);
+            QueryPlan plan = querydomain::CompilePlan(query);
             if (!plan.Success) {
                 SetStatus(L"Query Error: " + plan.ErrorMessage);
                 std::lock_guard<std::mutex> lock(m_resultBufferMutex);
@@ -758,7 +763,7 @@ void IndexingEngine::SearchThread() {
                 continue;
             }
 
-            if (query.find("sort:") != std::string::npos || query.find("desc") != std::string::npos || query.find("asc") != std::string::npos) {
+            if (querydomain::HasInlineSortDirective(query)) {
                 sortKey = plan.Config.SortKey;
                 sortDescending = plan.Config.SortDescending;
             }
@@ -1501,9 +1506,10 @@ bool IndexingEngine::DiscoverAllDrives() {
     SetStatus(L"Discovering drives...");
     Logger::Log(L"[WhereIsIt] Discovering drives...\n");
     const IndexScopeConfig cfg = GetIndexScopeConfig();
-    wchar_t drvs[512]; GetLogicalDriveStringsW(512, drvs);
+    const auto roots = m_driveEnumerator ? m_driveEnumerator->EnumerateDriveRoots() : std::vector<std::wstring>{};
     wchar_t debugBuf[256];
-    for (wchar_t* p = drvs; *p; p += wcslen(p) + 1) {
+    for (const auto& root : roots) {
+        const wchar_t* p = root.c_str();
         UINT driveType = GetDriveTypeW(p);
         bool allowedType = (driveType == DRIVE_FIXED || driveType == DRIVE_REMOVABLE || driveType == DRIVE_CDROM);
         if (!allowedType && cfg.IndexNetworkDrives && driveType == DRIVE_REMOTE) allowedType = true;

@@ -85,6 +85,9 @@ bool g_MatchPath       = false;
 bool g_MatchDiacritics = false;
 bool g_EnableRegex     = false;
 int  g_FileTypeFilter  = IDM_FILTER_EVERYTHING;
+// Phase 0 feature-flag guardrail.
+// Default OFF to preserve current production behavior until parity testing is complete.
+bool g_UseRefactoredPipeline = false;
 
 
 
@@ -1183,6 +1186,9 @@ static void LoadSettings() {
     g_SortColumn     = (int)GetPrivateProfileIntW(L"View", L"SortColumn",    0,     S);
     g_SortDescending = (int)GetPrivateProfileIntW(L"View", L"SortDescending",0,     S) != 0;
     if (g_SortColumn < 0 || g_SortColumn > 3) g_SortColumn = 0;
+
+    // Experimental toggles (safe default = off).
+    g_UseRefactoredPipeline = GetPrivateProfileIntW(L"Experimental", L"UseRefactoredPipeline", 0, S) != 0;
 }
 
 static void SaveSettings(HWND hWnd) {
@@ -1201,6 +1207,7 @@ static void SaveSettings(HWND hWnd) {
     WriteInt(L"View",   L"Mode",          g_LastViewMode);
     WriteInt(L"View",   L"SortColumn",    g_SortColumn);
     WriteInt(L"View",   L"SortDescending",g_SortDescending  ? 1 : 0);
+    WriteInt(L"Experimental", L"UseRefactoredPipeline", g_UseRefactoredPipeline ? 1 : 0);
     UNREFERENCED_PARAMETER(hWnd);
 }
 

@@ -8,6 +8,8 @@
 #include <thread>
 #include <shlobj.h>
 #include "StringUtils.h"
+#include "SortService.h"
+#include "PathSizeDomain.h"
 
 // Max response payload: 1 M result indices × 4 bytes + 4-byte count header.
 // Both the server write buffer and the client receive buffer are sized to this.
@@ -554,85 +556,24 @@ void NamedPipeEngine::ApplySort(
     if (key == QuerySortKey::Name && !descending) return;
 
     try {
-        // Path sort: pre-compute all parent paths once (O(N×depth)) so the
-        // comparator only does string comparisons (O(log N) calls to a cheap op)
-        // instead of walking the parent chain inside every comparator invocation.
-        if (key == QuerySortKey::Path) {
-            struct Entry { std::wstring path; std::wstring name; uint32_t idx; };
-            std::vector<Entry> entries;
-            entries.reserve(v.size());
-            size_t n = 0;
-            for (uint32_t ri : v) {
-                if ((n++ & 0xFF) == 0 && m_searchPendingFast.load(std::memory_order_acquire)) return;
-                auto d = GetRowDisplayData(ri);
-                entries.push_back({ std::move(d.ParentPath), std::move(d.Name), ri });
-            }
-            if (m_searchPendingFast.load(std::memory_order_acquire)) return;
-            std::stable_sort(entries.begin(), entries.end(),
-                [descending](const Entry& a, const Entry& b) -> bool {
-                    int cmp = _wcsicmp(a.path.c_str(), b.path.c_str());
-                    if (cmp == 0) cmp = _wcsicmp(a.name.c_str(), b.name.c_str());
-                    return descending ? (cmp > 0) : (cmp < 0);
-                });
-            for (size_t i = 0; i < v.size(); ++i) v[i] = entries[i].idx;
-            return;
-        }
+        const bool done = sortservice::BuildAndSortRecords(
+            v,
+            key,
+            descending,
+            [this, key](uint32_t ri, sortservice::SortRecord& out) -> bool {
+                const auto d = GetRowDisplayData(ri);
+                out.idx = ri;
+                out.name = d.Name;
+                out.parentPath = d.ParentPath;
+                if (key == QuerySortKey::Size) out.size = d.FileSize;
+                if (key == QuerySortKey::Date) out.date = d.FileTime;
+                return true;
+            },
+            [this]() -> bool {
+                return m_searchPendingFast.load(std::memory_order_acquire);
+            });
 
-        // Pre-compute sort keys once per record to avoid redundant shared-memory
-        // accesses and atomic loads inside the O(N log N) comparator.
-        if (key == QuerySortKey::Name) {
-            struct NameKey { std::wstring name; uint32_t idx; };
-            std::vector<NameKey> keys;
-            keys.reserve(v.size());
-            size_t n = 0;
-            for (uint32_t ri : v) {
-                if ((n++ & 0xFF) == 0 && m_searchPendingFast.load(std::memory_order_acquire)) return;
-                keys.push_back({ GetRecordName(ri), ri });
-            }
-            if (m_searchPendingFast.load(std::memory_order_acquire)) return;
-            std::stable_sort(keys.begin(), keys.end(), [descending](const NameKey& a, const NameKey& b) {
-                int cmp = _wcsicmp(a.name.c_str(), b.name.c_str());
-                return descending ? (cmp > 0) : (cmp < 0);
-            });
-            for (size_t i = 0; i < v.size(); ++i) v[i] = keys[i].idx;
-            return;
-        }
-        if (key == QuerySortKey::Size) {
-            struct SizeKey { uint64_t size; std::wstring name; uint32_t idx; };
-            std::vector<SizeKey> keys;
-            keys.reserve(v.size());
-            size_t n = 0;
-            for (uint32_t ri : v) {
-                if ((n++ & 0xFF) == 0 && m_searchPendingFast.load(std::memory_order_acquire)) return;
-                keys.push_back({ GetRecordFileSize(ri), GetRecordName(ri), ri });
-            }
-            if (m_searchPendingFast.load(std::memory_order_acquire)) return;
-            std::stable_sort(keys.begin(), keys.end(), [descending](const SizeKey& a, const SizeKey& b) {
-                if (a.size != b.size) return descending ? (a.size > b.size) : (a.size < b.size);
-                int cmp = _wcsicmp(a.name.c_str(), b.name.c_str());
-                return descending ? (cmp > 0) : (cmp < 0);
-            });
-            for (size_t i = 0; i < v.size(); ++i) v[i] = keys[i].idx;
-            return;
-        }
-        if (key == QuerySortKey::Date) {
-            struct DateKey { uint64_t date; std::wstring name; uint32_t idx; };
-            std::vector<DateKey> keys;
-            keys.reserve(v.size());
-            size_t n = 0;
-            for (uint32_t ri : v) {
-                if ((n++ & 0xFF) == 0 && m_searchPendingFast.load(std::memory_order_acquire)) return;
-                keys.push_back({ GetRecordLastModifiedFileTime(ri), GetRecordName(ri), ri });
-            }
-            if (m_searchPendingFast.load(std::memory_order_acquire)) return;
-            std::stable_sort(keys.begin(), keys.end(), [descending](const DateKey& a, const DateKey& b) {
-                if (a.date != b.date) return descending ? (a.date > b.date) : (a.date < b.date);
-                int cmp = _wcsicmp(a.name.c_str(), b.name.c_str());
-                return descending ? (cmp > 0) : (cmp < 0);
-            });
-            for (size_t i = 0; i < v.size(); ++i) v[i] = keys[i].idx;
-            return;
-        }
+        if (!done) return;
     } catch (const std::bad_alloc&) {
         // OOM during sort — leave v in original order; SearchWorker will
         // discard these results if a new query is already pending.
@@ -867,7 +808,7 @@ uint64_t NamedPipeEngine::GetRecordFileSize(uint32_t recordIdx) const {
     // the service's IndexingEngine::m_giantFileSizes map which is not in shared memory.
     // We return kGiantFileMarker (≈4 GB) as a lower-bound indicator; size queries and size
     // sorts for files >=4 GB are correct on the service side where ResolveFileSize is used.
-    return rec.FileSize;
+    return pathsize::ResolveFileSizeFromRecord(rec, false, 0ull);
 }
 
 uint64_t NamedPipeEngine::GetRecordLastModifiedFileTime(uint32_t recordIdx) const {
@@ -912,7 +853,7 @@ IIndexEngine::RowDisplayData NamedPipeEngine::GetRowDisplayData(uint32_t recordI
     // Giant files (IsGiantFile==1) carry kGiantFileMarker here; the true size is only
     // available via the service's IndexingEngine::m_giantFileSizes (not in shared memory).
     // Admin mode calls ResolveFileSize() and shows the actual size; service mode shows ~4 GB.
-    d.FileSize   = rec.FileSize;
+    d.FileSize   = pathsize::ResolveFileSizeFromRecord(rec, false, 0ull);
     d.FileTime   = UnixEpochSecondsToFileTime(rec.LastModifiedEpoch);
     d.ParentPath = GetParentPath(recordIdx);
     return d;
@@ -921,12 +862,7 @@ IIndexEngine::RowDisplayData NamedPipeEngine::GetRowDisplayData(uint32_t recordI
 std::wstring NamedPipeEngine::GetFullPath(uint32_t recordIdx) const {
     std::wstring parent = GetParentPath(recordIdx);
     std::wstring name   = GetRecordName(recordIdx);
-    
-    // GetParentPath already returns a path ending with a backslash if it's a root (e.g. "C:\")
-    // or if it's a subpath we've concatenated. We need to be careful not to double up.
-    if (parent.empty()) return name;
-    if (parent.back() == L'\\') return parent + name;
-    return parent + L"\\" + name;
+    return pathsize::JoinParentAndName(parent, name);
 }
 
 std::wstring NamedPipeEngine::GetParentPath(uint32_t recordIdx) const {
