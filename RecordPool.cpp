@@ -10,7 +10,6 @@ RecordPool::~RecordPool() {
 }
 
 void RecordPool::Clear() {
-    std::lock_guard<std::mutex> lock(m_reserveMutex);
     for (auto& c : m_chunks) {
         if (c.data) {
             if (m_shared) UnmapViewOfFile(c.data);

@@ -862,7 +862,12 @@ uint64_t NamedPipeEngine::GetRecordFileSize(uint32_t recordIdx) const {
     uint32_t count = *m_recordsCount;
     if (recordIdx >= count) return 0;
     m_recordPool.Reserve(count);
-    return m_recordPool.GetRecord(recordIdx).FileSize;
+    const FileRecord& rec = m_recordPool.GetRecord(recordIdx);
+    // For giant files (IsGiantFile==1, FileSize==kGiantFileMarker), the true size lives in
+    // the service's IndexingEngine::m_giantFileSizes map which is not in shared memory.
+    // We return kGiantFileMarker (≈4 GB) as a lower-bound indicator; size queries and size
+    // sorts for files >=4 GB are correct on the service side where ResolveFileSize is used.
+    return rec.FileSize;
 }
 
 uint64_t NamedPipeEngine::GetRecordLastModifiedFileTime(uint32_t recordIdx) const {
@@ -904,6 +909,9 @@ IIndexEngine::RowDisplayData NamedPipeEngine::GetRowDisplayData(uint32_t recordI
     auto [rec, name] = GetRecordAndName(recordIdx);
     d.Name       = std::move(name);
     d.Attributes = rec.FileAttributes;
+    // Giant files (IsGiantFile==1) carry kGiantFileMarker here; the true size is only
+    // available via the service's IndexingEngine::m_giantFileSizes (not in shared memory).
+    // Admin mode calls ResolveFileSize() and shows the actual size; service mode shows ~4 GB.
     d.FileSize   = rec.FileSize;
     d.FileTime   = UnixEpochSecondsToFileTime(rec.LastModifiedEpoch);
     d.ParentPath = GetParentPath(recordIdx);
@@ -958,6 +966,11 @@ std::wstring NamedPipeEngine::GetParentPath(uint32_t recordIdx) const {
 
         uint32_t pi = r.ParentRecordIndex;
         if (pi == kInvalidIndex || pi >= count || pi == cur) break;
+        // Guard against MFT slot reuse: if the parent record's sequence number no longer
+        // matches what was stored at index time, the parent directory was deleted and its
+        // slot repurposed. Stop here rather than walking through a stale record.
+        // Mirrors IndexingEngine::GetFullPathInternal's sequence-number check.
+        if (m_recordPool.GetRecord(pi).MftSequence != r.ParentSequence) break;
         cur = pi;
     }
     for (int i = 0; i < resetCount; ++i) visitedBit[resetSlots[i]] = false;
