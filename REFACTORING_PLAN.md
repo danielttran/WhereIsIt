@@ -4,6 +4,7 @@
 - Break the codebase into small, testable modules with clear dependencies.
 - Add structured, high-signal logging that lets AI (or humans) diagnose failures from logs only.
 - Keep behavior stable while refactoring (strangler pattern + compatibility adapters).
+- Enforce **admin mode vs non-admin mode parity** so both modes produce identical user-visible behavior.
 
 ## Current Pain Points (from code layout)
 - `IndexingEngine` mixes lifecycle, scanning, USN monitoring, search, sorting, path resolution, persistence, and status notifications.
@@ -138,6 +139,19 @@ Use JSON Lines (one object per line) for machine parsing:
 - binary index save/load roundtrip
 - pipe request/response schema compatibility
 
+### Mode-parity tests (required)
+- Build a deterministic fixture dataset on disk (small + medium + edge files).
+- Execute the same query/sort matrix in:
+  - **Admin mode** (local `IndexingEngine`)
+  - **Non-admin mode** (UI + `NamedPipeEngine` against service)
+- Assert identical outputs for:
+  - result count
+  - ordered record IDs (or stable canonical path list)
+  - displayed metadata (size/time/attributes)
+  - status transitions (`search started`/`search finished`) timing envelope
+- Emit one machine-readable parity verdict file per run:
+  - `parity-summary.json` (`pass/fail`, mismatch category, first mismatch key).
+
 ---
 
 ## Incremental Migration Plan (safe, production-grade)
@@ -146,6 +160,7 @@ Use JSON Lines (one object per line) for machine parsing:
 1. Freeze public behavior with golden tests around current query and sorting outputs.
 2. Add runtime feature flag: `UseRefactoredPipeline` (default off).
 3. Introduce `ILogger` interface and no-op/logger adapter.
+4. Add **mode parity baseline test** and fail CI on parity regressions.
 
 ### Phase 1: Extract query stack
 1. Move query parsing/matching into `domain/Query`.
@@ -168,6 +183,7 @@ Use JSON Lines (one object per line) for machine parsing:
 ### Phase 5: Persistence and IPC boundaries
 1. Move save/load into `IIndexStorage` + adapter.
 2. Add request/response schema logger in named pipe server/client.
+3. Add canonicalization layer for IPC responses to guarantee parity with in-proc mode.
 
 ### Phase 6: Flip feature flag gradually
 1. Run canary with `UseRefactoredPipeline=1` for internal users.
@@ -181,7 +197,47 @@ Use JSON Lines (one object per line) for machine parsing:
 - Every public service method emits start/end/error logs with correlation id.
 - Deterministic tests for cancellation/race-sensitive behavior.
 - No regression in result counts/order against golden datasets.
+- Admin and non-admin mode parity suite passes on Windows CI.
 - Feature-flag rollback path validated.
+
+---
+
+## Agent-First Test Loop (minimal human involvement)
+
+Design all tests so an agent can run, parse, patch, and re-run with no manual app clicking.
+
+### Required automation artifacts
+- `tests/fixtures/` dataset generator script
+- `tests/cases/query_matrix.json` (shared query/sort scenarios)
+- `tests/parity/run_parity.ps1` (single entrypoint)
+- `tests/parity/compare_results.py` (strict diff + helpful diagnostics)
+
+### Single-command workflow
+```powershell
+pwsh ./tests/parity/run_parity.ps1 `
+  -ExePath ./build/Release/WhereIsIt.exe `
+  -ServiceExePath ./build/Release/WhereIsIt.exe `
+  -Cases ./tests/cases/query_matrix.json `
+  -OutDir ./artifacts/parity
+```
+
+### Expected outputs (for agent consumption)
+- `artifacts/parity/admin/results.jsonl`
+- `artifacts/parity/non_admin/results.jsonl`
+- `artifacts/parity/diff.json`
+- `artifacts/parity/parity-summary.json`
+- `artifacts/parity/logs/*.jsonl`
+
+### Diff contract (so fixes are actionable)
+`diff.json` should include:
+- `case_id`
+- `mismatch_type` (`count`, `order`, `metadata`, `status_sequence`)
+- `admin_value`
+- `non_admin_value`
+- `first_index` (if ordered mismatch)
+- `suggested_owner` (`query`, `sort`, `ipc`, `record_mapping`, `ui_projection`)
+
+This makes it straightforward for an agent to identify the likely faulty layer and patch only that area.
 
 ---
 
