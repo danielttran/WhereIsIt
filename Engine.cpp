@@ -14,6 +14,7 @@
 #include <execution>
 #include "QueryEngine.h"
 #include "QueryDomain.h"
+#include "PathSizeDomain.h"
 #include "DriveEnumeratorWin32.h"
 
 // --- IndexingEngine Implementation ---
@@ -1174,12 +1175,12 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
 
     // Build one contiguous UTF-8 slab outside the lock to avoid per-delta std::string
     // allocations during catch-up bursts.
+    constexpr uint32_t kInvalidPackedOffset = 0xFFFFFFFFu;
     struct PackedUtf8 {
-        static constexpr uint32_t kInvalidOffset = 0xFFFFFFFFu;
         std::vector<char> Storage;
         std::vector<uint32_t> Offsets;
     } packedNames;
-    packedNames.Offsets.assign(deltas.size(), PackedUtf8::kInvalidOffset);
+    packedNames.Offsets.assign(deltas.size(), kInvalidPackedOffset);
     for (size_t i = 0; i < deltas.size(); ++i) {
         if (deltas[i].Type != PendingUsnDelta::Kind::Upsert) continue;
         const std::wstring& w = deltas[i].Name;
@@ -1247,7 +1248,7 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
 
         uint32_t nameOffset = 0;
         const uint32_t packedNameOffset = packedNames.Offsets[i];
-        if (packedNameOffset == PackedUtf8::kInvalidOffset) continue;
+        if (packedNameOffset == kInvalidPackedOffset) continue;
         const char* incomingNameUtf8 = packedNames.Storage.data() + packedNameOffset;
         if (existing != kInvalidIndex && existing < GetRecordCount()) {
             const char* existingNameUtf8 = m_pool.GetString(m_recordPool.GetRecord(existing).NamePoolOffset);
