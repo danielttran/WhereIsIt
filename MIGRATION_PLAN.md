@@ -17,6 +17,63 @@
 
 ---
 
+## 0a. Design Principles (binding — every PR must respect these)
+
+These three principles are **load-bearing**. Reviewers reject PRs that violate them. Listed in priority order.
+
+### P1. Modularity for testability (highest priority)
+
+- **Constructor injection only.** Every class takes its dependencies as constructor parameters. No singletons, no service locators, no `DateTime.Now`/`std::chrono::system_clock::now()` outside an `IClock` adapter, no `new Random()`, no static mutable state.
+- **One reason to change per file.** Target 50–300 LOC per `.cpp/.cs` file. If a file exceeds 400 LOC, split it. Every public type owns one responsibility, named after a verb (`QueryParser`, `IndexBuildService`) or a noun-of-state (`SearchHandle`, `RecordView`).
+- **Pure functions wherever possible.** Domain code (`/src/core/domain/**`, ViewModels' formatting/projection helpers) must be pure: no I/O, no time, no threads, no allocator surprises. Pure code is the cheapest to test and the fastest to run.
+- **Interfaces sit at every process and thread boundary.** `IEngineClient`, `IDispatcherQueue`, `IClock`, `ILogger`, `IFileSystem`, `ISettingsStore`. Tests substitute fakes for all of them. No test ever touches the disk, the registry, the network, or the wall clock.
+- **Sealed by default.** C# classes are `sealed` unless designed for inheritance. C++ classes are `final` unless they implement an interface. Inheritance is reserved for port→adapter relationships.
+- **No `#ifdef _DEBUG` test hooks** in production code. If something needs to be observable for tests, expose it through an interface, not a debug branch.
+- **Determinism gate.** A test that flakes once is treated as a P1 bug; quarantine and fix before merging anything else.
+
+### P2. Speed (equally critical)
+
+- **Cold start budget**: ≤ 250 ms from process start to first XAML frame on a 7th-gen Intel laptop. Measured by a `startup.first_frame_ms` log event in CI.
+- **Search latency budget**:
+  - Query parse + plan: ≤ 200 µs
+  - First 50 results visible: ≤ 30 ms after keystroke debounce window (120 ms)
+  - Full result set (1M-record fixture, common substring): ≤ 250 ms
+- **Frame budget**: 16.6 ms. ListView scrolling at 60 fps on a 100k-row result set. No allocation per row during scroll.
+- **Concrete rules**:
+  - **Zero-copy on hot paths.** Pass `std::string_view` / `ReadOnlySpan<char>` / `ReadOnlyMemory<byte>` from the IPC frame to the matcher. Never copy the record list out of the engine — hand the C# side a stable handle and a row-fetch API.
+  - **Interning + flyweights.** Keep `StringPool`/`RecordPool`. Row VMs are flyweights over engine-owned memory, materialized lazily, recycled via an object pool when scrolled out of view (`ResultRowViewModelPool`).
+  - **No LINQ on hot paths.** Use `for` loops and `Span<T>` in result projection and sorting. LINQ is allowed in cold/setup paths.
+  - **`IAsyncEnumerable<>` for streaming results**, not `Task<List<T>>`. UI renders incrementally as the engine produces ids.
+  - **Virtualized UI.** `ItemsRepeater` + `ElementFactory` for results. Never bind to a materialized `List<RowViewModel>`; bind to an `ItemsSource` that resolves rows on demand.
+  - **Search debounce + cancellation.** Each keystroke supersedes the prior `SearchAsync` via `CancellationToken`. Cancellation must reach the engine within one poll tick (< 5 ms).
+  - **Allocation-free logging on hot paths.** `ILogger` accepts a `LogEventBuilder` (struct) so DEBUG events compile away when level is INFO.
+  - **No reflection on hot paths.** No `Activator.CreateInstance`, no `dynamic`, no JSON deserialization mid-search. Compiled `System.Text.Json` source generators only.
+  - **Pin the GC.** App-side: `<ServerGarbageCollection>true</ServerGarbageCollection>` is **off** (desktop default), but use `ArrayPool<T>.Shared` and `ObjectPool<T>` (Microsoft.Extensions.ObjectPool) in row materialization.
+- **Benchmarks are tests.** `WhereIsIt.Bench` project (BenchmarkDotNet) gates regressions: any commit that regresses parse, search, or sort by >10% fails CI.
+
+### P3. Smallest footprint possible
+
+- **Binary size targets** (Release, x64):
+  - `WhereIsIt.App.exe` + dependencies (excluding WinAppSDK runtime): ≤ 8 MB
+  - `WhereIsIt.Service.exe`: ≤ 2 MB
+  - `WhereIsIt.Engine.WinRT.dll`: ≤ 1.5 MB
+- **Memory targets** (steady state, 1M records indexed):
+  - Engine working set: ≤ 220 MB (current Win32 baseline + 5%)
+  - App working set (idle, with results visible): ≤ 90 MB
+- **Concrete rules**:
+  - **Native AOT or trimmed.** C# app uses `<PublishAot>true</PublishAot>` if WinAppSDK supports it on the target version; otherwise `<PublishTrimmed>true</PublishTrimmed>` + `<TrimMode>full</TrimMode>` + ILLink rooting only what XAML uses.
+  - **No new heavyweight dependencies.** Allowed NuGet additions during migration: `Microsoft.WindowsAppSDK`, `CommunityToolkit.Mvvm`, `Microsoft.Extensions.DependencyInjection`, `Microsoft.Extensions.ObjectPool`, `System.Reactive`, `System.IO.Pipelines`, `System.Text.Json` (source-gen). Anything else needs a written justification in the PR.
+  - **No JSON / XML config at runtime** beyond the user settings file. No YAML.
+  - **Single-binary service.** Service is a self-contained C++ exe. No .NET runtime in the service.
+  - **Asset diet.** Only the app icon ships in the MSIX. No fonts, no themes, no sample data.
+- **Footprint regression test.** CI step measures build outputs and fails if any binary exceeds its target by >5%.
+
+### How the principles compose
+
+When P2 and P3 conflict with P1, **P1 wins**. Example: a clever zero-allocation cache that requires a `static` field is rejected — make it injectable instead, even at a small allocation cost. We optimize speed and size *within* a testable design, not at its expense.
+
+---
+
 ## 1. Final Target Architecture
 
 ```
@@ -464,9 +521,29 @@ Rule: zero `#include <windows.h>` under `/src/core`. Use `uint64_t` filetimes, `
 
 ## 5. Definition of Done (whole migration)
 
+**Testability (P1)**
 - [ ] Every C++ domain module ≥90% line coverage; every C# ViewModel ≥85%.
+- [ ] No file in `/src` exceeds 400 LOC without a written justification comment.
+- [ ] Zero static mutable state outside composition roots (`App.xaml.cs`, `Service.cpp`).
+- [ ] No test depends on the wall clock, disk, registry, or network. Verified by running the unit-test suite with the file-system and network sandboxed.
 - [ ] Every public service method emits `start`/`end`/`error` events with shared `corr`.
 - [ ] `tests/parity/run_parity.ps1` returns `pass=true` for the full query matrix.
+
+**Speed (P2)** — measured in CI on a fixture with 1M records
+- [ ] Cold start `startup.first_frame_ms` ≤ 250 ms (p50), ≤ 400 ms (p99).
+- [ ] Query parse + plan ≤ 200 µs (p99).
+- [ ] First 50 results ≤ 30 ms after debounce; full result ≤ 250 ms (p95).
+- [ ] ListView scroll at 60 fps for 100k rows; zero allocations per row during scroll (verified by BenchmarkDotNet `MemoryDiagnoser`).
+- [ ] BenchmarkDotNet suite: no >10% regression vs. previous CI baseline.
+
+**Footprint (P3)**
+- [ ] `WhereIsIt.App.exe` (+ deps, excl. WinAppSDK runtime) ≤ 8 MB.
+- [ ] `WhereIsIt.Service.exe` ≤ 2 MB.
+- [ ] `WhereIsIt.Engine.WinRT.dll` ≤ 1.5 MB.
+- [ ] Engine working set ≤ 220 MB at 1M records; app idle ≤ 90 MB.
+- [ ] No NuGet package outside the §0a allow-list without a justification PR.
+
+**Cleanliness**
 - [ ] No Win32 API call exists outside `/src/adapters/win32/` and `/src/service/`.
 - [ ] No `using Microsoft.UI.*` outside `/src/app/Views/` and `App.xaml.cs`.
 - [ ] No code-behind logic in any `.xaml.cs` beyond constructor + `InitializeComponent`.
@@ -477,14 +554,18 @@ Rule: zero `#include <windows.h>` under `/src/core`. Use `uint64_t` filetimes, `
 
 ## 6. Working Agreements for the Executing Agent
 
-1. **One phase per PR.** Don't combine phases.
-2. **Never delete legacy files before Phase 9.** Use the strangler pattern: new code coexists, legacy keeps building.
-3. **Tests land in the same commit as the code they cover.** No follow-up test commits.
-4. **No new product features.** If you find a bug, file it in `BUGS.md`; do not fix during migration unless it blocks parity.
-5. **Schema changes are versioned.** Bump `PipeProtocol.Version` and keep n-1 support until Phase 9.
-6. **All async APIs accept `CancellationToken`.** Every long operation must be cancellable.
-7. **No `Thread.Sleep` / `std::this_thread::sleep_for` in tests.** Use injected `IClock` and deterministic schedulers.
-8. **Logs are the contract for AI debugging.** Don't change event names without updating `docs/log-events.md` (created in Phase 4).
+1. **Re-read §0a before every PR.** P1 (modular/testable), P2 (fast), P3 (small) are non-negotiable. PR description must list one bullet per principle stating how the change respects it.
+2. **One phase per PR.** Don't combine phases.
+3. **Never delete legacy files before Phase 9.** Use the strangler pattern: new code coexists, legacy keeps building.
+4. **Tests land in the same commit as the code they cover.** No follow-up test commits.
+5. **Benchmarks land with new hot paths.** Any new code on a measured hot path (parse, search, sort, row materialization, IPC frame en/decode) ships with a BenchmarkDotNet or Google-Benchmark case in the same PR.
+6. **No new dependency without justification.** If a PR adds a NuGet/vcpkg package not in the §0a allow-list, the PR description must explain why and confirm footprint impact.
+7. **No new product features.** If you find a bug, file it in `BUGS.md`; do not fix during migration unless it blocks parity.
+8. **Schema changes are versioned.** Bump `PipeProtocol.Version` and keep n-1 support until Phase 9.
+9. **All async APIs accept `CancellationToken`.** Every long operation must be cancellable; cancellation latency ≤ 5 ms.
+10. **No `Thread.Sleep` / `std::this_thread::sleep_for` in tests.** Use injected `IClock` and deterministic schedulers.
+11. **No static mutable state.** Composition roots wire everything; classes take dependencies via constructors.
+12. **Logs are the contract for AI debugging.** Don't change event names without updating `docs/log-events.md` (created in Phase 4).
 
 ---
 
