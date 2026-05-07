@@ -1,0 +1,8 @@
+{
+  "cases": [
+    { "id": "literal_alpha", "query": "alpha", "expect_valid": true },
+    { "id": "word_beta", "query": "word:true beta", "expect_valid": true },
+    { "id": "regex_logs", "query": "regex:true .*\\.log$", "expect_valid": true },
+    { "id": "empty", "query": "", "expect_valid": false }
+  ]
+}

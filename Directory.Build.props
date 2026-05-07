@@ -1,0 +1,9 @@
+<Project>
+  <PropertyGroup>
+    <CppLanguageStandard>stdcpp17</CppLanguageStandard>
+    <WarningLevel>Level4</WarningLevel>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+</Project>

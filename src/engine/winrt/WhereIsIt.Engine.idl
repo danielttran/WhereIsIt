@@ -1,0 +1,31 @@
+namespace WhereIsIt.Engine
+{
+    runtimeclass StatusChangedArgs
+    {
+        String Message;
+    }
+
+    runtimeclass ResultsChangedArgs
+    {
+        Windows.Foundation.Collections.IVectorView<UInt32> RowIds;
+    }
+
+    runtimeclass ResultRow
+    {
+        UInt32 Id;
+        String Name;
+        String ParentPath;
+    }
+
+    runtimeclass EngineClient
+    {
+        EngineClient();
+        Windows.Foundation.IAsyncAction StartAsync();
+        Windows.Foundation.IAsyncAction SearchAsync(String query);
+        Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IVectorView<UInt32>> SearchIdsAsync(String query);
+        Windows.Foundation.IAsyncOperation<ResultRow> GetRowAsync(UInt32 id);
+        Windows.Foundation.IAsyncAction StopAsync();
+        event Windows.Foundation.TypedEventHandler<EngineClient, StatusChangedArgs> StatusChanged;
+        event Windows.Foundation.TypedEventHandler<EngineClient, ResultsChangedArgs> ResultsChanged;
+    }
+}
