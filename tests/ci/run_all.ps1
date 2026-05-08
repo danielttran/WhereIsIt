@@ -1,4 +1,3 @@
 $ErrorActionPreference = 'Stop'
-msbuild .\WhereIsIt.sln /m /p:Configuration=Debug
-ctest --output-on-failure
-Write-Host 'dotnet not available in this environment; dotnet test should run in CI.'
+$root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+dotnet test "$root\tests\app\WhereIsIt.App.Tests.csproj" --logger "console;verbosity=normal"

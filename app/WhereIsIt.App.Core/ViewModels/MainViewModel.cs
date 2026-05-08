@@ -9,6 +9,7 @@ namespace WhereIsIt.App.ViewModels;
 public partial class MainViewModel : ObservableObject, IDisposable
 {
     private readonly IDisposable querySubscription;
+    private readonly IDisposable resultsSubscription;
 
     public SearchBoxViewModel SearchBox { get; }
     public ResultsListViewModel ResultsList { get; }
@@ -19,6 +20,13 @@ public partial class MainViewModel : ObservableObject, IDisposable
         SearchBox = new SearchBoxViewModel();
         ResultsList = new ResultsListViewModel(engineClient);
         StatusBar = new StatusBarViewModel();
+
+        resultsSubscription = engineClient.ObserveResults
+            .Subscribe(ids => dispatcher.Enqueue(() =>
+            {
+                ResultsList.BindResults(ids);
+                StatusBar.RecordCount = ids.Count;
+            }));
 
         querySubscription = Observable
             .FromEventPattern<System.ComponentModel.PropertyChangedEventHandler, System.ComponentModel.PropertyChangedEventArgs>(
@@ -36,5 +44,9 @@ public partial class MainViewModel : ObservableObject, IDisposable
             .Subscribe(_ => dispatcher.Enqueue(() => StatusBar.StatusText = "Search complete"));
     }
 
-    public void Dispose() => querySubscription.Dispose();
+    public void Dispose()
+    {
+        querySubscription.Dispose();
+        resultsSubscription.Dispose();
+    }
 }

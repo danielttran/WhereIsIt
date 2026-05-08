@@ -25,7 +25,12 @@ public partial class ResultsListViewModel : ObservableObject
     public void BindResults(IReadOnlyList<uint> ids)
     {
         Rows.Clear();
-        foreach (var id in ids) Rows.Add(new ResultRowViewModel(engineClient, id));
+        foreach (var id in ids)
+        {
+            var row = new ResultRowViewModel(engineClient, id);
+            _ = row.EnsureLoadedAsync(CancellationToken.None);
+            Rows.Add(row);
+        }
     }
 
     partial void OnSortKeyChanged(string value)

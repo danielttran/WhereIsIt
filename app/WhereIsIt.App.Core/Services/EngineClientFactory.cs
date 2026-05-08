@@ -41,15 +41,4 @@ public static class EngineClientFactory
         var principal = new WindowsPrincipal(identity);
         return principal.IsInRole(WindowsBuiltInRole.Administrator);
     }
-
-    private sealed class InProcEngineClient : IEngineClient
-    {
-        public IObservable<string> StatusChanges => System.Reactive.Linq.Observable.Empty<string>();
-        public IObservable<int> MetricsChanges => System.Reactive.Linq.Observable.Empty<int>();
-        public IObservable<IReadOnlyList<uint>> ObserveResults => System.Reactive.Linq.Observable.Empty<IReadOnlyList<uint>>();
-        public System.Threading.Tasks.Task SearchAsync(string query, System.Threading.CancellationToken cancellationToken) => System.Threading.Tasks.Task.CompletedTask;
-        public System.Threading.Tasks.Task SortAsync(string key, bool descending, System.Threading.CancellationToken cancellationToken) => System.Threading.Tasks.Task.CompletedTask;
-        public System.Threading.Tasks.Task<ResultRowModel> GetRowAsync(uint id, System.Threading.CancellationToken cancellationToken) =>
-            System.Threading.Tasks.Task.FromResult(new ResultRowModel($"InProcRow-{id}", "C:\\", 1, DateTimeOffset.UtcNow, "A"));
-    }
 }

@@ -1,22 +1,24 @@
 using Microsoft.Extensions.DependencyInjection;
-using WhereIsIt.App.Contracts;
+using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml;
 using WhereIsIt.App.Services;
-using WhereIsIt.App.ViewModels;
 
 namespace WhereIsIt.App;
 
-public static class AppBootstrap
+public partial class App : Application
 {
-    public static ServiceProvider Build(IServiceCollection services)
+    public static ServiceProvider? Services { get; private set; }
+
+    public App()
     {
-        services.AddSingleton<IEngineClient>(_ => EngineClientFactory.Create());
-        services.AddSingleton<IAppDispatcher, InlineDispatcher>();
-        services.AddTransient<MainViewModel>();
-        services.AddTransient<SearchBoxViewModel>();
-        services.AddTransient<ResultsListViewModel>();
-        services.AddTransient<ResultRowViewModel>();
-        services.AddTransient<StatusBarViewModel>();
-        services.AddTransient<SettingsViewModel>();
-        return services.BuildServiceProvider();
+        InitializeComponent();
+    }
+
+    protected override void OnLaunched(LaunchActivatedEventArgs args)
+    {
+        var dispatcher = new DispatcherQueueAppDispatcher(DispatcherQueue.GetForCurrentThread());
+        Services = AppBootstrap.Build(new ServiceCollection(), dispatcher);
+        var window = new MainWindow(Services);
+        window.Activate();
     }
 }
