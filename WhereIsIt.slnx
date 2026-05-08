@@ -1,7 +1,6 @@
 <Solution>
-  <Configurations>
-    <Platform Name="x64" />
-    <Platform Name="x86" />
-  </Configurations>
-  <Project Path="WhereIsIt.vcxproj" Id="69a535bd-526c-4bf6-bd43-66f44b780754" />
+  <Project Path="app\WhereIsIt.App\WhereIsIt.App.csproj" />
+  <Project Path="app\WhereIsIt.App.Core\WhereIsIt.App.Core.csproj" />
+  <Project Path="src\pipe\WhereIsIt.Pipe.Client\WhereIsIt.Pipe.Client.csproj" />
+  <Project Path="tests\app\WhereIsIt.App.Tests.csproj" />
 </Solution>

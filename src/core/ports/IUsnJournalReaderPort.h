@@ -1,0 +1,24 @@
+#pragma once
+
+#include <cstdint>
+#include <vector>
+
+namespace whereisit::core::ports {
+
+struct UsnRecordView {
+    uint32_t fileReferenceNumber = 0;
+    uint32_t parentFileReferenceNumber = 0;
+    uint32_t reasonMask = 0;
+    uint64_t nextUsn = 0;
+};
+
+class IUsnJournalReaderPort {
+public:
+    virtual ~IUsnJournalReaderPort() = default;
+    virtual bool ReadDeltaBatch(void* volumeHandle,
+                                uint64_t startUsn,
+                                std::vector<UsnRecordView>& outRecords,
+                                uint64_t& outNextUsn) const = 0;
+};
+
+} // namespace whereisit::core::ports

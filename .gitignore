@@ -430,3 +430,6 @@ FodyWeavers.xsd
 
 /index.dat
 /memory.md
+
+!src/adapters/win32/
+!src/adapters/win32/**
