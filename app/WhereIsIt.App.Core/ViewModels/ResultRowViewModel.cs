@@ -28,7 +28,7 @@ public partial class ResultRowViewModel : ObservableObject
     public async Task EnsureLoadedAsync(CancellationToken cancellationToken)
     {
         if (loaded) return;
-        var row = await engineClient.GetRowAsync(id, cancellationToken).ConfigureAwait(false);
+        var row = await engineClient.GetRowAsync(id, cancellationToken);
         Name = row.Name;
         ParentPath = row.ParentPath;
         SizeText = FormatBytes(row.SizeBytes);

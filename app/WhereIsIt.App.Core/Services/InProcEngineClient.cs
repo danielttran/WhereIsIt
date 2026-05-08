@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reactive.Subjects;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using WhereIsIt.App.Contracts;
@@ -12,6 +13,7 @@ namespace WhereIsIt.App.Services;
 
 public sealed class InProcEngineClient : IEngineClient, IDisposable
 {
+    private readonly Func<IReadOnlyList<string>> rootProvider;
     private readonly Subject<string> statusChanges = new();
     private readonly Subject<int> metricsChanges = new();
     private readonly Subject<IReadOnlyList<uint>> results = new();
@@ -20,6 +22,16 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
     private string sortKey = "name";
     private bool sortDescending;
 
+    public InProcEngineClient()
+        : this(GetDefaultRoots)
+    {
+    }
+
+    public InProcEngineClient(Func<IReadOnlyList<string>> rootProvider)
+    {
+        this.rootProvider = rootProvider ?? throw new ArgumentNullException(nameof(rootProvider));
+    }
+
     public IObservable<string> StatusChanges => statusChanges;
     public IObservable<int> MetricsChanges => metricsChanges;
     public IObservable<IReadOnlyList<uint>> ObserveResults => results;
@@ -27,7 +39,7 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
     public async Task SearchAsync(string query, CancellationToken cancellationToken)
     {
         statusChanges.OnNext("searching");
-        var found = await Task.Run(() => ScanFiles(query, cancellationToken), cancellationToken);
+        var found = await Task.Run(() => ScanFiles(query, rootProvider(), cancellationToken), cancellationToken);
         currentResults = SortResults(found, sortKey, sortDescending);
         var ids = Enumerable.Range(0, currentResults.Length).Select(i => (uint)i).ToList();
         metricsChanges.OnNext(ids.Count);
@@ -60,13 +72,14 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         return Task.FromResult(model);
     }
 
-    private static FileInfo[] ScanFiles(string query, CancellationToken cancellationToken)
+    private static FileInfo[] ScanFiles(string query, IReadOnlyList<string> roots, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(query) || query.Length < 2)
             return [];
 
         var bag = new ConcurrentBag<FileInfo>();
-        var roots = new[] { @"C:\Users", @"C:\Program Files", @"C:\Program Files (x86)" };
+
+        var matcher = BuildMatcher(query, out var needsAllFilesPattern);
 
         foreach (var root in roots)
         {
@@ -75,7 +88,7 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
 
             try
             {
-                foreach (var file in Directory.EnumerateFiles(root, $"*{query}*", new EnumerationOptions
+                foreach (var file in Directory.EnumerateFiles(root, needsAllFilesPattern ? "*" : $"*{query}*", new EnumerationOptions
                 {
                     RecurseSubdirectories = true,
                     IgnoreInaccessible = true,
@@ -84,6 +97,11 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
                 }))
                 {
                     if (cancellationToken.IsCancellationRequested) break;
+                    if (!matcher(file, root))
+                    {
+                        continue;
+                    }
+
                     bag.Add(new FileInfo(file));
                     if (bag.Count >= 2000) break;
                 }
@@ -92,6 +110,73 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         }
 
         return [.. bag];
+    }
+
+    private static Func<string, string, bool> BuildMatcher(string query, out bool needsAllFilesPattern)
+    {
+        var trimmed = query.Trim();
+
+        if (trimmed.StartsWith("regex:true ", StringComparison.OrdinalIgnoreCase))
+        {
+            needsAllFilesPattern = true;
+            var pattern = trimmed[11..].Trim();
+            Regex regex;
+            try
+            {
+                regex = new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+            }
+            catch (ArgumentException)
+            {
+                return static (_, _) => false;
+            }
+            return (file, root) =>
+            {
+                var relative = Path.GetRelativePath(root, file);
+                return regex.IsMatch(relative) || regex.IsMatch(Path.GetFileName(file));
+            };
+        }
+
+        if (trimmed.Contains('*') || trimmed.Contains('?'))
+        {
+            needsAllFilesPattern = true;
+            var wildcardRegex = WildcardToRegex(trimmed);
+            return (file, root) =>
+            {
+                var relative = Path.GetRelativePath(root, file);
+                return wildcardRegex.IsMatch(relative) || wildcardRegex.IsMatch(Path.GetFileName(file));
+            };
+        }
+
+        needsAllFilesPattern = false;
+        return (file, _) => Path.GetFileName(file).Contains(trimmed, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static Regex WildcardToRegex(string wildcard)
+    {
+        var pattern = "^" + Regex.Escape(wildcard)
+            .Replace(@"\*", ".*")
+            .Replace(@"\?", ".") + "$";
+        return new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+    }
+
+    private static IReadOnlyList<string> GetDefaultRoots()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return DriveInfo.GetDrives()
+                .Where(d => d.IsReady)
+                .Select(d => d.RootDirectory.FullName)
+                .ToArray();
+        }
+
+        var roots = new List<string> { "/" };
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (!string.IsNullOrWhiteSpace(home))
+        {
+            roots.Add(home);
+        }
+
+        return roots;
     }
 
     private static FileInfo[] SortResults(FileInfo[] files, string key, bool descending)
