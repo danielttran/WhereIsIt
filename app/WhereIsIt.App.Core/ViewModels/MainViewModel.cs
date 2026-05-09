@@ -10,6 +10,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
 {
     private readonly IDisposable querySubscription;
     private readonly IDisposable resultsSubscription;
+    private readonly IDisposable statusSubscription;
+    private readonly IDisposable metricsSubscription;
 
     public SearchBoxViewModel SearchBox { get; }
     public ResultsListViewModel ResultsList { get; }
@@ -27,6 +29,12 @@ public partial class MainViewModel : ObservableObject, IDisposable
                 ResultsList.BindResults(ids);
                 StatusBar.RecordCount = ids.Count;
             }));
+
+        statusSubscription = engineClient.StatusChanges
+            .Subscribe(text => dispatcher.Enqueue(() => StatusBar.StatusText = text));
+
+        metricsSubscription = engineClient.MetricsChanges
+            .Subscribe(count => dispatcher.Enqueue(() => StatusBar.RecordCount = count));
 
         querySubscription = Observable
             .FromEventPattern<System.ComponentModel.PropertyChangedEventHandler, System.ComponentModel.PropertyChangedEventArgs>(
@@ -48,5 +56,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     {
         querySubscription.Dispose();
         resultsSubscription.Dispose();
+        statusSubscription.Dispose();
+        metricsSubscription.Dispose();
     }
 }

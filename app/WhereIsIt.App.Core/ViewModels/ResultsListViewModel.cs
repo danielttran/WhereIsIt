@@ -3,6 +3,7 @@ using System.Collections.ObjectModel;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
 using WhereIsIt.App.Contracts;
 
 namespace WhereIsIt.App.ViewModels;
@@ -36,5 +37,20 @@ public partial class ResultsListViewModel : ObservableObject
     partial void OnSortKeyChanged(string value)
     {
         _ = engineClient.SortAsync(value, SortDescending, CancellationToken.None);
+    }
+
+    [RelayCommand]
+    private void SortBy(string key)
+    {
+        if (SortKey == key)
+        {
+            SortDescending = !SortDescending;
+            _ = engineClient.SortAsync(key, SortDescending, CancellationToken.None);
+        }
+        else
+        {
+            SortDescending = false;
+            SortKey = key;
+        }
     }
 }

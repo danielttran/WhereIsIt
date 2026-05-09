@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: dotnet test (Windows)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore tests/app/WhereIsIt.App.Tests.csproj
+
+      - name: Test
+        run: powershell -File tests\ci\run_all.ps1
+
+      - name: Build WinUI 3 app
+        run: dotnet build app\WhereIsIt.App\WhereIsIt.App.csproj -c Release --no-restore=false

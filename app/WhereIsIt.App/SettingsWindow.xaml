@@ -1,0 +1,23 @@
+<Window
+    x:Class="WhereIsIt.App.SettingsWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="WhereIsIt — Settings">
+    <Grid Padding="16" RowDefinitions="Auto,Auto,*,Auto" RowSpacing="12">
+        <TextBlock Grid.Row="0" Text="Settings" FontSize="22" FontWeight="SemiBold"/>
+
+        <StackPanel Grid.Row="1" Spacing="6">
+            <TextBlock Text="Index scope" FontWeight="SemiBold"/>
+            <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                       Text="Comma-separated drive letters or paths to include in the index. Leave blank for all fixed volumes."/>
+            <TextBox Text="{x:Bind ViewModel.IndexScopeConfig, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                     PlaceholderText="C:\, D:\Projects"/>
+        </StackPanel>
+
+        <Border Grid.Row="2"/>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+            <Button Content="Close" Click="OnCloseClick"/>
+        </StackPanel>
+    </Grid>
+</Window>

@@ -16,7 +16,7 @@ public static class AppBootstrap
         services.AddTransient<ResultsListViewModel>();
         services.AddTransient<ResultRowViewModel>();
         services.AddTransient<StatusBarViewModel>();
-        services.AddTransient<SettingsViewModel>();
+        services.AddSingleton<SettingsViewModel>();
         return services.BuildServiceProvider();
     }
 }
