@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -19,6 +20,9 @@ public partial class ResultRowViewModel : ObservableObject
     [ObservableProperty] private string modifiedText = string.Empty;
     [ObservableProperty] private string attributesText = string.Empty;
 
+    public string FullPath =>
+        string.IsNullOrEmpty(ParentPath) ? Name : Path.Combine(ParentPath, Name);
+
     public ResultRowViewModel(IEngineClient engineClient, uint id)
     {
         this.engineClient = engineClient;
@@ -32,9 +36,10 @@ public partial class ResultRowViewModel : ObservableObject
         Name = row.Name;
         ParentPath = row.ParentPath;
         SizeText = FormatBytes(row.SizeBytes);
-        ModifiedText = row.ModifiedUtc.ToString("u", CultureInfo.InvariantCulture);
+        ModifiedText = row.ModifiedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
         AttributesText = row.Attributes;
         loaded = true;
+        OnPropertyChanged(nameof(FullPath));
     }
 
     public static string FormatBytes(ulong bytes)
