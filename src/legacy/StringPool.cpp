@@ -25,9 +25,9 @@ char* StringPool::Reserve(size_t needed) {
         char* view = nullptr;
         if (hMap) {
             view = (char*)MapViewOfFile(hMap, FILE_MAP_WRITE, 0, 0, allocSize + 32);
-            if (!view) view = (char*)MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
-            
             if (!view) {
+                // Cannot obtain a writable view (e.g., another process owns the mapping with
+                // more restrictive ACLs). Release the handle and fall through to heap allocation.
                 CloseHandle(hMap);
                 hMap = NULL;
             }

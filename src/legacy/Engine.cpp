@@ -391,13 +391,26 @@ bool IndexingEngine::IsRootEnabled(const std::wstring& root) const {
     std::lock_guard<std::mutex> lock(m_scopeConfigMutex);
     if (m_scopeConfig.IncludeRoots.empty()) return true;
     for (const auto& allowed : m_scopeConfig.IncludeRoots) {
-        if (_wcsnicmp(root.c_str(), allowed.c_str(), allowed.size()) == 0) return true;
+        // A drive root is enabled if any allowed path lives on that drive.
+        // Use root.size() as the comparison length so a short drive root like
+        // "C:\" can match against longer allowed paths like "C:\Temp\xyz\".
+        if (_wcsnicmp(allowed.c_str(), root.c_str(), root.size()) == 0) return true;
     }
     return false;
 }
 
 bool IndexingEngine::IsPathIncluded(const std::wstring& path) const {
     std::lock_guard<std::mutex> lock(m_scopeConfigMutex);
+    if (!m_scopeConfig.IncludeRoots.empty()) {
+        bool ok = false;
+        for (const auto& root : m_scopeConfig.IncludeRoots) {
+            // Allow if path is under root OR path is an ancestor of root (needed for
+            // directory traversal to reach the target subtree).
+            const size_t cmp = root.size() < path.size() ? root.size() : path.size();
+            if (_wcsnicmp(path.c_str(), root.c_str(), cmp) == 0) { ok = true; break; }
+        }
+        if (!ok) return false;
+    }
     for (const auto& pattern : m_scopeConfig.ExcludePathPatterns) {
         if (!pattern.empty() && WildcardMatchI(pattern.c_str(), path.c_str())) return false;
     }
@@ -510,8 +523,7 @@ std::wstring IndexingEngine::GetFullPathInternal(uint32_t recordIdx) const {
         if (name[0] != '.' || name[1] != '\0') {
             parts[partsCount++] = Utf8ToWide(name);
         }
-        if ((m_drives[di].Type == DriveFileSystem::NTFS && r.ParentMftIndex < 5) ||
-            r.ParentMftIndex >= (uint32_t)m_mftLookupTables[di].size()) break;
+        if (r.ParentMftIndex >= (uint32_t)m_mftLookupTables[di].size()) break;
         uint32_t pi = m_mftLookupTables[di][r.ParentMftIndex];
         if (pi == kInvalidIndex || pi >= (uint32_t)GetRecordCount() || m_recordPool.GetRecord(pi).MftSequence != r.ParentSequence) break;
         if (pi == cur) break; cur = pi;
@@ -544,8 +556,7 @@ std::wstring IndexingEngine::GetParentPathInternal(uint32_t recordIdx) const {
     if (recordIdx >= (uint32_t)GetRecordCount()) return L"";
     const FileRecord& child = m_recordPool.GetRecord(recordIdx); uint8_t di = child.DriveIndex;
     if (di >= (uint8_t)m_drives.size() || di >= (uint8_t)m_mftLookupTables.size()) return L"";
-    if ((m_drives[di].Type == DriveFileSystem::NTFS && child.ParentMftIndex < 5) ||
-        child.ParentMftIndex >= (uint32_t)m_mftLookupTables[di].size()) return m_drives[di].Letter;
+    if (child.ParentMftIndex >= (uint32_t)m_mftLookupTables[di].size()) return m_drives[di].Letter;
     uint32_t pi = m_mftLookupTables[di][child.ParentMftIndex];
     if (pi == kInvalidIndex || pi >= (uint32_t)GetRecordCount() || m_recordPool.GetRecord(pi).MftSequence != child.ParentSequence) return m_drives[di].Letter;
     return GetFullPathInternal(pi);
@@ -695,9 +706,15 @@ void IndexingEngine::SearchThread() {
             }
 
             std::string p = getFullPath();
-            if (!p.empty()) {
-                 if (!FastContains(p.c_str(), dirPart, plan.Config.CaseSensitive)) return false;
-            } else return false;
+            if (p.empty()) return false;
+            // Normalize separators so "logs/*/app.log" matches Windows paths like
+            // "C:\...\logs\daily\app.log".  Build "*<dirPart>*" to find dirPart
+            // anywhere inside the full path.
+            for (char& c : p) if (c == '\\') c = '/';
+            std::string normDir = dirPart;
+            for (char& c : normDir) if (c == '\\') c = '/';
+            std::string pathPat = "*" + normDir + "*";
+            if (!WildcardMatchIAscii(pathPat.c_str(), p.c_str())) return false;
             return true;
         }
 
@@ -941,7 +958,12 @@ void IndexingEngine::SearchThread() {
                                 if (c == '\\' || c == '/') { hasSlash = true; continue; }
                                 if (c == ':' && ci != 1) return false;
                             }
-                            return hasSlash;
+                            if (!hasSlash) return false;
+                            // Fast path uses FastContains (substring) for the dir part, not wildcard
+                            // matching — fall through to evaluateTerm when dir part has wildcards.
+                            size_t lastSlash = exprTerm.find_last_of("\\/");
+                            if (exprTerm.substr(0, lastSlash).find_first_of("*?") != std::string::npos) return false;
+                            return true;
                         };
 
                         if (isPathQuery()) {
@@ -1075,8 +1097,8 @@ void IndexingEngine::SearchThread() {
 
             bool usePreSorted = (sortKey == QuerySortKey::Name && !sortDescending && !m_preSortedByName.empty());
 
-            if (usePreSorted) {
-                // Already sorted!
+            if (!sortOnly && usePreSorted) {
+                // Already sorted! (only valid when the search phase iterated in pre-sorted order)
             } else if (sortKey == QuerySortKey::Path) {
                 // O(N) pre-pass: resolve and cache full paths once, then O(N log N) sort on
                 // plain strings.  Avoids the O(N log N × depth) MFT ancestor-chain traversal
@@ -1421,15 +1443,30 @@ void IndexingEngine::MonitorChanges() {
     std::vector<HANDLE> waitHandles;
     waitHandles.push_back(m_stopEvent);  // index 0 = stop signal
 
-    for (uint8_t i = 0; i < (uint8_t)m_drives.size(); ++i) {
-        auto& d = m_drives[i];
-        if (d.VolumeHandle == INVALID_HANDLE_VALUE || d.Type != DriveFileSystem::NTFS) continue;
-        HANDLE hChange = FindFirstChangeNotificationW(d.Letter.c_str(), TRUE,
-            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
-            FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_SIZE |
-            FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_CREATION);
-        if (hChange != INVALID_HANDLE_VALUE)
-            waitHandles.push_back(hChange);
+    {
+        const IndexScopeConfig scopeCfg = GetIndexScopeConfig();
+        for (uint8_t i = 0; i < (uint8_t)m_drives.size(); ++i) {
+            auto& d = m_drives[i];
+            if (d.VolumeHandle == INVALID_HANDLE_VALUE || d.Type != DriveFileSystem::NTFS) continue;
+            // When the engine is scoped to specific directories, monitor only those
+            // directories.  Monitoring the entire volume root on a busy machine causes
+            // constant notifications that spam m_isSearchRequested and abort searches.
+            std::wstring notifyPath = d.Letter;
+            if (!scopeCfg.IncludeRoots.empty()) {
+                for (const auto& root : scopeCfg.IncludeRoots) {
+                    if (_wcsnicmp(root.c_str(), d.Letter.c_str(), d.Letter.size()) == 0) {
+                        notifyPath = root;
+                        break;
+                    }
+                }
+            }
+            HANDLE hChange = FindFirstChangeNotificationW(notifyPath.c_str(), TRUE,
+                FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
+                FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_SIZE |
+                FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_CREATION);
+            if (hChange != INVALID_HANDLE_VALUE)
+                waitHandles.push_back(hChange);
+        }
     }
 
     while (m_running) {
@@ -1449,8 +1486,15 @@ void IndexingEngine::MonitorChanges() {
         for (uint8_t i = 0; i < (uint8_t)m_drives.size(); ++i) {
             auto& d = m_drives[i];
             if (d.VolumeHandle == INVALID_HANDLE_VALUE || d.Type != DriveFileSystem::NTFS) continue;
+            // Skip USN journal processing for drives scanned generically: their MFT indices
+            // are synthetic sequential numbers that collide with real NTFS file-reference
+            // numbers, so any USN event would corrupt the index.
+            if (d.SkipUsnMonitoring) continue;
             USN_JOURNAL_DATA_V0 uj; DWORD cb;
             if (!DeviceIoControl(d.VolumeHandle, FSCTL_QUERY_USN_JOURNAL, NULL, 0, &uj, sizeof(uj), &cb, NULL)) continue;
+            // Never read from position 0: that replays all journal history and
+            // corrupts synthetic ancestor records seeded during generic scans.
+            if (d.LastProcessedUsn == 0) d.LastProcessedUsn = (uint64_t)uj.NextUsn;
             READ_USN_JOURNAL_DATA_V0 rd = { (USN)d.LastProcessedUsn, kInvalidIndex, FALSE, 0, 0, uj.UsnJournalID };
             if (DeviceIoControl(d.VolumeHandle, FSCTL_READ_USN_JOURNAL, &rd, sizeof(rd), buf.get(), 65536, &cb, NULL)) {
                 if (cb > sizeof(USN)) {
@@ -1583,11 +1627,63 @@ void IndexingEngine::PerformFullDriveScan() {
 
         activeWorkers++;
         workers.emplace_back([this, &ctx = contexts[i], &totalFound, &activeWorkers]() {
-            if (ctx.Type == DriveFileSystem::NTFS) {
+            std::unordered_set<uint64_t> visitedDirs;
+            const auto cfg = GetIndexScopeConfig();
+            // Use raw MFT scan only for unscoped NTFS volumes; for scoped access
+            // use the Win32 API path so we only traverse the requested subtrees and
+            // always read current metadata (no raw-sector staleness after file churn).
+            if (ctx.Type == DriveFileSystem::NTFS && cfg.IncludeRoots.empty()) {
                 ScanMftForDrive(ctx);
-            } else {
-                std::unordered_set<uint64_t> visitedDirs;
+            } else if (cfg.IncludeRoots.empty()) {
                 ScanGenericDrive(ctx, ctx.DriveLetter, kInvalidIndex, 0, visitedDirs);
+            } else {
+                // Capture the current USN journal position BEFORE scanning so that
+                // MonitorChanges only replays events that occur AFTER this scan starts.
+                // Without this, LastProcessedUsn stays 0 and MonitorChanges replays the
+                // entire journal history, corrupting synthetic ancestor records.
+                if (ctx.VolumeHandle != INVALID_HANDLE_VALUE) {
+                    USN_JOURNAL_DATA_V0 uj; DWORD cb;
+                    if (DeviceIoControl(ctx.VolumeHandle, FSCTL_QUERY_USN_JOURNAL, NULL, 0, &uj, sizeof(uj), &cb, NULL))
+                        ctx.LastProcessedUsn = uj.NextUsn;
+                }
+                // Build synthetic directory records for each path component above the
+                // scope root so GetFullPathInternal can reconstruct the absolute path.
+                auto seedAncestors = [&ctx](const std::wstring& scanRoot) -> uint32_t {
+                    if (scanRoot.size() <= ctx.DriveLetter.size()) return kInvalidIndex;
+                    std::wstring rel = scanRoot.substr(ctx.DriveLetter.size());
+                    while (!rel.empty() && (rel.back() == L'\\' || rel.back() == L'/')) rel.pop_back();
+                    if (rel.empty()) return kInvalidIndex;
+                    uint32_t parentIdx = kInvalidIndex;
+                    size_t start = 0;
+                    while (start <= rel.size()) {
+                        size_t end = rel.find(L'\\', start);
+                        if (end == std::wstring::npos) end = rel.size();
+                        if (end > start) {
+                            FileRecord rec = {};
+                            rec.NamePoolOffset    = ctx.Pool.AddString(rel.substr(start, end - start));
+                            rec.ParentMftIndex    = parentIdx;
+                            rec.MftIndex          = (uint32_t)ctx.Records.size();
+                            rec.MftSequence       = 0;
+                            rec.ParentSequence    = 0;
+                            rec.DriveIndex        = ctx.DriveIndex;
+                            rec.FileAttributes    = FILE_ATTRIBUTE_DIRECTORY;
+                            rec.ParentRecordIndex = kInvalidIndex;
+                            parentIdx = rec.MftIndex;
+                            ctx.Records.push_back(rec);
+                        }
+                        if (end == rel.size()) break;
+                        start = end + 1;
+                    }
+                    return parentIdx;
+                };
+                for (const auto& root : cfg.IncludeRoots) {
+                    if (root.empty()) continue;
+                    if (_wcsnicmp(root.c_str(), ctx.DriveLetter.c_str(), ctx.DriveLetter.size()) != 0) continue;
+                    std::wstring scanRoot = root;
+                    if (scanRoot.back() != L'\\' && scanRoot.back() != L'/') scanRoot += L'\\';
+                    uint32_t ancestorIdx = seedAncestors(scanRoot);
+                    ScanGenericDrive(ctx, scanRoot, ancestorIdx, 0, visitedDirs);
+                }
             }
             totalFound += ctx.Records.size();
             activeWorkers--;
@@ -1615,6 +1711,59 @@ void IndexingEngine::PerformFullDriveScan() {
     progressCv.notify_one();
     if (progressThread.joinable()) progressThread.join();
 
+    // If IncludeRoots are set, filter NTFS scan results now (before commit).
+    // Generic-mode drives were already filtered during ScanGenericDrive via IsPathIncluded.
+    {
+        const auto filterCfg = GetIndexScopeConfig();
+        if (!filterCfg.IncludeRoots.empty()) {
+            for (auto& ctx : contexts) {
+                if (ctx.Type != DriveFileSystem::NTFS) continue;
+                // LookupTable is only populated by ScanMftForDrive; if empty the
+                // generic scan already filtered records via IsPathIncluded — skip.
+                if (ctx.LookupTable.empty()) continue;
+
+                // Resolve the full path of a record within ctx before global commit.
+                auto resolveCtxPath = [&ctx](uint32_t recordIdx) -> std::wstring {
+                    const uint32_t kInv = 0xFFFFFFFFu;
+                    const int kMaxDepth = 64;
+                    const char* parts[kMaxDepth]; int depth = 0;
+                    uint32_t cur = recordIdx;
+                    for (int guard = 0; guard < kMaxDepth && cur < ctx.Records.size(); ++guard) {
+                        const auto& rec = ctx.Records[cur];
+                        const char* name = ctx.Pool.GetString(rec.NamePoolOffset);
+                        if (name && name[0]) parts[depth++] = name;
+                        uint32_t pMft = rec.ParentMftIndex;
+                        if (pMft >= 5 && pMft < (uint32_t)ctx.LookupTable.size()) {
+                            uint32_t pi = ctx.LookupTable[pMft];
+                            if (pi != kInv && pi < (uint32_t)ctx.Records.size() && pi != cur) {
+                                cur = pi; continue;
+                            }
+                        }
+                        break;
+                    }
+                    std::wstring pa = ctx.DriveLetter;
+                    for (int i = depth - 1; i >= 0; --i) {
+                        pa += Utf8ToWide(parts[i]);
+                        if (i > 0) pa += L'\\';
+                    }
+                    return pa;
+                };
+
+                const auto& includeRoots = filterCfg.IncludeRoots;
+                for (uint32_t i = 0; i < (uint32_t)ctx.Records.size(); ++i) {
+                    if (ctx.Records[i].MftIndex == kInvalidIndex) continue;
+                    const std::wstring path = resolveCtxPath(i);
+                    bool ok = false;
+                    for (const auto& root : includeRoots) {
+                        const size_t cmp = root.size() < path.size() ? root.size() : path.size();
+                        if (_wcsnicmp(path.c_str(), root.c_str(), cmp) == 0) { ok = true; break; }
+                    }
+                    if (!ok) ctx.Records[i].MftIndex = kInvalidIndex;
+                }
+            }
+        }
+    }
+
     {
         std::unique_lock<std::shared_mutex> lock(m_dataMutex);
         if (m_recordsCount) InterlockedExchange(m_recordsCount, 0); m_pool.Clear(); m_mftLookupTables.clear(); m_giantFileSizes.clear();
@@ -1633,6 +1782,8 @@ void IndexingEngine::PerformFullDriveScan() {
             });
             uint32_t recordIndexShift = (uint32_t)GetRecordCount();
 
+            // Capture before the move: empty LookupTable means generic-scan path.
+            const bool isGenericScan = ctx.LookupTable.empty();
             m_mftLookupTables[i] = std::move(ctx.LookupTable);
 
             // Pre-reserve memory for all incoming records from this drive
@@ -1647,7 +1798,7 @@ void IndexingEngine::PerformFullDriveScan() {
                     if (giantIt != ctx.GiantFileSizes.end()) m_giantFileSizes[globalRecordIdx] = giantIt->second;
                 }
                 rec.NamePoolOffset += poolOffsetShift;
-                if (ctx.Type != DriveFileSystem::NTFS) {
+                if (isGenericScan) {
                     if (rec.ParentMftIndex != kInvalidIndex) rec.ParentMftIndex += recordIndexShift;
                     uint32_t localIdx = rec.MftIndex;
                     rec.MftIndex = recordIndexShift + localIdx;
@@ -1660,12 +1811,16 @@ void IndexingEngine::PerformFullDriveScan() {
                 }
             }
 
-            if (ctx.Type == DriveFileSystem::NTFS) {
+            if (!isGenericScan) {
                 for (auto& val : m_mftLookupTables[i]) {
                     if (val != kInvalidIndex) val += recordIndexShift;
                 }
             }
             m_drives[i].LastProcessedUsn = ctx.LastProcessedUsn;
+            // Generic scans use synthetic sequential MFT indices that collide with real
+            // NTFS file reference numbers. USN events from other processes would corrupt
+            // these records.  Disable USN journal processing for such drives.
+            if (isGenericScan) m_drives[i].SkipUsnMonitoring = true;
         }
     }
     Logger::Log(L"[WhereIsIt] Parallel drive scan and merge complete.\n");

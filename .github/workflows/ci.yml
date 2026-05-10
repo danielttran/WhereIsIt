@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    name: dotnet test (Windows)
+    name: Build & Test (Windows)
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
@@ -18,11 +18,32 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Restore
+      - name: Restore C# projects
         run: dotnet restore tests/app/WhereIsIt.App.Tests.csproj
 
-      - name: Test
+      - name: Build native engine DLL (Release x64)
+        run: |
+          $msbuild = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe"
+          if (Test-Path $msbuild) {
+            & $msbuild src\engine\native\WhereIsIt.Engine.Native.vcxproj /p:Configuration=Release /p:Platform=x64 /m /v:minimal
+          } else {
+            Write-Warning "MSBuild not found — skipping native DLL build (integration tests will use InProc fallback)"
+          }
+        shell: pwsh
+
+      - name: Copy native DLL to test output
+        run: |
+          $dll = "src\engine\native\x64\Release\WhereIsIt.Engine.Native.dll"
+          $dest = "tests\app\bin\Debug\net10.0-windows"
+          if (Test-Path $dll) {
+            New-Item -ItemType Directory -Force -Path $dest | Out-Null
+            Copy-Item $dll $dest
+            Write-Host "Copied native DLL to test output"
+          }
+        shell: pwsh
+
+      - name: Run tests
         run: powershell -File tests\ci\run_all.ps1
 
-      - name: Build WinUI 3 app
-        run: dotnet build app\WhereIsIt.App\WhereIsIt.App.csproj -c Release --no-restore=false
+      - name: Build WinUI 3 app (Release)
+        run: dotnet build app\WhereIsIt.App\WhereIsIt.App.csproj -c Release

@@ -17,6 +17,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
     public ResultsListViewModel ResultsList { get; }
     public StatusBarViewModel StatusBar { get; }
 
+    [ObservableProperty] private string emptyStateMessage = "Type to search...";
+
     public MainViewModel(IEngineClient engineClient, IAppDispatcher dispatcher)
     {
         SearchBox = new SearchBoxViewModel();
@@ -28,6 +30,12 @@ public partial class MainViewModel : ObservableObject, IDisposable
             {
                 ResultsList.BindResults(ids);
                 StatusBar.RecordCount = ids.Count;
+                StatusBar.CountSummaryText = ids.Count > ResultsListViewModel.DisplayCap
+                    ? $"Showing {ResultsListViewModel.DisplayCap:N0} of {ids.Count:N0}"
+                    : $"{ids.Count:N0} results";
+                EmptyStateMessage = ids.Count == 0
+                    ? (string.IsNullOrEmpty(SearchBox.Query) ? "Type to search..." : $"No results for \"{SearchBox.Query}\"")
+                    : string.Empty;
             }));
 
         statusSubscription = engineClient.StatusChanges
@@ -49,7 +57,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
                 await engineClient.SearchAsync(query, default).ConfigureAwait(false);
                 return query;
             })
-            .Subscribe(_ => dispatcher.Enqueue(() => StatusBar.StatusText = "Search complete"));
+            .Subscribe();
     }
 
     public void Dispose()

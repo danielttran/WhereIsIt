@@ -6,4 +6,5 @@ public partial class StatusBarViewModel : ObservableObject
 {
     [ObservableProperty] private string statusText = "Ready";
     [ObservableProperty] private int recordCount;
+    [ObservableProperty] private string countSummaryText = string.Empty;
 }

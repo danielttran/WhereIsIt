@@ -4,7 +4,7 @@
 
 **Goal:** voidtools' Everything, but as a modern WinUI 3 app — better UI, faster when possible, native C++ engine.
 
-**Branch:** `claude/review-winui3-migration-kpecT` (do not push to `main`).
+**Branch:** `main`.
 
 **Target dev box:** Windows 11 + Visual Studio 2026 (with v145/v143 MSVC, C++/WinRT, Windows 11 SDK 10.0.22621, Windows App SDK workload).
 

@@ -51,7 +51,7 @@ public sealed partial class MainWindow : Window
         };
         root.KeyboardAccelerators.Add(clear);
 
-        var settings = new KeyboardAccelerator { Modifiers = VirtualKeyModifiers.Control, Key = VirtualKey.OemComma };
+        var settings = new KeyboardAccelerator { Modifiers = VirtualKeyModifiers.Control, Key = (VirtualKey)188 };
         settings.Invoked += (_, e) => { OnSettingsClick(this, new RoutedEventArgs()); e.Handled = true; };
         root.KeyboardAccelerators.Add(settings);
     }
@@ -73,8 +73,8 @@ public sealed partial class MainWindow : Window
     private void OnOpenFolderClick(object sender, RoutedEventArgs e)
     {
         var row = ViewModel.ResultsList.SelectedRow;
-        if (row is null || string.IsNullOrEmpty(row.ParentPath)) return;
-        TryStart("explorer.exe", $"\"{row.ParentPath}\"");
+        if (row is null || string.IsNullOrEmpty(row.FullPath)) return;
+        TryStart("explorer.exe", $"/select,\"{row.FullPath}\"");
     }
 
     private void OnCopyNameClick(object sender, RoutedEventArgs e)

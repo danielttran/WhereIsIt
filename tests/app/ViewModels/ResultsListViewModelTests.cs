@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using WhereIsIt.App.Contracts;
@@ -19,12 +20,78 @@ public class ResultsListViewModelTests
     }
 
     [Fact]
+    public void BindResults_StoresTotalResultCount()
+    {
+        var vm = new ResultsListViewModel(new FakeEngineClient());
+        var ids = Enumerable.Range(1, 50).Select(i => (uint)i).ToArray();
+        vm.BindResults(ids);
+        Assert.Equal(50, vm.TotalResultCount);
+    }
+
+    [Fact]
+    public void BindResults_CapsDisplayAtDisplayCap()
+    {
+        var vm = new ResultsListViewModel(new FakeEngineClient());
+        var ids = Enumerable.Range(1, ResultsListViewModel.DisplayCap + 500).Select(i => (uint)i).ToArray();
+        vm.BindResults(ids);
+        Assert.Equal(ResultsListViewModel.DisplayCap, vm.Rows.Count);
+        Assert.Equal(ResultsListViewModel.DisplayCap + 500, vm.TotalResultCount);
+    }
+
+    [Fact]
     public void SortKeyChange_CallsSort()
     {
         var fake = new FakeEngineClient();
         var vm = new ResultsListViewModel(fake);
         vm.SortKey = "size";
         Assert.True(fake.SortCalled);
+    }
+
+    [Theory]
+    [InlineData("name", false, "name", " ▲")]
+    [InlineData("name", true, "name", " ▼")]
+    [InlineData("size", false, "size", " ▲")]
+    [InlineData("size", true, "size", " ▼")]
+    [InlineData("name", false, "path", "")]
+    [InlineData("name", false, "size", "")]
+    [InlineData("path", false, "name", "")]
+    public void SortIndicators_ReflectCurrentSortState(
+        string sortKey, bool descending, string indicatorColumn, string expectedIndicator)
+    {
+        var vm = new ResultsListViewModel(new FakeEngineClient()) { SortDescending = descending };
+        vm.SortKey = sortKey;
+
+        var indicator = indicatorColumn switch
+        {
+            "name" => vm.NameSortIndicator,
+            "path" => vm.PathSortIndicator,
+            "size" => vm.SizeSortIndicator,
+            "modified" => vm.ModifiedSortIndicator,
+            _ => throw new InvalidOperationException()
+        };
+
+        Assert.Equal(expectedIndicator, indicator);
+    }
+
+    [Fact]
+    public void SortBy_TogglesDescending_WhenSameKey()
+    {
+        var fake = new FakeEngineClient();
+        var vm = new ResultsListViewModel(fake);
+        vm.SortByCommand.Execute("name");
+        Assert.True(vm.SortDescending);
+        vm.SortByCommand.Execute("name");
+        Assert.False(vm.SortDescending);
+    }
+
+    [Fact]
+    public void SortBy_ResetsDescending_WhenDifferentKey()
+    {
+        var fake = new FakeEngineClient();
+        var vm = new ResultsListViewModel(fake) { SortDescending = true };
+        vm.SortByCommand.Execute("size");
+        Assert.Equal("size", vm.SortKey);
+        Assert.False(vm.SortDescending);
     }
 
     private sealed class FakeEngineClient : IEngineClient

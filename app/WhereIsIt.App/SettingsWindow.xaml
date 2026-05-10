@@ -16,8 +16,18 @@
 
         <Border Grid.Row="2"/>
 
-        <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
-            <Button Content="Close" Click="OnCloseClick"/>
+        <StackPanel Grid.Row="3" Spacing="8">
+            <InfoBar x:Name="SavedBanner"
+                     IsOpen="{x:Bind ViewModel.Saved, Mode=OneWay}"
+                     Severity="Success"
+                     Title="Settings saved"
+                     Message="Restart WhereIsIt to apply the new index scope."
+                     IsClosable="False"/>
+            <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                <Button Content="Save" Style="{StaticResource AccentButtonStyle}"
+                        Command="{x:Bind ViewModel.SaveCommand}"/>
+                <Button Content="Close" Click="OnCloseClick"/>
+            </StackPanel>
         </StackPanel>
     </Grid>
 </Window>

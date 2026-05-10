@@ -210,13 +210,14 @@ private:
     HANDLE m_stopEvent = NULL;  // Manual-reset event; set on Stop() to wake MonitorChanges cleanly.
     HANDLE m_hDataChangedEvent = NULL; // Auto-reset event; pulsed on data update.
     
-    struct DriveContext { 
-        std::wstring Letter; 
+    struct DriveContext {
+        std::wstring Letter;
         std::string LetterUTF8;
-        uint32_t SerialNumber; 
-        uint64_t LastProcessedUsn; 
-        HANDLE VolumeHandle; 
+        uint32_t SerialNumber;
+        uint64_t LastProcessedUsn;
+        HANDLE VolumeHandle;
         DriveFileSystem Type;
+        bool SkipUsnMonitoring = false; // true for generic scans whose MFT indices are synthetic
     };
     std::vector<DriveContext> m_drives;
     

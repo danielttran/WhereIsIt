@@ -18,7 +18,7 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
     private readonly Subject<int> metricsChanges = new();
     private readonly Subject<IReadOnlyList<uint>> results = new();
 
-    private FileInfo[] currentResults = [];
+    private FileSystemInfo[] currentResults = [];
     private string sortKey = "name";
     private bool sortDescending;
 
@@ -39,7 +39,7 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
     public async Task SearchAsync(string query, CancellationToken cancellationToken)
     {
         statusChanges.OnNext("searching");
-        var found = await Task.Run(() => ScanFiles(query, rootProvider(), cancellationToken), cancellationToken);
+        var found = await Task.Run(() => ScanFileSystem(query, rootProvider(), cancellationToken), cancellationToken);
         currentResults = SortResults(found, sortKey, sortDescending);
         var ids = Enumerable.Range(0, currentResults.Length).Select(i => (uint)i).ToList();
         metricsChanges.OnNext(ids.Count);
@@ -62,24 +62,37 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         if (id >= currentResults.Length)
             return Task.FromResult(new ResultRowModel("?", "?", 0, DateTimeOffset.UtcNow, ""));
 
-        var fi = currentResults[id];
-        var model = new ResultRowModel(
-            fi.Name,
-            fi.DirectoryName ?? string.Empty,
-            (ulong)(fi.Exists ? fi.Length : 0),
-            fi.Exists ? new DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero) : DateTimeOffset.UtcNow,
-            GetAttributes(fi));
+        var fsi = currentResults[id];
+        var model = fsi is FileInfo fi
+            ? new ResultRowModel(
+                fi.Name,
+                fi.DirectoryName ?? string.Empty,
+                (ulong)(fi.Exists ? fi.Length : 0),
+                fi.Exists ? new DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero) : DateTimeOffset.UtcNow,
+                GetAttributeString(fi.Attributes))
+            : new ResultRowModel(
+                fsi.Name,
+                Path.GetDirectoryName(fsi.FullName) ?? string.Empty,
+                0,
+                fsi.Exists ? new DateTimeOffset(fsi.LastWriteTimeUtc, TimeSpan.Zero) : DateTimeOffset.UtcNow,
+                GetAttributeString(fsi.Attributes) + "D");
         return Task.FromResult(model);
     }
 
-    private static FileInfo[] ScanFiles(string query, IReadOnlyList<string> roots, CancellationToken cancellationToken)
+    private static FileSystemInfo[] ScanFileSystem(string query, IReadOnlyList<string> roots, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(query) || query.Length < 2)
             return [];
 
-        var bag = new ConcurrentBag<FileInfo>();
-
+        var bag = new ConcurrentBag<FileSystemInfo>();
         var matcher = BuildMatcher(query, out var needsAllFilesPattern);
+        var opts = new EnumerationOptions
+        {
+            RecurseSubdirectories = true,
+            IgnoreInaccessible = true,
+            MatchCasing = MatchCasing.CaseInsensitive,
+        };
+        var namePattern = needsAllFilesPattern ? "*" : $"*{query}*";
 
         foreach (var root in roots)
         {
@@ -88,22 +101,13 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
 
             try
             {
-                foreach (var file in Directory.EnumerateFiles(root, needsAllFilesPattern ? "*" : $"*{query}*", new EnumerationOptions
-                {
-                    RecurseSubdirectories = true,
-                    IgnoreInaccessible = true,
-                    MaxRecursionDepth = 8,
-                    MatchCasing = MatchCasing.CaseInsensitive,
-                }))
+                foreach (var path in Directory.EnumerateFileSystemEntries(root, namePattern, opts))
                 {
                     if (cancellationToken.IsCancellationRequested) break;
-                    if (!matcher(file, root))
-                    {
-                        continue;
-                    }
-
-                    bag.Add(new FileInfo(file));
-                    if (bag.Count >= 2000) break;
+                    if (!matcher(path, root)) continue;
+                    bag.Add(Directory.Exists(path)
+                        ? (FileSystemInfo)new DirectoryInfo(path)
+                        : new FileInfo(path));
                 }
             }
             catch (Exception) { }
@@ -129,10 +133,10 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
             {
                 return static (_, _) => false;
             }
-            return (file, root) =>
+            return (path, root) =>
             {
-                var relative = Path.GetRelativePath(root, file);
-                return regex.IsMatch(relative) || regex.IsMatch(Path.GetFileName(file));
+                var relative = Path.GetRelativePath(root, path).Replace('\\', '/');
+                return regex.IsMatch(relative) || regex.IsMatch(Path.GetFileName(path));
             };
         }
 
@@ -140,15 +144,15 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         {
             needsAllFilesPattern = true;
             var wildcardRegex = WildcardToRegex(trimmed);
-            return (file, root) =>
+            return (path, root) =>
             {
-                var relative = Path.GetRelativePath(root, file);
-                return wildcardRegex.IsMatch(relative) || wildcardRegex.IsMatch(Path.GetFileName(file));
+                var relative = Path.GetRelativePath(root, path).Replace('\\', '/');
+                return wildcardRegex.IsMatch(relative) || wildcardRegex.IsMatch(Path.GetFileName(path));
             };
         }
 
         needsAllFilesPattern = false;
-        return (file, _) => Path.GetFileName(file).Contains(trimmed, StringComparison.OrdinalIgnoreCase);
+        return (path, _) => Path.GetFileName(path).Contains(trimmed, StringComparison.OrdinalIgnoreCase);
     }
 
     private static Regex WildcardToRegex(string wildcard)
@@ -172,30 +176,27 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         var roots = new List<string> { "/" };
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         if (!string.IsNullOrWhiteSpace(home))
-        {
             roots.Add(home);
-        }
 
         return roots;
     }
 
-    private static FileInfo[] SortResults(FileInfo[] files, string key, bool descending)
+    private static FileSystemInfo[] SortResults(FileSystemInfo[] items, string key, bool descending)
     {
-        IEnumerable<FileInfo> sorted = key switch
+        IEnumerable<FileSystemInfo> sorted = key switch
         {
-            "size" => files.OrderBy(f => { try { return f.Length; } catch { return 0L; } }),
-            "modified" => files.OrderBy(f => { try { return f.LastWriteTimeUtc; } catch { return DateTime.MinValue; } }),
-            _ => files.OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase),
+            "size" => items.OrderBy(f => f is FileInfo fi ? (long)fi.Length : 0L),
+            "modified" => items.OrderBy(f => { try { return f.LastWriteTimeUtc; } catch { return DateTime.MinValue; } }),
+            _ => items.OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase),
         };
         if (descending) sorted = sorted.Reverse();
         return sorted.ToArray();
     }
 
-    private static string GetAttributes(FileInfo fi)
+    private static string GetAttributeString(FileAttributes attr)
     {
         try
         {
-            var attr = fi.Attributes;
             return string.Concat(
                 attr.HasFlag(FileAttributes.ReadOnly) ? "R" : "",
                 attr.HasFlag(FileAttributes.Hidden) ? "H" : "",

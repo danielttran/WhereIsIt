@@ -16,4 +16,11 @@
   <ItemGroup>
     <ProjectReference Include="..\..\app\WhereIsIt.App.Core\WhereIsIt.App.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)..\..\src\engine\native\x64\$(Configuration)\WhereIsIt.Engine.Native.dll"
+          Condition="Exists('$(MSBuildThisFileDirectory)..\..\src\engine\native\x64\$(Configuration)\WhereIsIt.Engine.Native.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>WhereIsIt.Engine.Native.dll</Link>
+    </None>
+  </ItemGroup>
 </Project>

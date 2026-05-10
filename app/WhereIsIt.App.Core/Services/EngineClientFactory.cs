@@ -10,13 +10,18 @@ public static class EngineClientFactory
 {
     private const string PipeName = "WhereIsIt.Engine";
 
-    public static IEngineClient Create(bool? forceElevated = null)
+    public static IEngineClient Create(string[]? scopeRoots = null, bool? forceElevated = null)
     {
+        // Prefer the native engine (full NTFS/USN indexing) when the DLL is present
+        if (NativeEngineClient.IsAvailable())
+        {
+            try { return new NativeEngineClient(scopeRoots); }
+            catch { /* DLL present but failed to load; fall through */ }
+        }
+
         var elevated = forceElevated ?? IsElevated();
         if (!elevated && CanConnectToPipe())
-        {
             return new PipeEngineClient();
-        }
 
         return new InProcEngineClient();
     }

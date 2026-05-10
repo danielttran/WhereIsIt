@@ -37,30 +37,35 @@ void RecordPool::Reserve(size_t count) {
         size_t allocSize = kRecordsPerChunk * sizeof(FileRecord);
         if (m_shared) {
             wchar_t mapName[64];
+
+            // Try Global\ first
             swprintf_s(mapName, L"Global\\WhereIsIt_RecordChunk_%zu", m_chunks.size());
             c.hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, GetSharedMemoryReadOnlySA(), PAGE_READWRITE, 0, (DWORD)allocSize, mapName);
-
-            if (!c.hMap && GetLastError() == ERROR_ACCESS_DENIED) {
-                c.hMap = OpenFileMappingW(FILE_MAP_READ, FALSE, mapName);
-            }
-
-            if (!c.hMap) {
-                // Try Local fallback if Global failed
-                swprintf_s(mapName, L"Local\\WhereIsIt_RecordChunk_%zu", m_chunks.size());
-                c.hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, (DWORD)allocSize, mapName);
-                if (!c.hMap && GetLastError() == ERROR_ACCESS_DENIED) {
-                    c.hMap = OpenFileMappingW(FILE_MAP_READ, FALSE, mapName);
-                }
-            }
-
             if (c.hMap) {
                 c.data = (FileRecord*)MapViewOfFile(c.hMap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
-                if (!c.data) c.data = (FileRecord*)MapViewOfFile(c.hMap, FILE_MAP_READ, 0, 0, 0);
                 if (!c.data) {
-                     Logger::Log(L"[WhereIsIt] RecordPool: MapViewOfFile failed. Error: " + std::to_wstring(GetLastError()));
+                    CloseHandle(c.hMap);
+                    c.hMap = NULL;
                 }
-            } else {
-                 Logger::Log(L"[WhereIsIt] RecordPool: Failed to create or open mapping. Error: " + std::to_wstring(GetLastError()));
+            }
+
+            // Try Local\ if Global failed or its view wasn't writable
+            if (!c.data) {
+                swprintf_s(mapName, L"Local\\WhereIsIt_RecordChunk_%zu", m_chunks.size());
+                c.hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, (DWORD)allocSize, mapName);
+                if (c.hMap) {
+                    c.data = (FileRecord*)MapViewOfFile(c.hMap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+                    if (!c.data) {
+                        CloseHandle(c.hMap);
+                        c.hMap = NULL;
+                    }
+                }
+            }
+
+            // Heap fallback if all mapping attempts failed
+            if (!c.data) {
+                Logger::Log(L"[WhereIsIt] RecordPool: All mapping attempts failed, using heap. Error: " + std::to_wstring(GetLastError()));
+                c.data = new FileRecord[kRecordsPerChunk]();
             }
         } else {
             c.data = new FileRecord[kRecordsPerChunk]();
@@ -70,7 +75,6 @@ void RecordPool::Reserve(size_t count) {
             m_chunks.push_back(c);
             m_mappedCount.store(m_chunks.size() * kRecordsPerChunk, std::memory_order_release);
         } else {
-            if (c.hMap) CloseHandle(c.hMap);
             break; // Failed to allocate
         }
     }

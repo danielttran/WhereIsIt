@@ -9,7 +9,12 @@ public static class AppBootstrap
 {
     public static ServiceProvider Build(IServiceCollection services, IAppDispatcher? dispatcher = null)
     {
-        services.AddSingleton<IEngineClient>(_ => EngineClientFactory.Create());
+        var settingsService = new AppSettingsService();
+        var settings = settingsService.Load();
+
+        services.AddSingleton<AppSettingsService>(_ => settingsService);
+        services.AddSingleton<IEngineClient>(_ => EngineClientFactory.Create(
+            scopeRoots: settings.ScopeRoots.Length > 0 ? settings.ScopeRoots : null));
         services.AddSingleton(dispatcher ?? (IAppDispatcher)new InlineDispatcher());
         services.AddTransient<MainViewModel>();
         services.AddTransient<SearchBoxViewModel>();
