@@ -1102,7 +1102,10 @@ void IndexingEngine::SearchThread() {
                                 if (m_isSearchRequested.load(std::memory_order_relaxed)) { results->clear(); return; }
                                 for (auto& c : chunks) results->insert(results->end(), c.begin(), c.end());
                             };
-                            if (targetDirId != kInvalidIndex && !m_childrenIndex.empty()) {
+                            if (!dirPart.empty() && targetDirId == kInvalidIndex && !m_dirIndex.empty()) {
+                                // Target directory not in the index — no records can be under it.
+                                // Skip scan entirely; results stays empty.
+                            } else if (targetDirId != kInvalidIndex && !m_childrenIndex.empty()) {
                                 // BFS from target directory — O(descendants) instead of O(all records × depth).
                                 // Recurses into all subdirectories; filename+ext filters applied per node.
                                 std::vector<uint32_t> bfsQueue;

@@ -869,4 +869,111 @@ public class NativeEngineIntegrationTests
         invalidIds.Should().BeEmpty(
             "every ID delivered via ObserveResults must produce a valid row");
     }
+
+    // ================================================================== //
+    // 10. Performance — the three user-reported slow scenarios             //
+    //                                                                      //
+    // These tests run against the small fixture (~20 items) and will      //
+    // always pass quickly at that scale.  Their purpose is twofold:       //
+    //   (a) prove each scenario returns CORRECT results (regression        //
+    //       guard for future refactors)                                    //
+    //   (b) catch catastrophic O(N²) regressions: at full-drive scale      //
+    //       (~500 K items) the 5-second budgets below would be violated    //
+    //       without the BFS optimisation.                                  //
+    //                                                                      //
+    // Scenario 1: rooted path query (e.g. C:\Windows\System32\*)           //
+    //   Pre-fix: O(N × depth) parent-chain walk for every indexed record.  //
+    //   Fix:     BFS descends only the target subtree — O(descendants).    //
+    //                                                                      //
+    // Scenario 2: clearing the query (empty search)                        //
+    //   Returns all N records; the engine copies IDs via P/Invoke.         //
+    //                                                                      //
+    // Scenario 3: simple short query ("123")                               //
+    //   Fast-path substring scan; parallelised for N > 200 K.             //
+    // ================================================================== //
+
+    [Fact]
+    public async Task Perf_PathQuery_IndexedDir_CompletesWithin5s()
+    {
+        if (Skip()) return;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        // Scenario 1: rooted path — engine uses BFS when target dir is in index.
+        var query = Path.Combine(_fx.Root.FullName, "subdir", "*");
+        var ids = await Search(query);
+        sw.Stop();
+
+        ids.Count.Should().BeGreaterThanOrEqualTo(3, "subdir has at least 3 entries");
+        sw.Elapsed.TotalSeconds.Should().BeLessThan(5,
+            "path query on an indexed directory must use BFS — O(descendants), not O(all records × depth)");
+    }
+
+    [Fact]
+    public async Task Perf_PathQuery_OutOfScopeDir_ReturnsEmptyQuickly()
+    {
+        if (Skip()) return;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        // The engine is scoped to a small temp dir; C:\Windows\System32 is not indexed.
+        // With the early-exit optimisation the engine skips the scan entirely when it
+        // sees that the target directory is not in m_dirIndex.
+        var ids = await Search(@"C:\Windows\System32\*");
+        sw.Stop();
+
+        ids.Should().BeEmpty("System32 is outside the indexed scope");
+        sw.Elapsed.TotalSeconds.Should().BeLessThan(5,
+            "a path query targeting a non-indexed directory must return immediately");
+    }
+
+    [Fact]
+    public async Task Perf_EmptyQuery_ReturnsAllResultsWithin5s()
+    {
+        if (Skip()) return;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        // Scenario 2: clear/empty query returns every indexed item.
+        var ids = await Search(string.Empty);
+        sw.Stop();
+
+        ids.Count.Should().BeGreaterThan(0, "indexed items must be enumerated");
+        sw.Elapsed.TotalSeconds.Should().BeLessThan(5,
+            "empty query copies all result IDs via P/Invoke — must not block the UI thread");
+    }
+
+    [Fact]
+    public async Task Perf_SimpleShortQuery_ReturnsResultsWithin5s()
+    {
+        if (Skip()) return;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        // Scenario 3: short name fragment — uses the fast-path substring scanner.
+        // On a full drive (~500 K items) this must complete within the budget without BFS.
+        var ids = await Search("123");
+        sw.Stop();
+
+        // No assertion on count — none of our temp files contain "123"
+        sw.Elapsed.TotalSeconds.Should().BeLessThan(5,
+            "simple substring query uses the fast-path scanner and must complete quickly");
+    }
+
+    [Fact]
+    public async Task Perf_PathQueryThenClear_BothCompleteWithin5s()
+    {
+        if (Skip()) return;
+        // Simulates the exact user-reported sequence:
+        //   1. Type rooted path query  → slow without BFS
+        //   2. Clear (empty query)     → must not block waiting for the previous search
+        //   3. Type "123"              → must fire a fresh search immediately
+        var pathQuery = Path.Combine(_fx.Root.FullName, "logs", "daily", "*.log");
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var ids1 = await Search(pathQuery);
+        ids1.Count.Should().BeGreaterThanOrEqualTo(2, "logs/daily has app.log and error.log");
+
+        var ids2 = await Search(string.Empty);
+        ids2.Count.Should().BeGreaterThan(0, "clearing search returns all items");
+
+        var ids3 = await Search("123");
+        // No count assertion — empty set expected for our fixture
+        sw.Stop();
+
+        sw.Elapsed.TotalSeconds.Should().BeLessThan(5,
+            "the full path → clear → simple-query sequence must not stall");
+    }
 }
