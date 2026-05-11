@@ -129,6 +129,17 @@ uint32_t IndexingEngine::FetchVolumeSerialNumber(const std::wstring& drive) {
 }
 
 std::wstring IndexingEngine::ResolveIndexSavePath() {
+    // Store in %LOCALAPPDATA%\WhereIsIt\ so the index survives app rebuilds
+    // and is shared across Debug/Release configurations.
+    wchar_t appData[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", appData, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        std::wstring dir(appData);
+        dir += L"\\WhereIsIt";
+        CreateDirectoryW(dir.c_str(), NULL);
+        return dir + L"\\index.dat";
+    }
+    // Fallback: next to the exe
     std::vector<wchar_t> exePathBuf(MAX_PATH);
     DWORD len = 0;
     while (true) {
@@ -566,16 +577,40 @@ void IndexingEngine::UpdatePreSortedIndex() {
     SetStatus(L"Sorting index...");
     std::vector<uint32_t> sorted;
 
-    // Phase 1: collect indices and snapshot the name pointers under a short shared lock.
-    // Sorting itself does NOT hold any lock — the sort comparator uses snapshots.
+    // Phase 1: collect name entries (for sort) and directory paths (for dir index)
+    // under a single shared lock.  GetFullPathUTF8Internal accesses m_recordPool /
+    // m_pool / m_drives — all protected by m_dataMutex — so it is safe here.
     struct NameEntry { uint32_t idx; const char* name; };
     std::vector<NameEntry> entries;
+    std::unordered_map<std::string, uint32_t> newDirIndex;
+    std::unordered_map<uint32_t, std::vector<uint32_t>> newChildrenIndex;
     {
         std::shared_lock<std::shared_mutex> dataLock(m_dataMutex);
-        entries.reserve(GetRecordCount());
-        for (uint32_t i = 0; i < (uint32_t)GetRecordCount(); ++i) {
-            if (m_recordPool.GetRecord(i).MftIndex != kInvalidIndex)
-                entries.push_back({ i, m_pool.GetString(m_recordPool.GetRecord(i).NamePoolOffset) });
+        uint32_t count = GetRecordCount();
+        entries.reserve(count);
+        newDirIndex.reserve(count / 8);
+        newChildrenIndex.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            const auto& rec = m_recordPool.GetRecord(i);
+            if (rec.MftIndex == kInvalidIndex) continue;
+            const char* name = m_pool.GetString(rec.NamePoolOffset);
+            entries.push_back({ i, name });
+
+            // Build parent→children map for BFS-based path queries.
+            uint32_t pi = rec.ParentRecordIndex;
+            if (pi != kInvalidIndex && pi < count)
+                newChildrenIndex[pi].push_back(i);
+
+            // Build directory path index: map lowercase path (no trailing slash) → record ID.
+            if (rec.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                std::string path = GetFullPathUTF8Internal(i);
+                // Normalise: lowercase, strip trailing separator.
+                for (char& c : path) c = (char)g_ToLowerLookup[(unsigned char)c];
+                while (!path.empty() && (path.back() == '\\' || path.back() == '/'))
+                    path.pop_back();
+                if (!path.empty())
+                    newDirIndex.emplace(std::move(path), i);
+            }
         }
     } // shared lock released before sort
 
@@ -592,6 +627,8 @@ void IndexingEngine::UpdatePreSortedIndex() {
     {
         std::unique_lock<std::shared_mutex> lockWrite(m_dataMutex);
         m_preSortedByName = std::move(sorted);
+        m_dirIndex = std::move(newDirIndex);
+        m_childrenIndex = std::move(newChildrenIndex);
     }
 }
 
@@ -974,6 +1011,47 @@ void IndexingEngine::SearchThread() {
                             bool fileHasWildcard = !filePart.empty() && filePart.find_first_of("*?") != std::string::npos;
                             bool caseSensitive   = plan.Config.CaseSensitive;
 
+                            // Look up the target directory record via m_dirIndex so the inner
+                            // loop can walk the ancestor chain (integer comparisons) instead of
+                            // building the full path string for every filename-matched record.
+                            // Falls back to GetFullPathUTF8Internal when the dir isn't indexed.
+                            uint32_t targetDirId = kInvalidIndex;
+                            if (!dirPart.empty() && !m_dirIndex.empty()) {
+                                // Normalise: lowercase, strip trailing separator, / → \.
+                                std::string normDir;
+                                normDir.reserve(dirPart.size());
+                                for (char c : dirPart) {
+                                    if (c == '/') c = '\\';
+                                    normDir += (char)g_ToLowerLookup[(unsigned char)c];
+                                }
+                                while (!normDir.empty() && normDir.back() == '\\') normDir.pop_back();
+                                auto it = m_dirIndex.find(normDir);
+                                if (it != m_dirIndex.end()) targetDirId = it->second;
+                            }
+
+                            // Per-record directory check: ancestor-chain walk when targetDirId is
+                            // known; fall back to full-path string construction otherwise.
+                            // Captured by value so parallel workers get their own copy.
+                            const uint32_t recordCount = GetRecordCount();
+                            auto checkDir = [&](uint32_t idx) -> bool {
+                                if (dirPart.empty()) return true;
+                                if (targetDirId != kInvalidIndex) {
+                                    // Walk the parent chain looking for the target directory record.
+                                    // No string allocation; early exit as soon as the target is found.
+                                    uint32_t cur = idx;
+                                    for (int d = 0; d < 128; ++d) {
+                                        uint32_t pi = m_recordPool.GetRecord(cur).ParentRecordIndex;
+                                        if (pi == kInvalidIndex || pi >= recordCount || pi == cur) break;
+                                        if (pi == targetDirId) return true;
+                                        cur = pi;
+                                    }
+                                    return false;
+                                }
+                                // Fallback: build the full path and do a substring check.
+                                std::string fullPath = GetFullPathUTF8Internal(idx);
+                                return FastContains(fullPath.c_str(), dirPart, caseSensitive);
+                            };
+
                             auto pathLoop = [&](uint32_t count, auto getIndex) {
                                 const unsigned int hw = std::thread::hardware_concurrency();
                                 const uint32_t workerCount = (std::min)((uint32_t)(hw ? hw : 4), (uint32_t)8);
@@ -988,8 +1066,7 @@ void IndexingEngine::SearchThread() {
                                             bool matchName = fileHasWildcard ? WildcardMatchIAscii(filePart.c_str(), name) : (caseSensitive ? (strcmp(name, filePart.c_str()) == 0) : (FastCompareIgnoreCase(name, filePart.c_str()) == 0));
                                             if (!matchName) continue;
                                         }
-                                        std::string fullPath = GetFullPathUTF8Internal(idx);
-                                        if (!dirPart.empty() && !FastContains(fullPath.c_str(), dirPart, caseSensitive)) continue;
+                                        if (!checkDir(idx)) continue;
                                         if (hasExtFilter && !passesFilter(rec, name)) continue;
                                         results->push_back(idx);
                                     }
@@ -1010,8 +1087,7 @@ void IndexingEngine::SearchThread() {
                                             bool matchName = fileHasWildcard ? WildcardMatchIAscii(filePart.c_str(), name) : (caseSensitive ? (strcmp(name, filePart.c_str()) == 0) : (FastCompareIgnoreCase(name, filePart.c_str()) == 0));
                                             if (!matchName) continue;
                                         }
-                                        std::string fullPath = GetFullPathUTF8Internal(idx);
-                                        if (!dirPart.empty() && !FastContains(fullPath.c_str(), dirPart, caseSensitive)) continue;
+                                        if (!checkDir(idx)) continue;
                                         if (hasExtFilter && !passesFilter(rec, name)) continue;
                                         local.push_back(idx);
                                     }
@@ -1026,8 +1102,37 @@ void IndexingEngine::SearchThread() {
                                 if (m_isSearchRequested.load(std::memory_order_relaxed)) { results->clear(); return; }
                                 for (auto& c : chunks) results->insert(results->end(), c.begin(), c.end());
                             };
-                            if (usePreSorted) pathLoop((uint32_t)m_preSortedByName.size(), [&](uint32_t i) { return m_preSortedByName[i]; });
-                            else pathLoop((uint32_t)GetRecordCount(), [&](uint32_t i) { return i; });
+                            if (targetDirId != kInvalidIndex && !m_childrenIndex.empty()) {
+                                // BFS from target directory — O(descendants) instead of O(all records × depth).
+                                // Recurses into all subdirectories; filename+ext filters applied per node.
+                                std::vector<uint32_t> bfsQueue;
+                                bfsQueue.reserve(256);
+                                bfsQueue.push_back(targetDirId);
+                                for (size_t bfsHead = 0; bfsHead < bfsQueue.size(); ++bfsHead) {
+                                    if ((bfsHead & 0x3F) == 0 && m_isSearchRequested.load(std::memory_order_relaxed)) {
+                                        results->clear(); break;
+                                    }
+                                    auto cit = m_childrenIndex.find(bfsQueue[bfsHead]);
+                                    if (cit == m_childrenIndex.end()) continue;
+                                    for (uint32_t idx : cit->second) {
+                                        const auto& rec = m_recordPool.GetRecord(idx);
+                                        if (rec.MftIndex == kInvalidIndex) continue;
+                                        const char* name = m_pool.GetString(rec.NamePoolOffset);
+                                        bool matchesName = filePart.empty();
+                                        if (!matchesName)
+                                            matchesName = fileHasWildcard
+                                                ? WildcardMatchIAscii(filePart.c_str(), name)
+                                                : (caseSensitive ? (strcmp(name, filePart.c_str()) == 0) : (FastCompareIgnoreCase(name, filePart.c_str()) == 0));
+                                        if (matchesName && (!hasExtFilter || passesFilter(rec, name)))
+                                            results->push_back(idx);
+                                        if (rec.FileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                                            bfsQueue.push_back(idx);
+                                    }
+                                }
+                            } else {
+                                if (usePreSorted) pathLoop((uint32_t)m_preSortedByName.size(), [&](uint32_t i) { return m_preSortedByName[i]; });
+                                else pathLoop((uint32_t)GetRecordCount(), [&](uint32_t i) { return i; });
+                            }
                         } else {
                             // FULL PATH: complex query with operators/modifiers — uses evaluateTerm.
                             auto evalLoop = [&](uint32_t count, auto getIndex) {

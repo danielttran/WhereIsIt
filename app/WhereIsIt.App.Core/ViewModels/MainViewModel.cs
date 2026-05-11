@@ -13,6 +13,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
     private readonly IDisposable statusSubscription;
     private readonly IDisposable metricsSubscription;
 
+    private string _engineStatus = "Starting...";
+
     public SearchBoxViewModel SearchBox { get; }
     public ResultsListViewModel ResultsList { get; }
     public StatusBarViewModel StatusBar { get; }
@@ -30,16 +32,37 @@ public partial class MainViewModel : ObservableObject, IDisposable
             {
                 ResultsList.BindResults(ids);
                 StatusBar.RecordCount = ids.Count;
+
+                var isActiveQuery = !string.IsNullOrEmpty(SearchBox.Query);
+
+                if (isActiveQuery)
+                {
+                    StatusBar.StatusText = ids.Count == 1
+                        ? "Found 1 item"
+                        : $"Found {ids.Count:N0} items";
+                }
+                else
+                {
+                    StatusBar.StatusText = _engineStatus;
+                }
+
                 StatusBar.CountSummaryText = ids.Count > ResultsListViewModel.DisplayCap
                     ? $"Showing {ResultsListViewModel.DisplayCap:N0} of {ids.Count:N0}"
                     : $"{ids.Count:N0} results";
+
                 EmptyStateMessage = ids.Count == 0
                     ? (string.IsNullOrEmpty(SearchBox.Query) ? "Type to search..." : $"No results for \"{SearchBox.Query}\"")
                     : string.Empty;
             }));
 
         statusSubscription = engineClient.StatusChanges
-            .Subscribe(text => dispatcher.Enqueue(() => StatusBar.StatusText = text));
+            .Subscribe(text => dispatcher.Enqueue(() =>
+            {
+                _engineStatus = text;
+                // Only update status bar when no active search query
+                if (string.IsNullOrEmpty(SearchBox.Query))
+                    StatusBar.StatusText = text;
+            }));
 
         metricsSubscription = engineClient.MetricsChanges
             .Subscribe(count => dispatcher.Enqueue(() => StatusBar.RecordCount = count));
@@ -50,10 +73,13 @@ public partial class MainViewModel : ObservableObject, IDisposable
                 h => SearchBox.PropertyChanged -= h)
             .Where(e => e.EventArgs.PropertyName == nameof(SearchBoxViewModel.Query))
             .Select(_ => SearchBox.Query)
-            .Throttle(TimeSpan.FromMilliseconds(120))
             .DistinctUntilChanged()
             .SelectMany(async query =>
             {
+                // When query cleared, revert status bar to last engine status
+                if (string.IsNullOrEmpty(query))
+                    dispatcher.Enqueue(() => StatusBar.StatusText = _engineStatus);
+
                 await engineClient.SearchAsync(query, default).ConfigureAwait(false);
                 return query;
             })

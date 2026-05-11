@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Collections.ObjectModel;
 using System.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -11,10 +10,12 @@ namespace WhereIsIt.App.ViewModels;
 public partial class ResultsListViewModel : ObservableObject
 {
     public const int DisplayCap = 2000;
+    public const int EagerLoadCount = 50;
 
     private readonly IEngineClient engineClient;
 
-    public ObservableCollection<ResultRowViewModel> Rows { get; } = [];
+    // Replaced as a unit so the ListView refreshes in one pass (no per-item animations).
+    [ObservableProperty] private IReadOnlyList<ResultRowViewModel> rows = [];
 
     [ObservableProperty] private ResultRowViewModel? selectedRow;
 
@@ -42,15 +43,17 @@ public partial class ResultsListViewModel : ObservableObject
 
     public void BindResults(IReadOnlyList<uint> ids)
     {
-        TotalResultCount = ids.Count;
-        Rows.Clear();
         var display = Math.Min(ids.Count, DisplayCap);
+        var list = new List<ResultRowViewModel>(display);
         for (int i = 0; i < display; i++)
         {
             var row = new ResultRowViewModel(engineClient, ids[i]);
-            _ = row.EnsureLoadedAsync(CancellationToken.None);
-            Rows.Add(row);
+            if (i < EagerLoadCount)
+                _ = row.EnsureLoadedAsync(CancellationToken.None);
+            list.Add(row);
         }
+        TotalResultCount = ids.Count;
+        Rows = list;
     }
 
     partial void OnSortKeyChanged(string value)

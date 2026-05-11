@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
@@ -54,6 +55,13 @@ public sealed partial class MainWindow : Window
         var settings = new KeyboardAccelerator { Modifiers = VirtualKeyModifiers.Control, Key = (VirtualKey)188 };
         settings.Invoked += (_, e) => { OnSettingsClick(this, new RoutedEventArgs()); e.Handled = true; };
         root.KeyboardAccelerators.Add(settings);
+    }
+
+    private async void OnContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
+    {
+        if (args.InRecycleQueue) return;
+        if (args.Item is ResultRowViewModel row)
+            await row.EnsureLoadedAsync(System.Threading.CancellationToken.None);
     }
 
     private void OnResultsKeyDown(object sender, KeyRoutedEventArgs e)

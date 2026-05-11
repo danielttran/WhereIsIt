@@ -229,6 +229,8 @@ private:
     wchar_t (*m_driveLettersShared)[4] = nullptr;
 
     std::vector<uint32_t> m_preSortedByName;
+    std::unordered_map<std::string, uint32_t> m_dirIndex;     // lowercase-path → record ID
+    std::unordered_map<uint32_t, std::vector<uint32_t>> m_childrenIndex; // parentId → [childId, ...]
     std::vector<std::vector<uint32_t>> m_mftLookupTables;
     std::unordered_map<uint32_t, uint64_t> m_giantFileSizes;
     StringPool m_pool;

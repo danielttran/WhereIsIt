@@ -82,9 +82,16 @@ public sealed class NativeEngineFixture : IDisposable
         CreateFile(Path.Combine("logs", "daily", "app.log"),   AppLogSize);
         CreateFile(Path.Combine("logs", "daily", "error.log"), ErrorLogSize);
 
-        // Delete stale index.dat so every test run starts with a fresh scan.
-        var indexPath = Path.Combine(AppContext.BaseDirectory, "index.dat");
-        if (File.Exists(indexPath)) File.Delete(indexPath);
+        // Delete stale index.dat (both legacy location and new %LOCALAPPDATA% location)
+        // so every test run starts with a fresh scan.
+        var indexPath1 = Path.Combine(AppContext.BaseDirectory, "index.dat");
+        if (File.Exists(indexPath1)) File.Delete(indexPath1);
+        var appData = Environment.GetEnvironmentVariable("LOCALAPPDATA");
+        if (appData != null)
+        {
+            var indexPath2 = Path.Combine(appData, "WhereIsIt", "index.dat");
+            if (File.Exists(indexPath2)) File.Delete(indexPath2);
+        }
 
         // Create engine scoped to our temp dir — scope roots BEFORE start.
         Client = new NativeEngineClient(scopeRoots: [Root.FullName]);
@@ -648,5 +655,218 @@ public class NativeEngineIntegrationTests
         if (Skip()) return;
         var row = await _fx.Client!.GetRowAsync(uint.MaxValue, CancellationToken.None);
         row.Should().NotBeNull("out-of-range IDs should return a placeholder, not throw");
+    }
+
+    // ================================================================== //
+    // 8. Path query optimisation — rooted-path + wildcard searches        //
+    //    Exercises the m_dirIndex ancestor-chain fast path.                //
+    // ================================================================== //
+
+    [Fact]
+    public async Task PathQuery_RootedDirWildcardExt_ReturnsOnlyFilesUnderThatDir()
+    {
+        if (Skip()) return;
+        // e.g. "<root>\subdir\*.log" — should find report-jan.log and report-feb.log
+        var query = Path.Combine(_fx.Root.FullName, "subdir", "*.log");
+        var ids = await Search(query);
+        ids.Count.Should().BeGreaterThanOrEqualTo(2,
+            "report-jan.log and report-feb.log live under subdir");
+
+        // Every result should be a .log file in the subdir subtree.
+        foreach (var id in ids)
+        {
+            var row = await _fx.Client!.GetRowAsync(id, CancellationToken.None);
+            row.Name.Should().EndWithEquivalentOf(".log");
+            row.ParentPath.Should().ContainEquivalentOf("subdir");
+        }
+    }
+
+    [Fact]
+    public async Task PathQuery_RootedDirExactName_ReturnsSingleFile()
+    {
+        if (Skip()) return;
+        var query = Path.Combine(_fx.Root.FullName, "subdir", "report-jan.log");
+        var ids = await Search(query);
+        var row = await _fx.FindOurRowAsync(ids, "report-jan.log");
+        row.Should().NotBeNull("report-jan.log must be found by exact rooted path");
+    }
+
+    [Fact]
+    public async Task PathQuery_RootedDirStarStar_ReturnsAllFilesUnderDir()
+    {
+        if (Skip()) return;
+        // "<root>\subdir\*" — should match all files/dirs directly under subdir
+        var query = Path.Combine(_fx.Root.FullName, "subdir", "*");
+        var ids = await Search(query);
+        ids.Count.Should().BeGreaterThanOrEqualTo(3,
+            "subdir contains report-jan.log, report-feb.log, and archive.zip");
+    }
+
+    [Fact]
+    public async Task PathQuery_NestedSubdir_ReturnsFilesInNestedPath()
+    {
+        if (Skip()) return;
+        // "<root>\logs\daily\*.log" — matches app.log and error.log
+        var query = Path.Combine(_fx.Root.FullName, "logs", "daily", "*.log");
+        var ids = await Search(query);
+        ids.Count.Should().BeGreaterThanOrEqualTo(2,
+            "logs/daily contains app.log and error.log");
+        foreach (var id in ids)
+        {
+            var row = await _fx.Client!.GetRowAsync(id, CancellationToken.None);
+            row.Name.Should().EndWithEquivalentOf(".log");
+        }
+    }
+
+    [Fact]
+    public async Task PathQuery_RootedDirTxtFiles_ReturnsOnlyTxtAtRootLevel()
+    {
+        if (Skip()) return;
+        var query = Path.Combine(_fx.Root.FullName, "*.txt");
+        var ids = await Search(query);
+        ids.Count.Should().BeGreaterThanOrEqualTo(2,
+            "alpha.txt and delta.TXT exist at the root level");
+        foreach (var id in ids)
+        {
+            var row = await _fx.Client!.GetRowAsync(id, CancellationToken.None);
+            row.Name.Should().MatchRegex(@"\.(txt|TXT)$", "only .txt files match *.txt");
+        }
+    }
+
+    [Fact]
+    public async Task PathQuery_NonExistentDir_ReturnsEmpty()
+    {
+        if (Skip()) return;
+        var query = Path.Combine(_fx.Root.FullName, "nonexistent_dir_xyz", "*.log");
+        var ids = await Search(query);
+        ids.Should().BeEmpty("directory does not exist so no files can be under it");
+    }
+
+    // ================================================================== //
+    // 9. Stress tests — race conditions, rapid cycling, data integrity     //
+    // ================================================================== //
+
+    [Fact]
+    public async Task Stress_AllResultIds_ProduceValidRows()
+    {
+        if (Skip()) return;
+        var ids = await Search(string.Empty);
+        ids.Count.Should().BeGreaterThan(0);
+        foreach (var id in ids)
+        {
+            var row = await _fx.Client!.GetRowAsync(id, CancellationToken.None);
+            row.Name.Should().NotBe("?", $"ID {id}: name must not be '?' (engine_get_row returned -1)");
+            row.ParentPath.Should().NotBe("?", $"ID {id}: parent path must not be '?'");
+            row.SizeBytes.Should().BeGreaterThanOrEqualTo(0UL);
+        }
+    }
+
+    [Fact]
+    public async Task Stress_RapidSearchClear_FinalResultsAreValid()
+    {
+        if (Skip()) return;
+        const int iterations = 50;
+
+        // Fire alternating searches without waiting for results — stresses the
+        // engine_wait_results_changed / engine_get_result_ids race window.
+        for (int i = 0; i < iterations; i++)
+        {
+            await _fx.Client!.SearchAsync("alpha", CancellationToken.None);
+            await _fx.Client!.SearchAsync(string.Empty, CancellationToken.None);
+        }
+
+        var ids = await Search(string.Empty);
+        ids.Count.Should().BeGreaterThan(0, "empty query must enumerate all indexed items");
+
+        foreach (var id in ids.Take(Math.Min(ids.Count, 50)))
+        {
+            var row = await _fx.Client!.GetRowAsync(id, CancellationToken.None);
+            row.Name.Should().NotBe("?", $"ID {id}: stale or zero-filled ID leaked into results");
+            row.ParentPath.Should().NotBe("?", $"ID {id}: stale or zero-filled ID leaked into results");
+        }
+    }
+
+    [Fact]
+    public async Task Stress_RapidQueryCycling_NoCrashAndValidFinalResults()
+    {
+        if (Skip()) return;
+        string[] queries =
+        [
+            "alpha", "beta", "report", ".log", "subdir", "alpha",
+            "a", "", "*.txt", "report-*", "logs", "", "gamma", ""
+        ];
+
+        // Fire all in immediate succession — exercises back-to-back prevResults resets.
+        foreach (var q in queries)
+            await _fx.Client!.SearchAsync(q, CancellationToken.None);
+
+        // Settle on empty query and verify returned IDs are all valid.
+        var ids = await Search(string.Empty);
+        ids.Count.Should().BeGreaterThan(0);
+
+        foreach (var id in ids.Take(Math.Min(ids.Count, 30)))
+        {
+            var row = await _fx.Client!.GetRowAsync(id, CancellationToken.None);
+            row.Name.Should().NotBe("?", $"ID {id} must be valid after rapid query cycling");
+        }
+    }
+
+    [Fact]
+    public async Task Stress_InterleavedSearchAndGetRow_NoQuestionMarkData()
+    {
+        if (Skip()) return;
+        const int rounds = 20;
+
+        for (int i = 0; i < rounds; i++)
+        {
+            var ids = await Search("alpha");
+            ids.Should().NotBeEmpty();
+            foreach (var id in ids.Take(5))
+            {
+                var row = await _fx.Client!.GetRowAsync(id, CancellationToken.None);
+                row.Name.Should().NotBe("?", $"round {i}, ID {id}");
+            }
+
+            var allIds = await Search(string.Empty);
+            foreach (var id in allIds.Take(5))
+            {
+                var row = await _fx.Client!.GetRowAsync(id, CancellationToken.None);
+                row.Name.Should().NotBe("?", $"round {i} (all), ID {id}");
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Stress_ObservableResultsDelivered_AllIdsValid()
+    {
+        if (Skip()) return;
+        var invalidIds = new System.Collections.Generic.List<(uint Id, string Issue)>();
+
+        // Subscribe to the live observable and validate every delivered result set.
+        using var sub = _fx.Client!.ObserveResults.Subscribe(ids =>
+        {
+            foreach (var id in ids.Take(20))
+            {
+                // Synchronous GetRowAsync (returns Task.FromResult — no real async).
+                var row = _fx.Client.GetRowAsync(id, CancellationToken.None).GetAwaiter().GetResult();
+                if (row.Name == "?")
+                    invalidIds.Add((id, "name='?'"));
+                if (row.ParentPath == "?")
+                    invalidIds.Add((id, "path='?'"));
+            }
+        });
+
+        // Exercise the observable across multiple searches.
+        await _fx.Client!.SearchAsync("alpha", CancellationToken.None);
+        await Task.Delay(200);
+        await _fx.Client!.SearchAsync(string.Empty, CancellationToken.None);
+        await Task.Delay(200);
+        await _fx.Client!.SearchAsync("report", CancellationToken.None);
+        await Task.Delay(200);
+        await _fx.Client!.SearchAsync(string.Empty, CancellationToken.None);
+        await Task.Delay(400);
+
+        invalidIds.Should().BeEmpty(
+            "every ID delivered via ObserveResults must produce a valid row");
     }
 }

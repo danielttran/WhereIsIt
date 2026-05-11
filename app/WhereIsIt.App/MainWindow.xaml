@@ -83,11 +83,15 @@
 
             <ListView Grid.Row="1"
                       x:Name="ResultsListView"
-                      ItemsSource="{x:Bind ViewModel.ResultsList.Rows}"
+                      ItemsSource="{x:Bind ViewModel.ResultsList.Rows, Mode=OneWay}"
                       SelectedItem="{x:Bind ViewModel.ResultsList.SelectedRow, Mode=TwoWay}"
                       SelectionMode="Extended"
                       DoubleTapped="OnRowDoubleTapped"
-                      KeyDown="OnResultsKeyDown">
+                      KeyDown="OnResultsKeyDown"
+                      ContainerContentChanging="OnContainerContentChanging">
+                <ListView.ItemContainerTransitions>
+                    <TransitionCollection/>
+                </ListView.ItemContainerTransitions>
                 <ListView.ItemContainerStyle>
                     <Style TargetType="ListViewItem">
                         <Setter Property="Padding" Value="0"/>

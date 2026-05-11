@@ -7,10 +7,10 @@ namespace WhereIsIt.App.Tests.ViewModels;
 public class StatusBarViewModelTests
 {
     [Fact]
-    public void DefaultStatusText_IsReady()
+    public void DefaultStatusText_IsStarting()
     {
         var vm = new StatusBarViewModel();
-        Assert.Equal("Ready", vm.StatusText);
+        Assert.Equal("Starting...", vm.StatusText);
     }
 
     [Fact]

@@ -172,30 +172,51 @@ public sealed class NativeEngineClient : IEngineClient, IDisposable
     private void WatchLoop()
     {
         var statusBuf = new StringBuilder(1024);
+        string lastStatus = string.Empty;
 
         while (!_cts.IsCancellationRequested)
         {
             if (_handle == IntPtr.Zero) break;
 
-            int rc = Native.engine_wait_results_changed(_handle, 250, out int count);
+            int rc = Native.engine_wait_results_changed(_handle, 16, out int count);
 
             if (rc == -1) break; // engine stopped
 
-            if (rc == 0) continue; // timeout — nothing changed
-
-            // Results changed: emit status, metrics, and IDs
+            // Read current status on every tick
             statusBuf.Clear();
-            if (Native.engine_get_status(_handle, statusBuf, 1024) == 0 &&
-                statusBuf.Length > 0)
+            string? currentStatus = null;
+            if (Native.engine_get_status(_handle, statusBuf, 1024) == 0 && statusBuf.Length > 0)
+                currentStatus = statusBuf.ToString();
+
+            if (rc == 0)
             {
-                _statusChanges.OnNext(statusBuf.ToString());
+                // Timeout — emit status only if it changed (indexing progress updates)
+                if (currentStatus != null && currentStatus != lastStatus)
+                {
+                    lastStatus = currentStatus;
+                    _statusChanges.OnNext(currentStatus);
+                }
+                continue;
             }
 
-            _metricsChanges.OnNext(count);
+            // Results changed — always emit status, metrics, and IDs
+            if (currentStatus != null)
+            {
+                lastStatus = currentStatus;
+                _statusChanges.OnNext(currentStatus);
+            }
 
-            var ids = new uint[count];
-            if (count > 0)
-                Native.engine_get_result_ids(_handle, ids, count);
+            // Re-read the count immediately before fetching IDs to minimise the race window
+            // between engine_wait_results_changed (which snapshots the count) and
+            // engine_get_result_ids (which reads the live results vector).  Both calls
+            // are still not atomic, but the window is now two P/Invoke frames rather than
+            // an arbitrary OS scheduling gap.
+            int actualCount = Native.engine_result_count(_handle);
+            _metricsChanges.OnNext(actualCount);
+
+            var ids = new uint[actualCount];
+            if (actualCount > 0)
+                Native.engine_get_result_ids(_handle, ids, actualCount);
 
             _results.OnNext(ids);
         }
