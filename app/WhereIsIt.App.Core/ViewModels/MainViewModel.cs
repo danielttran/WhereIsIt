@@ -18,12 +18,18 @@ public partial class MainViewModel : ObservableObject, IDisposable
     public SearchBoxViewModel SearchBox { get; }
     public ResultsListViewModel ResultsList { get; }
     public StatusBarViewModel StatusBar { get; }
+    public TabsViewModel Tabs { get; } = new();
 
     [ObservableProperty] private string emptyStateMessage = "Type to search...";
 
+    private bool _syncingTab;
+
     public MainViewModel(IEngineClient engineClient, IAppDispatcher dispatcher)
+        : this(engineClient, dispatcher, new SearchHistory()) { }
+
+    public MainViewModel(IEngineClient engineClient, IAppDispatcher dispatcher, SearchHistory history)
     {
-        SearchBox = new SearchBoxViewModel();
+        SearchBox = new SearchBoxViewModel(history);
         ResultsList = new ResultsListViewModel(engineClient);
         StatusBar = new StatusBarViewModel();
 
@@ -76,6 +82,10 @@ public partial class MainViewModel : ObservableObject, IDisposable
             .DistinctUntilChanged()
             .SelectMany(async query =>
             {
+                // Mirror the live query into the current tab so the title updates.
+                if (!_syncingTab && Tabs.CurrentTab is not null)
+                    Tabs.CurrentTab.Query = query;
+
                 // When query cleared, revert status bar to last engine status
                 if (string.IsNullOrEmpty(query))
                     dispatcher.Enqueue(() => StatusBar.StatusText = _engineStatus);
@@ -84,6 +94,18 @@ public partial class MainViewModel : ObservableObject, IDisposable
                 return query;
             })
             .Subscribe();
+
+        // When the user picks a different tab, seed the search box with that
+        // tab's stored query (which re-triggers the search above).
+        Tabs.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName != nameof(TabsViewModel.CurrentTab)) return;
+            var t = Tabs.CurrentTab;
+            if (t is null) return;
+            _syncingTab = true;
+            try { SearchBox.Query = t.Query; }
+            finally { _syncingTab = false; }
+        };
     }
 
     public void Dispose()

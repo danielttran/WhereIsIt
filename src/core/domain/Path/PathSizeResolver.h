@@ -2,7 +2,7 @@
 
 #include <cstdint>
 #include <string>
-#include "../../../legacy/CoreTypes.h"
+#include "../../../engine/native/cpp/CoreTypes.h"
 
 namespace pathsize {
 

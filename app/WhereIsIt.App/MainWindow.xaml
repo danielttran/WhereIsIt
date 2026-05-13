@@ -4,9 +4,10 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:vm="using:WhereIsIt.App.ViewModels"
     xmlns:app="using:WhereIsIt.App"
+    xmlns:muxc="using:Microsoft.UI.Xaml.Controls"
     Title="WhereIsIt">
 
-    <Grid x:Name="RootGrid" RowDefinitions="Auto,*,Auto" Padding="0">
+    <Grid x:Name="RootGrid" RowDefinitions="Auto,Auto,Auto,*,Auto" Padding="0">
         <Grid.Resources>
             <Style x:Key="ColumnHeaderButton" TargetType="Button">
                 <Setter Property="Background" Value="Transparent"/>
@@ -18,25 +19,88 @@
             </Style>
         </Grid.Resources>
 
-        <!-- Top bar: search + settings -->
-        <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Padding="12,12,12,8" ColumnSpacing="8">
+        <!-- Top bar: search + modifier toggles + bookmarks + columns + export + settings -->
+        <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto" Padding="12,12,12,8" ColumnSpacing="6">
             <TextBox x:Name="SearchTextBox"
                      Grid.Column="0"
-                     PlaceholderText="Search files and folders   (Ctrl+F to focus, Esc to clear)"
+                     PlaceholderText="Search files and folders   (Ctrl+F focus, Esc clear, ↑/↓ history)"
+                     KeyDown="OnSearchBoxKeyDown"
                      Text="{x:Bind ViewModel.SearchBox.Query, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-            <Button Grid.Column="1" Content="&#xE713;"
+            <ToggleButton x:Name="CaseToggle"  Grid.Column="1" Content="Aa"
+                          ToolTipService.ToolTip="Match case (case:)"
+                          Click="OnModifierToggleClick"/>
+            <ToggleButton x:Name="RegexToggle" Grid.Column="2" Content=".*"
+                          ToolTipService.ToolTip="Regular expression (regex:)"
+                          Click="OnModifierToggleClick"/>
+            <ToggleButton x:Name="WordToggle"  Grid.Column="3" Content="W"
+                          ToolTipService.ToolTip="Whole word (word:)"
+                          Click="OnModifierToggleClick"/>
+            <ToggleButton x:Name="PathToggle"  Grid.Column="4" Content="\"
+                          ToolTipService.ToolTip="Match path (path:)"
+                          Click="OnModifierToggleClick"/>
+            <Button x:Name="BookmarksButton" Grid.Column="5" Content="&#xE734;"
+                    FontFamily="Segoe Fluent Icons"
+                    ToolTipService.ToolTip="Bookmarks"
+                    Click="OnBookmarksClick" />
+            <Button x:Name="ColumnsButton" Grid.Column="6" Content="&#xE71D;"
+                    FontFamily="Segoe Fluent Icons"
+                    ToolTipService.ToolTip="Columns"
+                    Click="OnColumnsClick" />
+            <Button Grid.Column="7" Content="&#xEDE1;"
+                    FontFamily="Segoe Fluent Icons"
+                    ToolTipService.ToolTip="Export results to CSV"
+                    Click="OnExportClick" />
+            <Button Grid.Column="8" Content="&#xE713;"
                     FontFamily="Segoe Fluent Icons"
                     ToolTipService.ToolTip="Settings"
                     Click="OnSettingsClick" />
         </Grid>
 
+        <!-- Tab strip -->
+        <muxc:TabView Grid.Row="1"
+                      x:Name="TabStrip"
+                      TabItemsSource="{x:Bind ViewModel.Tabs.Tabs, Mode=OneWay}"
+                      SelectedItem="{x:Bind ViewModel.Tabs.CurrentTab, Mode=TwoWay}"
+                      AddTabButtonClick="OnAddTabClick"
+                      TabCloseRequested="OnTabCloseRequested"
+                      Padding="12,4,12,0">
+            <muxc:TabView.TabItemTemplate>
+                <DataTemplate x:DataType="vm:TabRecord">
+                    <muxc:TabViewItem Header="{x:Bind Title, Mode=OneWay}"/>
+                </DataTemplate>
+            </muxc:TabView.TabItemTemplate>
+        </muxc:TabView>
+
+        <!-- Quick filter bar -->
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="4" Padding="12,0,12,8">
+            <Button Content="All"      Tag="all:"    Click="OnFilterClick"/>
+            <Button Content="Audio"    Tag="audio:"  Click="OnFilterClick"/>
+            <Button Content="Video"    Tag="video:"  Click="OnFilterClick"/>
+            <Button Content="Document" Tag="doc:"    Click="OnFilterClick"/>
+            <Button Content="Picture"  Tag="pic:"    Click="OnFilterClick"/>
+            <Button Content="Exe"      Tag="exe:"    Click="OnFilterClick"/>
+            <Button Content="Archive"  Tag="zip:"    Click="OnFilterClick"/>
+            <Button Content="Folder"   Tag="folder:" Click="OnFilterClick"/>
+        </StackPanel>
+
         <!-- Results -->
-        <Grid Grid.Row="1" RowDefinitions="Auto,*" Padding="12,0,12,0">
+        <Grid Grid.Row="3" RowDefinitions="Auto,*" Padding="12,0,12,0">
             <!-- Column headers -->
             <Grid Grid.Row="0"
-                  ColumnDefinitions="2*,3*,Auto,Auto,Auto"
+                  x:Name="HeaderGrid"
                   BorderBrush="{ThemeResource SystemControlForegroundBaseLowBrush}"
                   BorderThickness="0,0,0,1">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="2*"/>
+                    <ColumnDefinition Width="3*"/>
+                    <ColumnDefinition Width="120"/>
+                    <ColumnDefinition Width="160"/>
+                    <!-- column indexes 4,5,6 are toggleable (Created/Accessed/Runs) -->
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.CreatedColumnWidth,  Mode=OneTime}"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.AccessedColumnWidth, Mode=OneTime}"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.RunCountColumnWidth, Mode=OneTime}"/>
+                    <ColumnDefinition Width="80"/>
+                </Grid.ColumnDefinitions>
                 <Button Grid.Column="0" Style="{StaticResource ColumnHeaderButton}"
                         Command="{x:Bind ViewModel.ResultsList.SortByCommand}" CommandParameter="name">
                     <StackPanel Orientation="Horizontal" Spacing="2">
@@ -68,6 +132,15 @@
                     </StackPanel>
                 </Button>
                 <Button Grid.Column="4" Style="{StaticResource ColumnHeaderButton}"
+                        Content="Created"
+                        Visibility="{x:Bind app:ColumnSettings.CreatedColumnVisibility,  Mode=OneTime}"/>
+                <Button Grid.Column="5" Style="{StaticResource ColumnHeaderButton}"
+                        Content="Accessed"
+                        Visibility="{x:Bind app:ColumnSettings.AccessedColumnVisibility, Mode=OneTime}"/>
+                <Button Grid.Column="6" Style="{StaticResource ColumnHeaderButton}"
+                        Content="Runs"
+                        Visibility="{x:Bind app:ColumnSettings.RunCountColumnVisibility, Mode=OneTime}"/>
+                <Button Grid.Column="7" Style="{StaticResource ColumnHeaderButton}"
                         Width="80"
                         Content="Attr"/>
             </Grid>
@@ -88,6 +161,8 @@
                       SelectionMode="Extended"
                       DoubleTapped="OnRowDoubleTapped"
                       KeyDown="OnResultsKeyDown"
+                      CanDragItems="True"
+                      DragItemsStarting="OnDragItemsStarting"
                       ContainerContentChanging="OnContainerContentChanging">
                 <ListView.ItemContainerTransitions>
                     <TransitionCollection/>
@@ -121,14 +196,28 @@
                 </ListView.ContextFlyout>
                 <ListView.ItemTemplate>
                     <DataTemplate x:DataType="vm:ResultRowViewModel">
-                        <Grid ColumnDefinitions="2*,3*,120,160,80" Padding="8,2">
+                        <Grid Padding="8,2">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="2*"/>
+                                <ColumnDefinition Width="3*"/>
+                                <ColumnDefinition Width="120"/>
+                                <ColumnDefinition Width="160"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.CreatedColumnWidth,  Mode=OneTime}"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.AccessedColumnWidth, Mode=OneTime}"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.RunCountColumnWidth, Mode=OneTime}"/>
+                                <ColumnDefinition Width="80"/>
+                            </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0" Text="{x:Bind Name, Mode=OneWay}" TextTrimming="CharacterEllipsis"/>
                             <TextBlock Grid.Column="1" Text="{x:Bind ParentPath, Mode=OneWay}"
                                        Opacity="0.7" TextTrimming="CharacterEllipsis"/>
                             <TextBlock Grid.Column="2" Text="{x:Bind SizeText, Mode=OneWay}"
                                        HorizontalAlignment="Right"/>
                             <TextBlock Grid.Column="3" Text="{x:Bind ModifiedText, Mode=OneWay}" Opacity="0.7"/>
-                            <TextBlock Grid.Column="4" Text="{x:Bind AttributesText, Mode=OneWay}" Opacity="0.6"/>
+                            <TextBlock Grid.Column="4" Text="{x:Bind CreatedText,  Mode=OneWay}" Opacity="0.55"/>
+                            <TextBlock Grid.Column="5" Text="{x:Bind AccessedText, Mode=OneWay}" Opacity="0.55"/>
+                            <TextBlock Grid.Column="6" Text="{x:Bind RunCount, Mode=OneWay}"
+                                       HorizontalAlignment="Right" Opacity="0.55"/>
+                            <TextBlock Grid.Column="7" Text="{x:Bind AttributesText, Mode=OneWay}" Opacity="0.6"/>
                         </Grid>
                     </DataTemplate>
                 </ListView.ItemTemplate>
@@ -136,7 +225,7 @@
         </Grid>
 
         <!-- Status bar -->
-        <Grid Grid.Row="2" ColumnDefinitions="*,Auto" Padding="12,6"
+        <Grid Grid.Row="4" ColumnDefinitions="*,Auto" Padding="12,6"
               Background="{ThemeResource LayerOnAcrylicFillColorDefaultBrush}">
             <TextBlock Grid.Column="0"
                        Text="{x:Bind ViewModel.StatusBar.StatusText, Mode=OneWay}"

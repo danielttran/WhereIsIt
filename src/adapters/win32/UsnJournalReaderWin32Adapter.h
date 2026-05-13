@@ -3,7 +3,7 @@
 #include <memory>
 
 #include "../../core/ports/IUsnJournalReaderPort.h"
-#include "../../legacy/UsnJournalReaderWin32.h"
+#include "../../engine/native/cpp/UsnJournalReaderWin32.h"
 
 namespace whereisit::adapters::win32 {
 

@@ -48,7 +48,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <!-- Legacy source lives two directories up from this project -->
-      <AdditionalIncludeDirectories>$(ProjectDir)..\..\legacy;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)cpp;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <Optimization>Disabled</Optimization>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
@@ -72,7 +72,7 @@
       <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;_USRDLL;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)..\..\legacy;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)cpp;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -93,39 +93,40 @@
   <ItemGroup>
     <ClCompile Include="WhereIsIt.Engine.Native.cpp"/>
 
-    <!-- Legacy source files — all except WhereIsIt.cpp (wWinMain) and
-         ServiceIPC.cpp (named-pipe service, not needed for in-proc use) -->
-    <ClCompile Include="..\..\legacy\Engine.cpp"/>
-    <ClCompile Include="..\..\legacy\RecordPool.cpp"/>
-    <ClCompile Include="..\..\legacy\StringPool.cpp"/>
-    <ClCompile Include="..\..\legacy\QueryEngine.cpp"/>
-    <ClCompile Include="..\..\legacy\QueryDomain.cpp"/>
-    <ClCompile Include="..\..\legacy\UsnJournalReaderWin32.cpp"/>
-    <ClCompile Include="..\..\legacy\DriveEnumeratorWin32.cpp"/>
-    <ClCompile Include="..\..\legacy\SortService.cpp"/>
-    <ClCompile Include="..\..\legacy\PathSizeDomain.cpp"/>
-    <ClCompile Include="..\..\legacy\StringUtils.cpp"/>
-    <ClCompile Include="..\..\legacy\Utils.cpp"/>
+    <!-- Engine C++ source (moved from src/legacy/ — the original Win32 exe
+         wWinMain and the named-pipe service stub were dropped during the
+         move; they were never compiled by this project). -->
+    <ClCompile Include="cpp\Engine.cpp"/>
+    <ClCompile Include="cpp\RecordPool.cpp"/>
+    <ClCompile Include="cpp\StringPool.cpp"/>
+    <ClCompile Include="cpp\QueryEngine.cpp"/>
+    <ClCompile Include="cpp\QueryDomain.cpp"/>
+    <ClCompile Include="cpp\UsnJournalReaderWin32.cpp"/>
+    <ClCompile Include="cpp\DriveEnumeratorWin32.cpp"/>
+    <ClCompile Include="cpp\SortService.cpp"/>
+    <ClCompile Include="cpp\PathSizeDomain.cpp"/>
+    <ClCompile Include="cpp\StringUtils.cpp"/>
+    <ClCompile Include="cpp\Utils.cpp"/>
   </ItemGroup>
 
   <ItemGroup>
     <ClInclude Include="WhereIsIt.Engine.Native.h"/>
-    <ClInclude Include="..\..\legacy\CoreTypes.h"/>
-    <ClInclude Include="..\..\legacy\Engine.h"/>
-    <ClInclude Include="..\..\legacy\framework.h"/>
-    <ClInclude Include="..\..\legacy\targetver.h"/>
-    <ClInclude Include="..\..\legacy\StringUtils.h"/>
-    <ClInclude Include="..\..\legacy\RecordPool.h"/>
-    <ClInclude Include="..\..\legacy\StringPool.h"/>
-    <ClInclude Include="..\..\legacy\QueryEngine.h"/>
-    <ClInclude Include="..\..\legacy\QueryDomain.h"/>
-    <ClInclude Include="..\..\legacy\UsnJournalReaderWin32.h"/>
-    <ClInclude Include="..\..\legacy\DriveEnumeratorWin32.h"/>
-    <ClInclude Include="..\..\legacy\SortService.h"/>
-    <ClInclude Include="..\..\legacy\PathSizeDomain.h"/>
-    <ClInclude Include="..\..\legacy\IDriveEnumerator.h"/>
-    <ClInclude Include="..\..\legacy\Logging.h"/>
-    <ClInclude Include="..\..\legacy\Utils.h"/>
+    <ClInclude Include="cpp\CoreTypes.h"/>
+    <ClInclude Include="cpp\Engine.h"/>
+    <ClInclude Include="cpp\framework.h"/>
+    <ClInclude Include="cpp\targetver.h"/>
+    <ClInclude Include="cpp\StringUtils.h"/>
+    <ClInclude Include="cpp\RecordPool.h"/>
+    <ClInclude Include="cpp\StringPool.h"/>
+    <ClInclude Include="cpp\QueryEngine.h"/>
+    <ClInclude Include="cpp\QueryDomain.h"/>
+    <ClInclude Include="cpp\UsnJournalReaderWin32.h"/>
+    <ClInclude Include="cpp\DriveEnumeratorWin32.h"/>
+    <ClInclude Include="cpp\SortService.h"/>
+    <ClInclude Include="cpp\PathSizeDomain.h"/>
+    <ClInclude Include="cpp\IDriveEnumerator.h"/>
+    <ClInclude Include="cpp\Logging.h"/>
+    <ClInclude Include="cpp\Utils.h"/>
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets"/>

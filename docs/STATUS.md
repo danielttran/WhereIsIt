@@ -51,152 +51,112 @@
 | MVVM VMs (DI) | ✅ 6 VMs wired via `Microsoft.Extensions.DependencyInjection` | `app/WhereIsIt.App.Core/ViewModels/`, `app/WhereIsIt.App/AppBootstrap.cs` |
 | **Modern UI** | ✅ multi-column results, click-to-sort, context menu, Ctrl+F/Esc/Ctrl+,/Enter shortcuts, settings window, Mica backdrop | `app/WhereIsIt.App/MainWindow.xaml{,.cs}`, `SettingsWindow.xaml{,.cs}` |
 | Status bar | ✅ live record count + status text from `MetricsChanges`/`StatusChanges` | `MainViewModel.cs` |
-| `IEngineClient` contract | ⚠️ minimal (Search/Sort/GetRow + 3 IObservables) | `src/pipe/WhereIsIt.Pipe.Client/IEngineClient.cs` |
-| `InProcEngineClient` | ⚠️ **toy `Directory.EnumerateFiles` scanner** — depth 8, capped at 2000 hits | `app/WhereIsIt.App.Core/Services/InProcEngineClient.cs` |
-| `PipeEngineClient` | ⚠️ **stub** returning hardcoded `[1u, 2u]` | `src/pipe/WhereIsIt.Pipe.Client/PipeEngineClient.cs` |
-| C++ engine | ❌ **not implemented**. `src/core/`, `src/adapters/win32/`, `src/engine/winrt/`, `service/WhereIsIt.Service/` are empty vcxproj stubs. Real source lives untouched in `src/legacy/`. | |
-| xUnit tests | ✅ 16 green | `tests/app/`, run via `tests/ci/run_all.ps1` |
+| `IEngineClient` contract | ✅ Search/Sort/GetRow + 3 IObservables; `ResultRowModel` now carries optional `CreatedUtc`/`AccessedUtc` | `src/pipe/WhereIsIt.Pipe.Client/IEngineClient.cs` |
+| `FilteringEngineClient` decorator | ✅ Parses every Everything-style modifier with `QueryParser`, rewrites a simplified form for the inner engine, post-filters returned IDs; race-safe with a monotonic seq fence | `app/WhereIsIt.App.Core/Services/FilteringEngineClient.cs` |
+| `InProcEngineClient` | ✅ Pure-C# `Directory.EnumerateFiles` fallback — applies the full `ParsedQuery` natively | `app/WhereIsIt.App.Core/Services/InProcEngineClient.cs` |
+| `PipeEngineClient` | ⚠️ stub returning hardcoded `[1u, 2u]` — never picked when native or in-proc is available | `src/pipe/WhereIsIt.Pipe.Client/PipeEngineClient.cs` |
+| C++ engine | ✅ Lives at `src/engine/native/cpp/` (moved from `src/legacy/` on 2026-05-13). Compiles into `WhereIsIt.Engine.Native.dll`; consumed via P/Invoke. | `src/engine/native/` |
+| xUnit tests | ✅ 256 green (200 non-native + 56 native integration) | `tests/app/`, run via `tests/ci/run_all.ps1` |
 | GitHub Actions | ✅ CI workflow (`windows-2022`, dotnet 10, runs tests + builds exe) | `.github/workflows/ci.yml` |
 
 ---
 
-## What's left, in priority order
+## What's left
 
-### P-1 — Verify the build on the new Windows + VS 2026 box
+The original P-1…P4 plan is done:
 
-Before changing anything else:
+| Plan item | Status |
+|---|---|
+| **P-1** verify build on Windows + VS box | Done — MSBuild from VS 18 Professional builds clean |
+| **P0** real native C++ engine | Done — full IndexingEngine ported into `src/engine/native/cpp/` and consumed via P/Invoke + the `FilteringEngineClient` decorator |
+| **P0** C++/WinRT bridge | Skipped — replaced with simpler P/Invoke + decorator pattern. The bridge can come back later if marshalling cost matters; in practice C#-side post-filtering is fast enough |
+| **P1** tighten `IEngineClient` (`SearchHandle`, `IAsyncEnumerable`) | Deferred — current contract works well enough for the 2k UI cap |
+| **P2** native pipe service for non-admin mode | Deferred — admin elevation is acceptable for daily use; `service/WhereIsIt.Service/` scaffold still empty |
+| **P3** perf gates (BenchmarkDotNet, footprint) | Deferred |
+| **P4** delete `src/legacy/` | Done 2026-05-13 — folder removed entirely |
 
-```powershell
-dotnet build app\WhereIsIt.App\WhereIsIt.App.csproj
-powershell -File tests\ci\run_all.ps1
-.\app\WhereIsIt.App\bin\Debug\net10.0-windows10.0.19041.0\WhereIsIt.App.exe
-```
+Remaining Everything-parity gaps:
 
-The UI changes in this branch (multi-column layout, shortcuts, Mica, SettingsWindow) were authored on a Linux sandbox without a C# compiler. **Expect minor compile fixups** — for example, namespace tweaks for `MicaBackdrop` (it's in `Microsoft.UI.Xaml.Media`), or `KeyboardAccelerator`/`VirtualKey` resolution. Fix forward, do not revert.
+- **ETP / FTP server** — proprietary Everything protocol. Skipped; HTTP server covers the cross-device search use case.
 
-### P0 — Real native C++ engine (the headline feature)
+Closed this session:
 
-Source material is `src/legacy/` (Engine.cpp, RecordPool, StringPool, QueryEngine, UsnJournalReaderWin32, DriveEnumeratorWin32, ServiceIPC, etc.). Port — don't rewrite — into the new layered structure that already exists as empty scaffolds:
+- ✅ Multiple result tabs (`TabView` + `TabsViewModel`)
+- ✅ `content:` filter — opens each candidate file, streams content, matches with cross-chunk overlap; skips dirs and oversized files
+- ✅ Run-count column + persisted `RunCountService`
+- ✅ HTTP server — `HttpSearchServer`, `127.0.0.1`-only, JSON `/search?q=` endpoint
+- ✅ Column-visibility toggle — Columns flyout button + persisted settings (Created/Accessed/Runs)
 
-- `src/core/domain/` — pure types, **no `<Windows.h>`**: `FileRecord`, `RecordPool`, `StringPool`, `Query`, `QueryParser`, `QueryMatcher`. Some headers/cpps are scaffolded (~354 LOC) — extend them.
-- `src/core/ports/` — interfaces already drafted: `IClockPort.h`, `IDriveEnumeratorPort.h`, `IEventSignalPort.h`, `IFileSystemScannerPort.h`, `IIndexStoragePort.h`, `ILoggerPort.h`, `IUsnJournalReaderPort.h`. Confirm shapes; do not break them.
-- `src/core/app/` — orchestration services: `IndexBuildService`, `SearchService`, `IncrementalUpdateService` (new).
-- `src/adapters/win32/` — `Win32DriveEnumerator`, `Win32UsnJournalReader` (`FSCTL_QUERY_USN_JOURNAL`/`FSCTL_READ_USN_JOURNAL`), `Win32MftScanner` (`FSCTL_ENUM_USN_DATA` over `\\.\C:`), `Win32IndexStorage`, `SystemClock`, `Win32EventSignal`. Port from `src/legacy/UsnJournalReaderWin32.{h,cpp}` and `DriveEnumeratorWin32.{h,cpp}`.
-- Populate the empty `<ClCompile>` / `<ClInclude>` in `src/core/WhereIsIt.Core.vcxproj`, `src/adapters/win32/WhereIsIt.Adapters.Win32.vcxproj`.
-
-Targets to validate after P0:
-- 1M-record fixture: full search < 250 ms.
-- First 50 results visible < 30 ms after the 120 ms debounce already wired in `MainViewModel.cs:42`.
-- Zero per-row allocation on scroll.
-- No 2000-cap, no depth-8 cap.
-
-### P0 (continued) — C++/WinRT bridge
-
-- `src/engine/winrt/WhereIsIt.Engine.WinRT.vcxproj` is an empty stub. Populate it as a WinRT runtime component.
-- New: `src/engine/winrt/EngineClient.idl` declaring `SearchAsync`, `SortAsync`, `GetRowAsync`, plus event sources for `StatusChanges`/`MetricsChanges`/`ObserveResults`. WinRT events project to `IObservable<T>` on the C# side via a thin adapter.
-- `EngineClient.cpp` instantiates the C++ `SearchService`. Hot path keeps `std::wstring_view` over `StringPool` — no copies cross the ABI; C# pulls rows lazily via `GetRowAsync`.
-- `app/WhereIsIt.App.Core/WhereIsIt.App.Core.csproj`: add CsWinRT (`Microsoft.Windows.CsWinRT`) and project-reference the WinRT component.
-- Replace the body of `InProcEngineClient.cs` (`app/WhereIsIt.App.Core/Services/InProcEngineClient.cs`) with a thin wrapper around the WinRT projection. Keep the `IEngineClient` shape identical so VMs and tests stay green.
-
-### P1 — Tighten `IEngineClient` (after the bridge works)
-
-Today's contract was sized for the toy scanner (`src/pipe/WhereIsIt.Pipe.Client/IEngineClient.cs`). For Everything-grade:
-
-- `SearchHandle` so concurrent searches don't clobber each other.
-- `IAsyncEnumerable<IReadOnlyList<uint>> ObserveResults(SearchHandle, CancellationToken)` instead of a property — lets the UI render incrementally without subject pumps.
-- `StartAsync`/`StopAsync` so the indexer can warm up before first keystroke.
-- `GetFullPathAsync(uint id)` to defer path materialization off the engine.
-
-Mirror in the WinRT IDL and the C# interface in lockstep. Update VMs (`MainViewModel`, `ResultsListViewModel`) and tests (`tests/app/ViewModels/MainViewModelTests.cs`) in the same PR.
-
-### P2 — Native C++ pipe service (non-admin mode)
-
-- Populate `service/WhereIsIt.Service/WhereIsIt.Service.vcxproj`: Win32 service host (`StartServiceCtrlDispatcher` + `RegisterServiceCtrlHandlerEx`) linking `WhereIsIt.Core.lib`.
-- Named-pipe server over `\\.\pipe\WhereIsIt`, overlapped I/O. Frame layout already specified in `src/pipe/WhereIsIt.Pipe.Client/PipeProtocolV2.cs` — implement the matching server in C++.
-- Service runs as `LocalSystem` to read MFT/USN on every fixed volume; non-admin client connects, no UAC prompt.
-- Real `PipeEngineClient.cs`: `NamedPipeClientStream` + length-prefixed framing.
-- Installer mode in the service exe (`WhereIsIt.Service.exe --install`) → `CreateService`. No MSI yet.
-- `tests/parity/` — diff results between in-proc (admin) and pipe (non-admin).
-
-### P3 — Performance gates
-
-- New `WhereIsIt.Bench` BenchmarkDotNet project. Fail CI on >10% regression in parse, search, sort.
-- Footprint gate in CI: assert `WhereIsIt.App.exe` ≤ 8 MB after `dotnet publish -c Release`.
-
-### P4 — Legacy removal (last step)
-
-After P0–P3 burn in:
-
-- Delete `WhereIsIt.vcxproj`, `WhereIsIt.vcxproj.filters`, `WhereIsIt.vcxproj.user`.
-- Delete `src/legacy/` entirely.
-- Delete root `WhereIsIt.ico`, `framework.h`, `targetver.h` if unreferenced.
-
----
-
-## PR-by-PR sequence (recommended)
-
-1. **PR-A** — port `src/legacy/` → `src/core/domain/` (pure) + extend `src/core/ports/`. GoogleTest suite in `tests/core/`. Domain compiles standalone, no `<Windows.h>`.
-2. **PR-B** — populate `src/adapters/win32/`. Smoke tests in `tests/adapters/` against real volumes (Windows-only).
-3. **PR-C** — `WhereIsIt.Engine.WinRT` (IDL + impl + CsWinRT projection).
-4. **PR-D** — rewrite `InProcEngineClient.cs` as thin WinRT wrapper. Existing 16 xUnit stay green; add bench microbench.
-5. **PR-E** — tighten `IEngineClient` (P1).
-6. **PR-F** — native C++ pipe service + real `PipeEngineClient` (P2).
-7. **PR-G** — perf + footprint gates (P3).
-8. **PR-H** — legacy removal (P4).
-
-Each PR lands with green tests; no PR depends on a future PR's contract.
+The aspirational `src/core/`, `src/adapters/win32/`, `src/engine/winrt/`, `service/` scaffolds are still present as empty/partial vcxprojs. They are NOT on the active build path; the only C++ project that's built is `src/engine/native/WhereIsIt.Engine.Native.vcxproj`. Decide later whether to refactor the engine into the layered architecture or remove those folders.
 
 ---
 
 ## Decisions captured
 
-- **Indexer:** native C++, ported from `src/legacy/` into `src/core/domain` → `src/core/app` → `src/adapters/win32`, bridged to C# via `WhereIsIt.Engine.WinRT` runtime component.
-- **Service:** native C++ Win32 service hosting `WhereIsIt.Core.lib` behind a named-pipe server.
-- **UI:** full Everything-grade — already shipped in this branch (multi-column, shortcuts, context menu, Mica, Settings).
+- **Indexer:** native C++. Legacy code moved verbatim from `src/legacy/` into `src/engine/native/cpp/` (2026-05-13). Consumed via P/Invoke + a `FilteringEngineClient` decorator on the C# side that handles every Everything-style query modifier the native engine doesn't understand.
+- **Service:** named-pipe service deferred. `PipeEngineClient` is a stub. Native engine runs in-process; elevation prompt is acceptable.
+- **UI:** Everything-grade — multi-column results, sort, context menu, Mica, settings, quick-filter bar, modifier toggle buttons, search history with up/down recall, bookmarks, CSV/TSV export, global hotkey, command-line args, drag-and-drop, optional Created/Accessed columns.
 
 ---
 
-## Project layout (current)
+## Project layout (current, post 2026-05-13 port)
 
 ```
 app/
   WhereIsIt.App/                 WinUI 3 exe (net10.0-windows10.0.19041.0)
-    App.xaml{,.cs}
-    MainWindow.xaml{,.cs}        ← overhauled this branch
-    SettingsWindow.xaml{,.cs}    ← new this branch
+    App.xaml{,.cs}               CLI arg dispatch on launch
+    MainWindow.xaml{,.cs}        Top bar + quick-filter bar + results list
+    SettingsWindow.xaml{,.cs}    Scope-root editor
+    GlobalHotkeyHost.cs          Win32 RegisterHotKey wrapper
     AppBootstrap.cs              DI composition root
-    Services/DispatcherQueueAppDispatcher.cs
 
   WhereIsIt.App.Core/            Class library (net10.0-windows, no WinUI)
-    ViewModels/                  6 VMs
+    ViewModels/                  Search box, results, settings VMs
     Services/
-      InProcEngineClient.cs      ⚠️ toy scanner — replace with WinRT wrapper
-      EngineClientFactory.cs     probes pipe → falls back to InProc
-      AppDispatcher.cs
+      QueryParser.cs             Everything-style syntax (ext/size/dm/attrib/child/parent/dupe/AND/OR/NOT/...)
+      FilteringEngineClient.cs   Decorator: parses + post-filters above any inner engine
+      EngineClientFactory.cs     Native > pipe > in-proc fallback chain, always wrapped
+      NativeEngineClient.cs      P/Invoke into WhereIsIt.Engine.Native.dll
+      InProcEngineClient.cs      Pure-C# Directory.EnumerateFiles fallback
+      SearchHistory.cs           Up/down arrow MRU recall
+      BookmarkService.cs         Named saved queries
+      ResultExporter.cs          CSV/TSV export
+      HotkeyBinding.cs           Hotkey string parser
+      QueryComposer.cs           Quick-filter bar logic
+      SearchModifiersComposer.cs Case/Regex/Word/Path toggle composer
+      CommandLineArgs.cs         -s/-p flag parser
 
 src/
-  core/                          C++ domain — vcxproj empty, source partly scaffolded
-    domain/{Path,Query,Records,Sort}/
-    logging/
-    ports/
-  adapters/win32/                C++ adapter stubs — vcxproj empty
-  engine/winrt/                  C++/WinRT stub — vcxproj empty
-  legacy/                        Original Win32 source — port material, do not delete yet
+  engine/native/                 C++ engine DLL (compiles into WhereIsIt.Engine.Native.dll)
+    WhereIsIt.Engine.Native.{cpp,h,vcxproj}   C-export shim consumed by P/Invoke
+    cpp/                                       Engine implementation (moved from src/legacy/)
+      Engine.{cpp,h}             IndexingEngine — USN/MFT scan + search/sort
+      RecordPool.{cpp,h}         Shared-memory record store w/ Local\/heap fallback
+      StringPool.{cpp,h}         Shared-memory string interning
+      QueryEngine.{cpp,h}        case:/regex:/word:/matchpath:/extfilt:/diacritics:/sort: parsing
+      QueryDomain.{cpp,h}        QueryPlan and related types
+      UsnJournalReaderWin32.{cpp,h} + IUsnJournalReader.h
+      DriveEnumeratorWin32.{cpp,h}  + IDriveEnumerator.h
+      SortService.{cpp,h}
+      PathSizeDomain.{cpp,h}
+      StringUtils.{cpp,h}, Utils.{cpp,h}
+      CoreTypes.h, Logging.h, framework.h, targetver.h
+  core/                          Future layered C++ — empty scaffolds (partial source, no project builds)
+  adapters/win32/                Future C++ adapter scaffolds — empty vcxproj
+  engine/winrt/                  Future C++/WinRT bridge — empty vcxproj
   pipe/
     WhereIsIt.Pipe.Client/       IEngineClient + stub PipeEngineClient + protocol types
 
 service/
-  WhereIsIt.Service/             C++ service vcxproj (stub, not implemented)
+  WhereIsIt.Service/             Future named-pipe service — empty vcxproj
 
 tests/
-  app/                           xUnit (16 tests, green)
+  app/                           xUnit (256 passing — 200 non-native + 56 native integration)
   core/, adapters/, parity/, smoke/, unit/, cases/, fixtures/   ← scaffolds for C++ tests
   ci/run_all.ps1
 
-.github/workflows/ci.yml         ← new this branch
-
+.github/workflows/ci.yml         GitHub Actions CI
 WhereIsIt.slnx                   App, App.Core, Pipe.Client, Tests
-WhereIsIt.vcxproj                Legacy C++ exe — keep until P4
 Directory.Packages.props         central NuGet versions
 docs/STATUS.md                   this file
 ```

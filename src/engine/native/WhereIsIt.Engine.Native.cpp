@@ -1,7 +1,7 @@
 /*
  * WhereIsIt.Engine.Native.cpp
  *
- * Thin C-ABI wrapper around IndexingEngine (src/legacy/Engine.h).
+ * Thin C-ABI wrapper around IndexingEngine (src/engine/native/cpp/Engine.h).
  * Exposes a flat handle-based API that the C# NativeEngineClient calls via P/Invoke.
  *
  * Include order is deliberate: Engine.h drags in windows.h via framework.h;

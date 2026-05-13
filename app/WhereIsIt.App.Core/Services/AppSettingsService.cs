@@ -36,4 +36,38 @@ public sealed class AppSettingsService
         Directory.CreateDirectory(Path.GetDirectoryName(settingsPath)!);
         File.WriteAllText(settingsPath, JsonSerializer.Serialize(settings, JsonOpts));
     }
+
+    /// <summary>
+    /// Persists just the search-history field, leaving other settings (scope roots
+    /// in particular) untouched. Safe to call after every history-modifying event.
+    /// </summary>
+    public void SaveSearchHistory(string[] history)
+    {
+        var current = Load();
+        current.SearchHistory = history;
+        Save(current);
+    }
+
+    public void SaveBookmarks(Bookmark[] bookmarks)
+    {
+        var current = Load();
+        current.Bookmarks = bookmarks;
+        Save(current);
+    }
+
+    public void SaveColumnVisibility(bool showCreated, bool showAccessed, bool showRunCount)
+    {
+        var current = Load();
+        current.ShowCreatedColumn  = showCreated;
+        current.ShowAccessedColumn = showAccessed;
+        current.ShowRunCountColumn = showRunCount;
+        Save(current);
+    }
+
+    public void SaveRunCounts(System.Collections.Generic.Dictionary<string, int> counts)
+    {
+        var current = Load();
+        current.RunCounts = counts;
+        Save(current);
+    }
 }

@@ -29,7 +29,9 @@ public partial class SettingsViewModel : ObservableObject
             .Where(s => s.Length > 0)
             .ToArray();
 
-        settingsService.Save(new AppSettings { ScopeRoots = roots });
+        var current = settingsService.Load();
+        current.ScopeRoots = roots;
+        settingsService.Save(current);
         Saved = true;
     }
 }

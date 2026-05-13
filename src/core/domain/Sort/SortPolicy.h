@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include "../../../legacy/CoreTypes.h"
+#include "../../../engine/native/cpp/CoreTypes.h"
 
 namespace sortservice {
 

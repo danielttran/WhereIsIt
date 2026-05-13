@@ -4,7 +4,7 @@
 #include <vector>
 
 #include "../../core/ports/IDriveEnumeratorPort.h"
-#include "../../legacy/DriveEnumeratorWin32.h"
+#include "../../engine/native/cpp/DriveEnumeratorWin32.h"
 
 namespace whereisit::adapters::win32 {
 
