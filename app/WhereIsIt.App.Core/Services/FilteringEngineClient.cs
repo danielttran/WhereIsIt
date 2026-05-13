@@ -21,7 +21,10 @@ namespace WhereIsIt.App.Services;
 public sealed class FilteringEngineClient : IEngineClient, IDisposable
 {
     private const int DisplayCap = 2000;
-    private const int MaxScan    = 50_000;
+    // Bounded so a single keystroke can't pay an unbounded post-filter cost.
+    // The seq fence guarantees stale work bails on the next search, but a
+    // *late* keystroke still pays full MaxScan latency; keep that latency tight.
+    private const int MaxScan    = 5_000;
     private const long MaxContentSearchBytes = 4L * 1024 * 1024;   // skip files larger than this for content:
 
     private readonly IEngineClient inner;
@@ -45,11 +48,12 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
     public Task SearchAsync(string query, CancellationToken cancellationToken)
     {
         var parsed = QueryParser.Parse(query);
-        // Bump the sequence FIRST so any in-flight OnIdsAsync sees a fresh seq
-        // and bails before publishing stale results. currentParsed update under
-        // the same fence keeps the (seq, parsed) pair consistent for readers.
-        Interlocked.Increment(ref currentSeq);
+        // Publish parsed BEFORE bumping the sequence. The Interlocked.Increment
+        // is a release fence — any reader that observes the new seq via
+        // Volatile.Read is guaranteed to see the matching parsed write that
+        // happened immediately before it.
         currentParsed = parsed;
+        Interlocked.Increment(ref currentSeq);
         var simplified = SimplifyForInnerEngine(parsed, query);
         return inner.SearchAsync(simplified, cancellationToken);
     }
@@ -64,10 +68,12 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
 
     private async Task OnIdsAsync(IReadOnlyList<uint> ids, long mySeq)
     {
-        var parsed = currentParsed;
-        // Bail if a newer search has already started — the inner engine may
-        // emit IDs from the previous query asynchronously after we've moved on.
+        // Read seq FIRST so the volatile read acts as a memory fence for the
+        // subsequent currentParsed read — without this ordering, on weaker
+        // memory models we could see a fresh seq match while reading a stale
+        // ParsedQuery from before SearchAsync committed it.
         if (Volatile.Read(ref currentSeq) != mySeq) return;
+        var parsed = currentParsed;
 
         if (!NeedsPostFiltering(parsed))
         {

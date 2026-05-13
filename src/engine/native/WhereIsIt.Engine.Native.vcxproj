@@ -35,6 +35,14 @@
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
 
+  <!-- Pin the output to $(ProjectDir)x64\$(Configuration)\ so the DLL lands at
+       the same path whether MSBuild is invoked on this vcxproj directly or
+       on the parent .slnx solution. The App's csproj copies from that path. -->
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)x64\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)x64\$(Configuration)\obj\</IntDir>
+  </PropertyGroup>
+
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props"/>
 
   <!-- ================================================================ -->

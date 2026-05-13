@@ -94,8 +94,11 @@ public sealed class HttpSearchServer : IDisposable
 
     private async Task<SearchResponse> RunSearchAsync(string query, CancellationToken ct)
     {
-        // Serialize concurrent requests — the underlying engine is single-search-at-a-time.
-        await searchLock.WaitAsync(ct);
+        // Serialize concurrent requests — the underlying engine is single-search-
+        // at-a-time, so the lock is unavoidable. Bounded by an explicit timeout
+        // so a slow earlier request can never starve incoming ones indefinitely.
+        if (!await searchLock.WaitAsync(TimeSpan.FromSeconds(5), ct))
+            return new SearchResponse { query = query, count = 0, results = new() };
         try
         {
             var tcs = new TaskCompletionSource<IReadOnlyList<uint>>();

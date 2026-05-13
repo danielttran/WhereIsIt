@@ -25,9 +25,19 @@ public sealed partial class MainWindow : Window
         ViewModel = services.GetRequiredService<MainViewModel>();
 
         TrySetMicaBackdrop();
-        WireGlobalShortcuts();
         TryRegisterGlobalHotkey();
         Closed += OnClosedReleaseHotkey;
+
+        InitColumnVisibilityMenu();
+        RefreshBookmarksMenu();
+    }
+
+    // ── Bootstrapping ───────────────────────────────────────────────────
+
+    private void TrySetMicaBackdrop()
+    {
+        try { SystemBackdrop = new MicaBackdrop(); }
+        catch { /* unsupported on older Windows builds */ }
     }
 
     private void TryRegisterGlobalHotkey()
@@ -56,35 +66,61 @@ public sealed partial class MainWindow : Window
     private void OnClosedReleaseHotkey(object sender, WindowEventArgs args)
         => hotkeyHost?.Dispose();
 
-    private void TrySetMicaBackdrop()
+    private void InitColumnVisibilityMenu()
     {
-        try { SystemBackdrop = new MicaBackdrop(); }
-        catch { /* unsupported on older Windows builds */ }
+        var settingsService = services.GetService(typeof(WhereIsIt.App.Services.AppSettingsService))
+            as WhereIsIt.App.Services.AppSettingsService;
+        if (settingsService is null) return;
+        var s = settingsService.Load();
+        ColCreatedItem.IsChecked  = s.ShowCreatedColumn;
+        ColAccessedItem.IsChecked = s.ShowAccessedColumn;
+        ColRunsItem.IsChecked     = s.ShowRunCountColumn;
     }
 
-    private void WireGlobalShortcuts()
+    private void RefreshBookmarksMenu()
     {
-        if (Content is not FrameworkElement root) return;
+        var bm = services.GetService(typeof(WhereIsIt.App.Services.BookmarkService))
+            as WhereIsIt.App.Services.BookmarkService;
+        if (bm is null) return;
 
-        var focusSearch = new KeyboardAccelerator { Modifiers = VirtualKeyModifiers.Control, Key = VirtualKey.F };
-        focusSearch.Invoked += (_, e) => { SearchTextBox.Focus(FocusState.Programmatic); SearchTextBox.SelectAll(); e.Handled = true; };
-        root.KeyboardAccelerators.Add(focusSearch);
+        // Items 0 and 1 are static (Save current search, separator). Strip
+        // anything after and rebuild from the current bookmark list.
+        while (BookmarksMenu.Items.Count > 2)
+            BookmarksMenu.Items.RemoveAt(BookmarksMenu.Items.Count - 1);
 
-        var clear = new KeyboardAccelerator { Key = VirtualKey.Escape };
-        clear.Invoked += (_, e) =>
+        if (bm.Items.Count == 0) return;
+
+        foreach (var entry in bm.Items)
         {
-            if (!string.IsNullOrEmpty(ViewModel.SearchBox.Query))
+            var captured = entry;
+            var item = new MenuFlyoutItem
             {
-                ViewModel.SearchBox.Query = string.Empty;
-                e.Handled = true;
-            }
-        };
-        root.KeyboardAccelerators.Add(clear);
+                Text = $"{captured.Name}   —   {captured.Query}",
+            };
+            item.Click += (_, __) => ViewModel.SearchBox.Query = captured.Query;
+            BookmarksMenu.Items.Add(item);
+        }
 
-        var settings = new KeyboardAccelerator { Modifiers = VirtualKeyModifiers.Control, Key = (VirtualKey)188 };
-        settings.Invoked += (_, e) => { OnSettingsClick(this, new RoutedEventArgs()); e.Handled = true; };
-        root.KeyboardAccelerators.Add(settings);
+        BookmarksMenu.Items.Add(new MenuFlyoutSeparator());
+        var manage = new MenuFlyoutSubItem { Text = "Delete bookmark" };
+        foreach (var entry in bm.Items)
+        {
+            var captured = entry;
+            var del = new MenuFlyoutItem { Text = captured.Name };
+            del.Click += (_, __) =>
+            {
+                bm.Remove(captured.Name);
+                var settingsService = services.GetService(typeof(WhereIsIt.App.Services.AppSettingsService))
+                    as WhereIsIt.App.Services.AppSettingsService;
+                settingsService?.SaveBookmarks(bm.Snapshot());
+                RefreshBookmarksMenu();
+            };
+            manage.Items.Add(del);
+        }
+        BookmarksMenu.Items.Add(manage);
     }
+
+    // ── Result list events ──────────────────────────────────────────────
 
     private async void OnContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
     {
@@ -134,161 +170,14 @@ public sealed partial class MainWindow : Window
     private void OnRowDoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
         => OpenSelected();
 
-    private void OnOpenClick(object sender, RoutedEventArgs e) => OpenSelected();
-
-    private void OnOpenFolderClick(object sender, RoutedEventArgs e)
-    {
-        var row = ViewModel.ResultsList.SelectedRow;
-        if (row is null || string.IsNullOrEmpty(row.FullPath)) return;
-        TryStart("explorer.exe", $"/select,\"{row.FullPath}\"");
-    }
-
-    private void OnCopyNameClick(object sender, RoutedEventArgs e)
-    {
-        var row = ViewModel.ResultsList.SelectedRow;
-        if (row is null) return;
-        SetClipboardText(row.Name);
-    }
-
-    private void OnCopyPathClick(object sender, RoutedEventArgs e)
-    {
-        var row = ViewModel.ResultsList.SelectedRow;
-        if (row is null) return;
-        SetClipboardText(row.FullPath);
-    }
-
-    private void OnSettingsClick(object sender, RoutedEventArgs e)
-    {
-        var settingsWindow = new SettingsWindow(services);
-        settingsWindow.Activate();
-    }
-
-    private void OnColumnsClick(object sender, RoutedEventArgs e)
-    {
-        var settingsService = services.GetService(typeof(WhereIsIt.App.Services.AppSettingsService))
-            as WhereIsIt.App.Services.AppSettingsService;
-        if (settingsService is null) return;
-
-        var current = settingsService.Load();
-        var menu = new MenuFlyout();
-
-        var createdItem = new ToggleMenuFlyoutItem
-        {
-            Text = "Show Created column",
-            IsChecked = current.ShowCreatedColumn,
-        };
-        var accessedItem = new ToggleMenuFlyoutItem
-        {
-            Text = "Show Accessed column",
-            IsChecked = current.ShowAccessedColumn,
-        };
-        var runCountItem = new ToggleMenuFlyoutItem
-        {
-            Text = "Show Runs column",
-            IsChecked = current.ShowRunCountColumn,
-        };
-        Action persist = () => settingsService.SaveColumnVisibility(
-            createdItem.IsChecked, accessedItem.IsChecked, runCountItem.IsChecked);
-        createdItem.Click  += (_, __) => persist();
-        accessedItem.Click += (_, __) => persist();
-        runCountItem.Click += (_, __) => persist();
-
-        menu.Items.Add(createdItem);
-        menu.Items.Add(accessedItem);
-        menu.Items.Add(runCountItem);
-        menu.Items.Add(new MenuFlyoutSeparator());
-        menu.Items.Add(new MenuFlyoutItem
-        {
-            Text = "(Restart the app to apply changes)",
-            IsEnabled = false,
-        });
-
-        menu.ShowAt(ColumnsButton);
-    }
-
-    private void OnFilterClick(object sender, RoutedEventArgs e)
-    {
-        if (sender is not Button { Tag: string tag }) return;
-        ViewModel.SearchBox.Query =
-            WhereIsIt.App.Services.QueryComposer.ApplyFilter(ViewModel.SearchBox.Query, tag);
-    }
-
     private void OnAddTabClick(Microsoft.UI.Xaml.Controls.TabView sender, object args)
-    {
-        ViewModel.Tabs.AddTab();
-    }
+        => ViewModel.Tabs.AddTab();
 
     private void OnTabCloseRequested(Microsoft.UI.Xaml.Controls.TabView sender,
                                      Microsoft.UI.Xaml.Controls.TabViewTabCloseRequestedEventArgs args)
     {
         if (args.Item is ViewModels.TabRecord rec)
             ViewModel.Tabs.CloseTab(rec);
-    }
-
-    private void OnModifierToggleClick(object sender, RoutedEventArgs e)
-    {
-        var mods = new WhereIsIt.App.Services.SearchModifiers(
-            CaseSensitive: CaseToggle.IsChecked  == true,
-            Regex:         RegexToggle.IsChecked == true,
-            WholeWord:     WordToggle.IsChecked  == true,
-            MatchPath:     PathToggle.IsChecked  == true);
-        ViewModel.SearchBox.Query =
-            WhereIsIt.App.Services.SearchModifiersComposer.Apply(ViewModel.SearchBox.Query, mods);
-    }
-
-    private void OnBookmarksClick(object sender, RoutedEventArgs e)
-    {
-        var bm = services.GetService(typeof(WhereIsIt.App.Services.BookmarkService))
-            as WhereIsIt.App.Services.BookmarkService;
-        var settingsService = services.GetService(typeof(WhereIsIt.App.Services.AppSettingsService))
-            as WhereIsIt.App.Services.AppSettingsService;
-        if (bm is null) return;
-
-        var menu = new MenuFlyout();
-
-        var saveItem = new MenuFlyoutItem { Text = "Save current query…" };
-        saveItem.Click += async (_, __) =>
-        {
-            var name = await PromptForNameAsync(ViewModel.SearchBox.Query);
-            if (!string.IsNullOrWhiteSpace(name))
-            {
-                bm.Add(name, ViewModel.SearchBox.Query);
-                settingsService?.SaveBookmarks(bm.Snapshot());
-            }
-        };
-        menu.Items.Add(saveItem);
-
-        if (bm.Items.Count > 0)
-        {
-            menu.Items.Add(new MenuFlyoutSeparator());
-            foreach (var entry in bm.Items)
-            {
-                var captured = entry;
-                var item = new MenuFlyoutItem
-                {
-                    Text = $"{captured.Name}   —   {captured.Query}",
-                };
-                item.Click += (_, __) => ViewModel.SearchBox.Query = captured.Query;
-                menu.Items.Add(item);
-            }
-
-            menu.Items.Add(new MenuFlyoutSeparator());
-            var manage = new MenuFlyoutSubItem { Text = "Delete…" };
-            foreach (var entry in bm.Items)
-            {
-                var captured = entry;
-                var del = new MenuFlyoutItem { Text = captured.Name };
-                del.Click += (_, __) =>
-                {
-                    bm.Remove(captured.Name);
-                    settingsService?.SaveBookmarks(bm.Snapshot());
-                };
-                manage.Items.Add(del);
-            }
-            menu.Items.Add(manage);
-        }
-
-        menu.ShowAt(BookmarksButton);
     }
 
     private void OnDragItemsStarting(object sender, Microsoft.UI.Xaml.Controls.DragItemsStartingEventArgs e)
@@ -305,9 +194,6 @@ public sealed partial class MainWindow : Window
         e.Data.RequestedOperation = Windows.ApplicationModel.DataTransfer.DataPackageOperation.Copy;
         e.Data.SetText(string.Join(Environment.NewLine, paths));
 
-        // Lazily resolve to StorageItems when a drop target asks for them
-        // (Explorer, file dialogs, etc.). Synchronous gather above lets the
-        // text payload work for editors that ask for plain text.
         e.Data.SetDataProvider(
             Windows.ApplicationModel.DataTransfer.StandardDataFormats.StorageItems,
             async req =>
@@ -333,13 +219,20 @@ public sealed partial class MainWindow : Window
             });
     }
 
-    private async void OnExportClick(object sender, RoutedEventArgs e)
+    // ── File menu ───────────────────────────────────────────────────────
+
+    private void OnExportCsvClick(object sender, RoutedEventArgs e) => _ = ExportAsync(".csv");
+    private void OnExportTsvClick(object sender, RoutedEventArgs e) => _ = ExportAsync(".tsv");
+
+    private async System.Threading.Tasks.Task ExportAsync(string extension)
     {
         var picker = new Windows.Storage.Pickers.FileSavePicker();
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
         WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
-        picker.FileTypeChoices.Add("CSV (comma-separated)", new System.Collections.Generic.List<string> { ".csv" });
-        picker.FileTypeChoices.Add("TSV (tab-separated)",   new System.Collections.Generic.List<string> { ".tsv" });
+        if (extension == ".tsv")
+            picker.FileTypeChoices.Add("TSV (tab-separated)", new System.Collections.Generic.List<string> { ".tsv" });
+        else
+            picker.FileTypeChoices.Add("CSV (comma-separated)", new System.Collections.Generic.List<string> { ".csv" });
         picker.SuggestedFileName = string.IsNullOrEmpty(ViewModel.SearchBox.Query)
             ? "whereisit-results"
             : $"whereisit-{System.Text.RegularExpressions.Regex.Replace(ViewModel.SearchBox.Query, "[^A-Za-z0-9_-]", "_")}";
@@ -355,12 +248,139 @@ public sealed partial class MainWindow : Window
             models.Add(row.ToModel());
         }
 
-        var content = file.FileType.Equals(".tsv", System.StringComparison.OrdinalIgnoreCase)
+        var content = extension == ".tsv"
             ? WhereIsIt.App.Services.ResultExporter.ToTsv(models)
             : WhereIsIt.App.Services.ResultExporter.ToCsv(models);
 
         await Windows.Storage.FileIO.WriteTextAsync(file, content);
     }
+
+    private void OnExitClick(object sender, RoutedEventArgs e) => Close();
+
+    // ── Edit menu ───────────────────────────────────────────────────────
+
+    private void OnOpenClick(object sender, RoutedEventArgs e) => OpenSelected();
+
+    private void OnOpenFolderClick(object sender, RoutedEventArgs e)
+    {
+        var row = ViewModel.ResultsList.SelectedRow;
+        if (row is null || string.IsNullOrEmpty(row.FullPath)) return;
+        TryStart("explorer.exe", $"/select,\"{row.FullPath}\"");
+    }
+
+    private void OnCopyNameClick(object sender, RoutedEventArgs e)
+    {
+        var row = ViewModel.ResultsList.SelectedRow;
+        if (row is null) return;
+        SetClipboardText(row.Name);
+    }
+
+    private void OnCopyPathClick(object sender, RoutedEventArgs e)
+    {
+        var row = ViewModel.ResultsList.SelectedRow;
+        if (row is null) return;
+        SetClipboardText(row.FullPath);
+    }
+
+    // ── Search menu ─────────────────────────────────────────────────────
+
+    private void OnFilterClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { Tag: string tag }) return;
+        ViewModel.SearchBox.Query =
+            WhereIsIt.App.Services.QueryComposer.ApplyFilter(ViewModel.SearchBox.Query, tag);
+    }
+
+    private void OnFocusSearchClick(object sender, RoutedEventArgs e)
+    {
+        SearchTextBox.Focus(FocusState.Programmatic);
+        SearchTextBox.SelectAll();
+    }
+
+    private void OnClearSearchClick(object sender, RoutedEventArgs e)
+        => ViewModel.SearchBox.Query = string.Empty;
+
+    private void OnNewTabClick(object sender, RoutedEventArgs e)
+        => ViewModel.Tabs.AddTab();
+
+    private void OnCloseTabClick(object sender, RoutedEventArgs e)
+    {
+        var current = ViewModel.Tabs.CurrentTab;
+        if (current is not null) ViewModel.Tabs.CloseTab(current);
+    }
+
+    // ── Bookmarks menu ──────────────────────────────────────────────────
+
+    private async void OnSaveBookmarkClick(object sender, RoutedEventArgs e)
+    {
+        var bm = services.GetService(typeof(WhereIsIt.App.Services.BookmarkService))
+            as WhereIsIt.App.Services.BookmarkService;
+        var settingsService = services.GetService(typeof(WhereIsIt.App.Services.AppSettingsService))
+            as WhereIsIt.App.Services.AppSettingsService;
+        if (bm is null) return;
+
+        var name = await PromptForNameAsync(ViewModel.SearchBox.Query);
+        if (string.IsNullOrWhiteSpace(name)) return;
+
+        bm.Add(name, ViewModel.SearchBox.Query);
+        settingsService?.SaveBookmarks(bm.Snapshot());
+        RefreshBookmarksMenu();
+    }
+
+    // ── View menu ───────────────────────────────────────────────────────
+
+    private void OnColumnToggleClick(object sender, RoutedEventArgs e)
+    {
+        var settingsService = services.GetService(typeof(WhereIsIt.App.Services.AppSettingsService))
+            as WhereIsIt.App.Services.AppSettingsService;
+        if (settingsService is null) return;
+        settingsService.SaveColumnVisibility(
+            ColCreatedItem.IsChecked,
+            ColAccessedItem.IsChecked,
+            ColRunsItem.IsChecked);
+        // Column widths are bound OneTime in XAML — column changes take effect
+        // on next launch. Tell the user.
+        _ = ShowRestartHintAsync();
+    }
+
+    private async System.Threading.Tasks.Task ShowRestartHintAsync()
+    {
+        var dialog = new ContentDialog
+        {
+            Title = "Restart to apply",
+            Content = "Column visibility changes take effect the next time WhereIsIt starts.",
+            CloseButtonText = "OK",
+            XamlRoot = (Content as FrameworkElement)?.XamlRoot,
+        };
+        try { await dialog.ShowAsync(); } catch { /* ignore double-open */ }
+    }
+
+    // ── Tools menu ──────────────────────────────────────────────────────
+
+    private void OnSettingsClick(object sender, RoutedEventArgs e)
+    {
+        var settingsWindow = new SettingsWindow(services);
+        settingsWindow.Activate();
+    }
+
+    // ── Help menu ───────────────────────────────────────────────────────
+
+    private async void OnAboutClick(object sender, RoutedEventArgs e)
+    {
+        var dialog = new ContentDialog
+        {
+            Title = "About WhereIsIt",
+            Content = "WhereIsIt — a fast Windows file search tool.\n\n" +
+                      "Modern WinUI 3 shell over a native C++ NTFS indexer.\n" +
+                      "Familiar Everything-style query syntax: ext: size: dm: " +
+                      "attrib: child: parent: dupe: content: and more.",
+            CloseButtonText = "Close",
+            XamlRoot = (Content as FrameworkElement)?.XamlRoot,
+        };
+        try { await dialog.ShowAsync(); } catch { }
+    }
+
+    // ── Shared helpers ──────────────────────────────────────────────────
 
     private async System.Threading.Tasks.Task<string?> PromptForNameAsync(string defaultName)
     {
@@ -385,7 +405,6 @@ public sealed partial class MainWindow : Window
         if (string.IsNullOrEmpty(path)) return;
         TryStart(path, null);
 
-        // Tally + persist the run count for the opened path.
         var counts = services.GetService(typeof(WhereIsIt.App.Services.RunCountService))
             as WhereIsIt.App.Services.RunCountService;
         var settingsService = services.GetService(typeof(WhereIsIt.App.Services.AppSettingsService))

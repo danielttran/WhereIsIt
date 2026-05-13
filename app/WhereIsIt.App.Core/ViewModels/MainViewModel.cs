@@ -73,6 +73,10 @@ public partial class MainViewModel : ObservableObject, IDisposable
         metricsSubscription = engineClient.MetricsChanges
             .Subscribe(count => dispatcher.Enqueue(() => StatusBar.RecordCount = count));
 
+        // The throttle collapses bursts of keystrokes (≤75ms apart) into one
+        // SearchAsync call. 75ms keeps the result feel under the human
+        // "instant" threshold while preventing the engine from being hit on
+        // every individual keystroke during fast typing.
         querySubscription = Observable
             .FromEventPattern<System.ComponentModel.PropertyChangedEventHandler, System.ComponentModel.PropertyChangedEventArgs>(
                 h => SearchBox.PropertyChanged += h,
@@ -80,11 +84,13 @@ public partial class MainViewModel : ObservableObject, IDisposable
             .Where(e => e.EventArgs.PropertyName == nameof(SearchBoxViewModel.Query))
             .Select(_ => SearchBox.Query)
             .DistinctUntilChanged()
+            .Throttle(TimeSpan.FromMilliseconds(75))
+            .DistinctUntilChanged()
             .SelectMany(async query =>
             {
                 // Mirror the live query into the current tab so the title updates.
                 if (!_syncingTab && Tabs.CurrentTab is not null)
-                    Tabs.CurrentTab.Query = query;
+                    dispatcher.Enqueue(() => { if (Tabs.CurrentTab is not null) Tabs.CurrentTab.Query = query; });
 
                 // When query cleared, revert status bar to last engine status
                 if (string.IsNullOrEmpty(query))

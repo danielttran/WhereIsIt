@@ -33,25 +33,29 @@ public class MainViewModelTests
     // ── search trigger ───────────────────────────────────────────────────
 
     [Fact]
-    public void QueryChange_TriggersSearchImmediately()
+    public async System.Threading.Tasks.Task QueryChange_TriggersSearch_AfterThrottleWindow()
     {
-        // No throttle — search must fire synchronously on PropertyChanged.
+        // 75ms throttle now sits in front of SearchAsync. Confirm the search
+        // does eventually fire after the throttle window elapses.
         var fake = new FakeEngineClient();
         var vm = new MainViewModel(fake, new InlineDispatcher());
         vm.SearchBox.Query = "alpha";
-        Assert.True(fake.SearchCount >= 1, "search should fire immediately on query change");
+        await System.Threading.Tasks.Task.Delay(200);
+        Assert.True(fake.SearchCount >= 1, "search should fire after the throttle window");
         vm.Dispose();
     }
 
     [Fact]
-    public void QueryChange_SameQueryTwice_SearchesOnce()
+    public async System.Threading.Tasks.Task QueryChange_SameQueryTwice_SearchesOnce()
     {
-        // DistinctUntilChanged prevents redundant back-to-back searches.
+        // DistinctUntilChanged + Throttle ensure the same query doesn't fire twice.
         var fake = new FakeEngineClient();
         var vm = new MainViewModel(fake, new InlineDispatcher());
         vm.SearchBox.Query = "alpha";
+        await System.Threading.Tasks.Task.Delay(200);
         var countAfterFirst = fake.SearchCount;
         vm.SearchBox.Query = "alpha";  // same value again
+        await System.Threading.Tasks.Task.Delay(200);
         Assert.Equal(countAfterFirst, fake.SearchCount);
         vm.Dispose();
     }

@@ -14,6 +14,15 @@ public partial class ResultsListViewModel : ObservableObject
 
     private readonly IEngineClient engineClient;
 
+    // Row view-models are expensive to allocate on every keystroke (DisplayCap
+    // = 2000). Cache by record-id so subsequent BindResults reuses the
+    // existing instance — same id always describes the same record while the
+    // engine is alive. Bounded so the cache doesn't grow without limit; on
+    // overflow the oldest entries are evicted.
+    private const int RowCacheCap = 8_000;
+    private readonly Dictionary<uint, ResultRowViewModel> rowCache = new();
+    private readonly Queue<uint> rowCacheOrder = new();
+
     // Replaced as a unit so the ListView refreshes in one pass (no per-item animations).
     [ObservableProperty] private IReadOnlyList<ResultRowViewModel> rows = [];
 
@@ -45,12 +54,31 @@ public partial class ResultsListViewModel : ObservableObject
     {
         var display = Math.Min(ids.Count, DisplayCap);
         var list = new List<ResultRowViewModel>(display);
+        // Track ids included in *this* BindResults so we can evict them safely
+        // without an O(N) List.Contains scan per cache miss.
+        var inThisBatch = new HashSet<uint>(display);
         for (int i = 0; i < display; i++)
         {
-            var row = new ResultRowViewModel(engineClient, ids[i]);
+            var id = ids[i];
+            if (!rowCache.TryGetValue(id, out var row))
+            {
+                row = new ResultRowViewModel(engineClient, id);
+                rowCache[id] = row;
+                rowCacheOrder.Enqueue(id);
+                while (rowCacheOrder.Count > RowCacheCap)
+                {
+                    var evict = rowCacheOrder.Dequeue();
+                    // If the evicted id is on-screen in *this* BindResults, the
+                    // strong reference from `list` keeps the VM alive — we can
+                    // still drop it from the opportunistic cache, since the
+                    // next BindResults that needs it will just re-create the VM.
+                    rowCache.Remove(evict);
+                }
+            }
             if (i < EagerLoadCount)
                 _ = row.EnsureLoadedAsync(CancellationToken.None);
             list.Add(row);
+            inThisBatch.Add(id);
         }
         TotalResultCount = ids.Count;
         Rows = list;
