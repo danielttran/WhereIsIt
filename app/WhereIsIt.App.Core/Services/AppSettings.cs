@@ -12,4 +12,11 @@ public sealed class AppSettings
     public System.Collections.Generic.Dictionary<string, int> RunCounts { get; set; } = new();
     public bool EnableHttpServer { get; set; } = false;
     public int  HttpServerPort   { get; set; } = 12321;
+
+    /// <summary>Tab queries from the last session — empty if there was just one
+    /// blank tab. Used by the Chrome-style "Restore previous tabs?" prompt.</summary>
+    public string[] LastSessionTabs { get; set; } = [];
+
+    /// <summary>0 = Off, 32 = Small, 64 = Medium, 128 = Large, 256 = Extra Large.</summary>
+    public int ThumbnailSizePx { get; set; } = (int)ThumbnailSize.Off;
 }

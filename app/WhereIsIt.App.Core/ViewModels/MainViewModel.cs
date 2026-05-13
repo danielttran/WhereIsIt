@@ -109,7 +109,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
             var t = Tabs.CurrentTab;
             if (t is null) return;
             _syncingTab = true;
-            try { SearchBox.Query = t.Query; }
+            try { SearchBox.SetQueryFromRaw(t.Query); }
             finally { _syncingTab = false; }
         };
     }

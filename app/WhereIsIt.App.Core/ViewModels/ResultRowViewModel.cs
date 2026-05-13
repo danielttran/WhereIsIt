@@ -30,6 +30,32 @@ public partial class ResultRowViewModel : ObservableObject
     [ObservableProperty] private string attributesText = string.Empty;
     [ObservableProperty] private int runCount;
 
+    // Loosely typed as object so this assembly doesn't need to reference
+    // WinUI. At runtime it's a Microsoft.UI.Xaml.Media.ImageSource set by
+    // the App's ThumbnailService; the Image's Source property accepts it
+    // because Image.Source is typed ImageSource and runtime cast succeeds.
+    [ObservableProperty] private object? thumbnailSource;
+
+    // Per-row cancellation handle, refreshed when the ListView container is
+    // realized and tripped when it recycles. Without this, a fast scroll
+    // would pile up dozens of in-flight StorageFile.GetThumbnailAsync tasks
+    // for rows the user already scrolled past.
+    private System.Threading.CancellationTokenSource? thumbnailCts;
+    public System.Threading.CancellationToken BeginThumbnailLoad()
+    {
+        CancelThumbnail();
+        var cts = new System.Threading.CancellationTokenSource();
+        thumbnailCts = cts;
+        return cts.Token;
+    }
+    public void CancelThumbnail()
+    {
+        var prior = System.Threading.Interlocked.Exchange(ref thumbnailCts, null);
+        if (prior is null) return;
+        try { prior.Cancel(); } catch { }
+        prior.Dispose();
+    }
+
     public ulong SizeBytes { get; private set; }
     public DateTimeOffset ModifiedUtc { get; private set; }
 

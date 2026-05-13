@@ -171,6 +171,11 @@ private:
     bool SaveIndex(const std::wstring& filePath);
     bool LoadIndex(const std::wstring& filePath);
 
+    // Calls SaveIndex and resets the incremental-save bookkeeping in one
+    // place — every caller must reset both fields together or the throttle
+    // double-counts and writes earlier than intended.
+    void MarkIndexSaved();
+
 private:
     void WorkerThread();
     void SearchThread();
@@ -182,6 +187,17 @@ private:
     void ScanGenericDrive(DriveScanContext& ctx, const std::wstring& path, uint32_t parentIdx, uint16_t parentSeq, std::unordered_set<uint64_t>& visitedDirs);
 
     void HandleUsnJournalRecord(USN_RECORD_V2* record, uint8_t driveIndex);
+
+    // Reads USN journal records from drives[i].LastProcessedUsn through the
+    // current end, applies each via HandleUsnJournalRecord, and advances
+    // LastProcessedUsn. Loops until the read returns an empty buffer.
+    //
+    // Returns:
+    //   1  → at least one record applied;
+    //   0  → already up to date (no records);
+    //  -1  → journal truncated / sync lost on this drive; caller should
+    //        treat the drive's index as stale (per-drive re-scan recommended).
+    int DrainUsnJournal(uint8_t driveIndex, uint8_t* buf, size_t bufSize);
     
     uint32_t FetchVolumeSerialNumber(const std::wstring& driveLetter);
     std::wstring ResolveIndexSavePath();
@@ -203,6 +219,13 @@ private:
     std::atomic<bool> m_running;
     std::atomic<bool> m_ready;
     std::atomic<bool> m_indexDirty{ false };  // set on bad_alloc during USN processing; triggers full re-scan
+    // Incremental SaveIndex throttle — flush to disk at most every 60 seconds
+    // and only after at least N applied USN records, so per-keystroke drains
+    // never trigger a write storm but a busy session still persists progress.
+    std::chrono::steady_clock::time_point m_lastSaveTime{};
+    std::atomic<uint32_t>                 m_recordsAppliedSinceSave{ 0 };
+    static constexpr uint32_t             kSaveAfterRecords = 50'000;
+    static constexpr auto                 kSaveAfterDuration = std::chrono::seconds(60);
     mutable std::mutex m_statusMutex;
     std::wstring m_status;
     std::atomic<HWND> m_hwndNotify{ nullptr };

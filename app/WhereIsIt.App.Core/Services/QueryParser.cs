@@ -132,6 +132,11 @@ public static class QueryParser
         ["exe","dll","msi","bat","cmd","ps1","com","scr","vbs","wsf"];
     public static readonly string[] ZipExts =
         ["zip","7z","rar","tar","gz","xz","bz2","zst","cab","iso","tgz","jar"];
+    public static readonly string[] CodeExts =
+        ["cs","c","cpp","cc","cxx","h","hpp","hh","hxx","py","js","jsx","ts","tsx",
+         "go","rs","java","kt","swift","rb","php","pl","sh","ps1","sql","r","scala",
+         "lua","dart","ex","exs","fs","fsx","clj","cljs","hs","ml","mli","jl","nim",
+         "vb","asm","s","json","xml","yaml","yml","toml","ini"];
 
     public static ParsedQuery Parse(string query)
     {
@@ -335,6 +340,8 @@ public static class QueryParser
         if (lower.StartsWith("exe:") && lower.Length > 4) { extWhitelist = ExeExts; AddTerm(clauses, token[4..], false); return true; }
         if (lower == "zip:" || lower == "compressed:") { extWhitelist = ZipExts; return true; }
         if (lower.StartsWith("zip:") && lower.Length > 4) { extWhitelist = ZipExts; AddTerm(clauses, token[4..], false); return true; }
+        if (lower == "code:" || lower == "source:") { extWhitelist = CodeExts; return true; }
+        if (lower.StartsWith("code:") && lower.Length > 5) { extWhitelist = CodeExts; AddTerm(clauses, token[5..], false); return true; }
         return false;
     }
 

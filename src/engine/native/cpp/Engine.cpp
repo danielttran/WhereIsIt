@@ -85,8 +85,11 @@ void IndexingEngine::CloseAllDriveHandles() {
 }
 
 void IndexingEngine::Stop() {
+    // Signal stop FIRST so MonitorChanges drains and releases m_dataMutex
+    // before the saver thread tries to take it as a shared_lock. Otherwise
+    // SaveIndex's 5s budget is spent waiting on a busy MonitorChanges instead
+    // of on disk I/O.
     m_running = false;
-    // Signal m_stopEvent so MonitorChanges wakes from WaitForMultipleObjects immediately
     if (m_stopEvent) SetEvent(m_stopEvent);
     m_searchEvent.notify_all();
 
@@ -95,13 +98,21 @@ void IndexingEngine::Stop() {
         if (t.joinable()) {
             HANDLE h = t.native_handle();
             if (WaitForSingleObject(h, timeoutMs) == WAIT_TIMEOUT) {
-                // If it hangs, we detach it and let the OS clean up on process exit.
                 t.detach();
             } else {
                 t.join();
             }
         }
     };
+
+    // Flush deltas applied since the last incremental save. .tmp + MoveFileEx
+    // in SaveIndex is crash-safe even if we abandon the writer mid-flight.
+    if (m_ready.load(std::memory_order_acquire)) {
+        std::thread saver([this] {
+            try { SaveIndex(ResolveIndexSavePath()); } catch (...) { }
+        });
+        joinWithTimeout(saver, 5000);
+    }
 
     joinWithTimeout(m_mainWorker, 5000);
     joinWithTimeout(m_searchWorker, 5000);
@@ -150,6 +161,12 @@ std::wstring IndexingEngine::ResolveIndexSavePath() {
     }
     std::wstring s(exePathBuf.data(), len);
     return s.substr(0, s.find_last_of(L'\\')) + L"\\index.dat";
+}
+
+void IndexingEngine::MarkIndexSaved() {
+    SaveIndex(ResolveIndexSavePath());
+    m_recordsAppliedSinceSave.store(0, std::memory_order_relaxed);
+    m_lastSaveTime = std::chrono::steady_clock::now();
 }
 
 bool IndexingEngine::SaveIndex(const std::wstring& filePath) {
@@ -1542,6 +1559,67 @@ void IndexingEngine::HandleUsnJournalRecord(USN_RECORD_V2* r, uint8_t di) {
     }
 }
 
+int IndexingEngine::DrainUsnJournal(uint8_t driveIndex, uint8_t* buf, size_t bufSize) {
+    if (driveIndex >= m_drives.size()) return 0;
+    auto& d = m_drives[driveIndex];
+    if (d.VolumeHandle == INVALID_HANDLE_VALUE || d.Type != DriveFileSystem::NTFS) return 0;
+    // Drives that were scanned generically use synthetic MFT indices that
+    // collide with real file-reference numbers; replaying USN onto them
+    // corrupts the index.
+    if (d.SkipUsnMonitoring) return 0;
+
+    USN_JOURNAL_DATA_V0 uj{}; DWORD cb = 0;
+    if (!DeviceIoControl(d.VolumeHandle, FSCTL_QUERY_USN_JOURNAL,
+                         NULL, 0, &uj, sizeof(uj), &cb, NULL)) {
+        return 0;
+    }
+    // Never read from position 0 — that replays the entire journal and
+    // corrupts synthetic ancestor records.
+    if (d.LastProcessedUsn == 0) {
+        d.LastProcessedUsn = (uint64_t)uj.NextUsn;
+        return 0;
+    }
+    // Detect journal wrap: if FirstUsn moved past our position, our cursor
+    // is stale and any read would return ERROR_JOURNAL_ENTRY_DELETED.
+    if ((uint64_t)uj.FirstUsn > d.LastProcessedUsn) {
+        d.LastProcessedUsn = (uint64_t)uj.NextUsn;
+        return -1;
+    }
+
+    bool appliedAny = false;
+    READ_USN_JOURNAL_DATA_V0 rd{ 0, kInvalidIndex, FALSE, 0, 0, uj.UsnJournalID };
+    while (m_running) {
+        rd.StartUsn = (USN)d.LastProcessedUsn;
+        if (!DeviceIoControl(d.VolumeHandle, FSCTL_READ_USN_JOURNAL,
+                             &rd, sizeof(rd), buf, (DWORD)bufSize, &cb, NULL)) {
+            if (GetLastError() == ERROR_JOURNAL_ENTRY_DELETED) {
+                d.LastProcessedUsn = (uint64_t)uj.NextUsn;
+                return -1;
+            }
+            break;
+        }
+        if (cb <= sizeof(USN)) break;
+
+        uint8_t* p = buf + sizeof(USN);
+        uint8_t* limit = buf + cb;
+        uint32_t batchApplied = 0;
+        while (p + sizeof(USN_RECORD_V2) <= limit) {
+            USN_RECORD_V2* rec = (USN_RECORD_V2*)p;
+            if (rec->RecordLength < sizeof(USN_RECORD_V2)) break;
+            if (p + rec->RecordLength > limit) break;
+            HandleUsnJournalRecord(rec, driveIndex);
+            p += rec->RecordLength;
+            ++batchApplied;
+        }
+        m_recordsAppliedSinceSave.fetch_add(batchApplied, std::memory_order_relaxed);
+        const uint64_t next = (uint64_t)(*(USN*)buf);
+        if (next <= d.LastProcessedUsn) break;   // safety: no progress
+        d.LastProcessedUsn = next;
+        appliedAny = true;
+    }
+    return appliedAny ? 1 : 0;
+}
+
 void IndexingEngine::MonitorChanges() {
     auto buf = std::make_unique<uint8_t[]>(65536);
 
@@ -1589,35 +1667,13 @@ void IndexingEngine::MonitorChanges() {
         if (!m_running || waitRes == WAIT_OBJECT_0) break;  // stop event
         if (waitRes == WAIT_FAILED) break;
 
-        // A filesystem change notification fired. Poll USN journal to absorb it.
+        // Drain the USN journal on each NTFS drive so we absorb every record
+        // since the last scan, not just one 64 KB window.
         bool anyChanges = false;
         for (uint8_t i = 0; i < (uint8_t)m_drives.size(); ++i) {
-            auto& d = m_drives[i];
-            if (d.VolumeHandle == INVALID_HANDLE_VALUE || d.Type != DriveFileSystem::NTFS) continue;
-            // Skip USN journal processing for drives scanned generically: their MFT indices
-            // are synthetic sequential numbers that collide with real NTFS file-reference
-            // numbers, so any USN event would corrupt the index.
-            if (d.SkipUsnMonitoring) continue;
-            USN_JOURNAL_DATA_V0 uj; DWORD cb;
-            if (!DeviceIoControl(d.VolumeHandle, FSCTL_QUERY_USN_JOURNAL, NULL, 0, &uj, sizeof(uj), &cb, NULL)) continue;
-            // Never read from position 0: that replays all journal history and
-            // corrupts synthetic ancestor records seeded during generic scans.
-            if (d.LastProcessedUsn == 0) d.LastProcessedUsn = (uint64_t)uj.NextUsn;
-            READ_USN_JOURNAL_DATA_V0 rd = { (USN)d.LastProcessedUsn, kInvalidIndex, FALSE, 0, 0, uj.UsnJournalID };
-            if (DeviceIoControl(d.VolumeHandle, FSCTL_READ_USN_JOURNAL, &rd, sizeof(rd), buf.get(), 65536, &cb, NULL)) {
-                if (cb > sizeof(USN)) {
-                    uint8_t* p = buf.get() + sizeof(USN);
-                    while (p < buf.get() + cb) {
-                        USN_RECORD_V2* record = (USN_RECORD_V2*)p;
-                        HandleUsnJournalRecord(record, i);
-                        p += record->RecordLength;
-                    }
-                    d.LastProcessedUsn = (uint64_t)(*(USN*)buf.get());
-                    anyChanges = true;
-                }
-            } else if (GetLastError() == ERROR_JOURNAL_ENTRY_DELETED) {
-                SetStatus(L"Journal Truncated. Sync lost.");
-            }
+            int rc = DrainUsnJournal(i, buf.get(), 65536);
+            if (rc == 1) anyChanges = true;
+            else if (rc == -1) SetStatus(L"Journal Truncated. Sync lost.");
         }
 
         if (anyChanges) {
@@ -1628,6 +1684,17 @@ void IndexingEngine::MonitorChanges() {
                 Logger::Log(L"[WhereIsIt] OOM during USN processing; exiting MonitorChanges for full re-scan.");
                 break;
             }
+
+            // Persist incrementally so a crash or unclean exit doesn't force a
+            // full re-scan on next launch. Throttled by both record count and
+            // wall time so live editing doesn't write index.dat on every save.
+            const uint32_t applied = m_recordsAppliedSinceSave.load(std::memory_order_relaxed);
+            if (applied >= kSaveAfterRecords ||
+                std::chrono::steady_clock::now() - m_lastSaveTime >= kSaveAfterDuration)
+            {
+                MarkIndexSaved();
+            }
+
             // Trigger a re-search immediately on every USN batch so changes appear
             // in the results without delay. The search thread coalesces rapid-fire
             // events via the atomic m_isSearchRequested flag — if a search is already
@@ -2343,25 +2410,31 @@ void IndexingEngine::WorkerThread() {
     }
 
     if (LoadIndex(ResolveIndexSavePath())) {
-        Logger::Log(L"[WhereIsIt] Index loaded. Performing USN Journal Catch-up...");
+        Logger::Log(L"[WhereIsIt] Index loaded. Draining USN journals for catch-up...");
+        SetStatus(L"Catching up changes...");
+        auto catchUpBuf = std::make_unique<uint8_t[]>(65536);
+        bool needsFullRescan = false;
         for (uint8_t i = 0; i < (uint8_t)m_drives.size(); ++i) {
-            auto& d = m_drives[i];
-            if (d.Type == DriveFileSystem::NTFS && d.VolumeHandle != INVALID_HANDLE_VALUE) {
-                USN_JOURNAL_DATA_V0 uj; DWORD cb;
-                if (DeviceIoControl(d.VolumeHandle, FSCTL_QUERY_USN_JOURNAL, NULL, 0, &uj, sizeof(uj), &cb, NULL)) {
-                    if ((uint64_t)uj.NextUsn > d.LastProcessedUsn) {
-                        wchar_t logBuf[256];
-                        swprintf_s(logBuf, L"[WhereIsIt] Drive %s has %llu new journal bytes. Catching up...", d.Letter.c_str(), (uint64_t)uj.NextUsn - d.LastProcessedUsn);
-                        Logger::Log(logBuf);
-                    }
-                }
+            int rc = DrainUsnJournal(i, catchUpBuf.get(), 65536);
+            if (rc == -1) {
+                wchar_t logBuf[256];
+                swprintf_s(logBuf, L"[WhereIsIt] Drive %s journal truncated; full re-scan required.",
+                           m_drives[i].Letter.c_str());
+                Logger::Log(logBuf);
+                needsFullRescan = true;
             }
         }
-        SaveIndex(ResolveIndexSavePath());
+        if (needsFullRescan) {
+            Logger::Log(L"[WhereIsIt] Performing full re-scan due to journal truncation.");
+            PerformFullDriveScan();
+        } else {
+            ApplyPendingUsnDeltas();
+        }
+        MarkIndexSaved();
     } else {
         Logger::Log(L"[WhereIsIt] No index found or load failed. Performing parallel full scan.\n");
         PerformFullDriveScan();
-        SaveIndex(ResolveIndexSavePath());
+        MarkIndexSaved();
     }
 
     wchar_t debugBuf[256];

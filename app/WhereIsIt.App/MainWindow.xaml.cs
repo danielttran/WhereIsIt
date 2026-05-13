@@ -14,6 +14,10 @@ namespace WhereIsIt.App;
 public sealed partial class MainWindow : Window
 {
     private readonly IServiceProvider services;
+    private readonly WhereIsIt.App.Services.AppSettingsService? settingsService;
+    private readonly WhereIsIt.App.Services.BookmarkService?    bookmarkService;
+    private readonly WhereIsIt.App.Services.RunCountService?    runCountService;
+    private readonly ThumbnailService?                          thumbnailService;
     private GlobalHotkeyHost? hotkeyHost;
 
     public MainViewModel ViewModel { get; }
@@ -22,14 +26,41 @@ public sealed partial class MainWindow : Window
     {
         this.services = services;
         InitializeComponent();
-        ViewModel = services.GetRequiredService<MainViewModel>();
+        ViewModel        = services.GetRequiredService<MainViewModel>();
+        // Cache singleton services so async hot paths (OnContainerContentChanging,
+        // OnOpenSelected) don't re-enter the DI container — and so a late
+        // continuation that fires after ServiceProvider.Dispose doesn't
+        // throw ObjectDisposedException on the UI thread.
+        settingsService  = services.GetService(typeof(WhereIsIt.App.Services.AppSettingsService)) as WhereIsIt.App.Services.AppSettingsService;
+        bookmarkService  = services.GetService(typeof(WhereIsIt.App.Services.BookmarkService))    as WhereIsIt.App.Services.BookmarkService;
+        runCountService  = services.GetService(typeof(WhereIsIt.App.Services.RunCountService))    as WhereIsIt.App.Services.RunCountService;
+        thumbnailService = services.GetService(typeof(ThumbnailService))                          as ThumbnailService;
 
         TrySetMicaBackdrop();
+        TrySetWindowIcon();
         TryRegisterGlobalHotkey();
         Closed += OnClosedReleaseHotkey;
+        Closed += OnClosedPersistTabs;
 
         InitColumnVisibilityMenu();
         RefreshBookmarksMenu();
+        Activated += OnFirstActivatedShowRestorePrompt;
+
+        // Keep the Search → Quick filter checkmarks in sync when the active
+        // filter changes from anywhere (menu click, bookmark, tab switch, CLI).
+        ViewModel.SearchBox.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(ViewModels.SearchBoxViewModel.ActiveFilter))
+                SyncQuickFilterCheckmarks();
+        };
+    }
+
+    private void OnFirstActivatedShowRestorePrompt(object sender, WindowActivatedEventArgs args)
+    {
+        // One-shot — ContentDialog needs XamlRoot which isn't reliably ready
+        // in the constructor for unpackaged WinUI 3 windows.
+        Activated -= OnFirstActivatedShowRestorePrompt;
+        _ = MaybePromptRestoreTabsAsync();
     }
 
     // ── Bootstrapping ───────────────────────────────────────────────────
@@ -40,10 +71,18 @@ public sealed partial class MainWindow : Window
         catch { /* unsupported on older Windows builds */ }
     }
 
+    private void TrySetWindowIcon()
+    {
+        try
+        {
+            var iconPath = System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "WhereIsIt.ico");
+            if (System.IO.File.Exists(iconPath)) AppWindow.SetIcon(iconPath);
+        }
+        catch { /* ignore — icon is cosmetic */ }
+    }
+
     private void TryRegisterGlobalHotkey()
     {
-        var settingsService = services.GetService(typeof(WhereIsIt.App.Services.AppSettingsService))
-            as WhereIsIt.App.Services.AppSettingsService;
         var spec = settingsService?.Load().GlobalHotkey;
         var binding = WhereIsIt.App.Services.HotkeyBinding.Parse(spec ?? "Ctrl+Alt+W");
         if (binding is null) return;
@@ -66,10 +105,57 @@ public sealed partial class MainWindow : Window
     private void OnClosedReleaseHotkey(object sender, WindowEventArgs args)
         => hotkeyHost?.Dispose();
 
+    private void OnClosedPersistTabs(object sender, WindowEventArgs args)
+    {
+        if (settingsService is null) return;
+        try
+        {
+            var snap = WhereIsIt.App.Services.TabRestoreService
+                .SnapshotForPersistence(ViewModel.Tabs.Tabs);
+            settingsService.SaveLastSessionTabs(snap);
+        }
+        catch { /* settings I/O must never crash the shutdown path */ }
+    }
+
+    private async System.Threading.Tasks.Task MaybePromptRestoreTabsAsync()
+    {
+        if (settingsService is null) return;
+        var last = settingsService.Load().LastSessionTabs;
+        if (!WhereIsIt.App.Services.TabRestoreService.WorthRestoring(last)) return;
+
+        var dialog = new ContentDialog
+        {
+            Title = "Restore previous tabs?",
+            Content = $"WhereIsIt had {last!.Length} tab{(last.Length == 1 ? "" : "s")} open last time.",
+            PrimaryButtonText   = "Restore",
+            CloseButtonText     = "Start fresh",
+            XamlRoot = (Content as FrameworkElement)?.XamlRoot,
+        };
+        ContentDialogResult result;
+        // Leave LastSessionTabs intact across dialog failures — a botched
+        // prompt should NOT silently wipe the snapshot; user gets one more chance.
+        try { result = await dialog.ShowAsync(); }
+        catch { return; }
+
+        if (result == ContentDialogResult.Primary)
+        {
+            bool first = true;
+            foreach (var raw in last)
+            {
+                if (first) { ViewModel.Tabs.Tabs[0].Query = raw; first = false; }
+                else { ViewModel.Tabs.AddTab(raw); }
+            }
+            ViewModel.Tabs.CurrentTab = ViewModel.Tabs.Tabs[0];
+            ViewModel.SearchBox.SetQueryFromRaw(ViewModel.Tabs.Tabs[0].Query);
+        }
+
+        // User made an explicit decision — clear the snapshot so we don't
+        // re-prompt on the next launch.
+        try { settingsService.SaveLastSessionTabs(System.Array.Empty<string>()); } catch { }
+    }
+
     private void InitColumnVisibilityMenu()
     {
-        var settingsService = services.GetService(typeof(WhereIsIt.App.Services.AppSettingsService))
-            as WhereIsIt.App.Services.AppSettingsService;
         if (settingsService is null) return;
         var s = settingsService.Load();
         ColCreatedItem.IsChecked  = s.ShowCreatedColumn;
@@ -79,8 +165,7 @@ public sealed partial class MainWindow : Window
 
     private void RefreshBookmarksMenu()
     {
-        var bm = services.GetService(typeof(WhereIsIt.App.Services.BookmarkService))
-            as WhereIsIt.App.Services.BookmarkService;
+        var bm = bookmarkService;
         if (bm is null) return;
 
         // Items 0 and 1 are static (Save current search, separator). Strip
@@ -97,7 +182,7 @@ public sealed partial class MainWindow : Window
             {
                 Text = $"{captured.Name}   —   {captured.Query}",
             };
-            item.Click += (_, __) => ViewModel.SearchBox.Query = captured.Query;
+            item.Click += (_, __) => ViewModel.SearchBox.SetQueryFromRaw(captured.Query);
             BookmarksMenu.Items.Add(item);
         }
 
@@ -110,8 +195,6 @@ public sealed partial class MainWindow : Window
             del.Click += (_, __) =>
             {
                 bm.Remove(captured.Name);
-                var settingsService = services.GetService(typeof(WhereIsIt.App.Services.AppSettingsService))
-                    as WhereIsIt.App.Services.AppSettingsService;
                 settingsService?.SaveBookmarks(bm.Snapshot());
                 RefreshBookmarksMenu();
             };
@@ -124,14 +207,44 @@ public sealed partial class MainWindow : Window
 
     private async void OnContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
     {
-        if (args.InRecycleQueue) return;
-        if (args.Item is ResultRowViewModel row)
+        // ListView recycles containers during fast scroll. When that fires we
+        // CANCEL the row's in-flight thumbnail fetch — without this the user
+        // can pile up hundreds of stale StorageFile.GetThumbnailAsync tasks
+        // by flick-scrolling, and the UI thread stalls draining them later.
+        if (args.Item is not ResultRowViewModel row) return;
+        if (args.InRecycleQueue)
         {
-            await row.EnsureLoadedAsync(System.Threading.CancellationToken.None);
-            var counts = services.GetService(typeof(WhereIsIt.App.Services.RunCountService))
-                as WhereIsIt.App.Services.RunCountService;
-            if (counts is not null) row.RunCount = counts.Get(row.FullPath);
+            row.CancelThumbnail();
+            row.ThumbnailSource = null;
+            return;
         }
+
+        await row.EnsureLoadedAsync(System.Threading.CancellationToken.None);
+        if (runCountService is not null) row.RunCount = runCountService.Get(row.FullPath);
+
+        var thumbs = thumbnailService;
+        var size = thumbs?.CurrentSize ?? WhereIsIt.App.Services.ThumbnailSize.Off;
+        if (thumbs is null || size == WhereIsIt.App.Services.ThumbnailSize.Off) return;
+
+        // Cache hit → set synchronously to avoid the async dispatch flicker.
+        if (thumbs.TryGetCached(row.FullPath, size, out var cached))
+        {
+            row.ThumbnailSource = cached;
+            return;
+        }
+
+        var token = row.BeginThumbnailLoad();
+        var captured = row;
+        _ = thumbs.GetAsync(captured.FullPath, size, token).ContinueWith(t =>
+        {
+            if (t.IsCompletedSuccessfully && !token.IsCancellationRequested)
+            {
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (!token.IsCancellationRequested) captured.ThumbnailSource = t.Result;
+                });
+            }
+        }, System.Threading.Tasks.TaskScheduler.Default);
     }
 
     private void OnResultsKeyDown(object sender, KeyRoutedEventArgs e)
@@ -159,8 +272,6 @@ public sealed partial class MainWindow : Window
                 break;
             case VirtualKey.Enter:
                 ViewModel.SearchBox.Submit();
-                var settingsService = services.GetService(typeof(WhereIsIt.App.Services.AppSettingsService))
-                    as WhereIsIt.App.Services.AppSettingsService;
                 settingsService?.SaveSearchHistory(ViewModel.SearchBox.History.Snapshot());
                 e.Handled = true;
                 break;
@@ -287,8 +398,21 @@ public sealed partial class MainWindow : Window
     private void OnFilterClick(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement { Tag: string tag }) return;
-        ViewModel.SearchBox.Query =
-            WhereIsIt.App.Services.QueryComposer.ApplyFilter(ViewModel.SearchBox.Query, tag);
+        ViewModel.SearchBox.ActiveFilter = tag;
+        SyncQuickFilterCheckmarks();
+    }
+
+    private void OnSearchMenuLoaded(object sender, RoutedEventArgs e)
+        => SyncQuickFilterCheckmarks();
+
+    private void SyncQuickFilterCheckmarks()
+    {
+        var active = ViewModel.SearchBox.ActiveFilter;
+        foreach (var item in QuickFilterMenu.Items)
+        {
+            if (item is ToggleMenuFlyoutItem t && t.Tag is string tag)
+                t.IsChecked = string.Equals(tag, active, StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     private void OnFocusSearchClick(object sender, RoutedEventArgs e)
@@ -298,7 +422,7 @@ public sealed partial class MainWindow : Window
     }
 
     private void OnClearSearchClick(object sender, RoutedEventArgs e)
-        => ViewModel.SearchBox.Query = string.Empty;
+        => ViewModel.SearchBox.SetQueryFromRaw(string.Empty);
 
     private void OnNewTabClick(object sender, RoutedEventArgs e)
         => ViewModel.Tabs.AddTab();
@@ -313,26 +437,44 @@ public sealed partial class MainWindow : Window
 
     private async void OnSaveBookmarkClick(object sender, RoutedEventArgs e)
     {
-        var bm = services.GetService(typeof(WhereIsIt.App.Services.BookmarkService))
-            as WhereIsIt.App.Services.BookmarkService;
-        var settingsService = services.GetService(typeof(WhereIsIt.App.Services.AppSettingsService))
-            as WhereIsIt.App.Services.AppSettingsService;
-        if (bm is null) return;
+        if (bookmarkService is null) return;
 
         var name = await PromptForNameAsync(ViewModel.SearchBox.Query);
         if (string.IsNullOrWhiteSpace(name)) return;
 
-        bm.Add(name, ViewModel.SearchBox.Query);
-        settingsService?.SaveBookmarks(bm.Snapshot());
+        bookmarkService.Add(name, ViewModel.SearchBox.Query);
+        settingsService?.SaveBookmarks(bookmarkService.Snapshot());
         RefreshBookmarksMenu();
     }
 
     // ── View menu ───────────────────────────────────────────────────────
 
+    private void OnViewMenuLoaded(object sender, RoutedEventArgs e)
+        => SyncThumbnailSizeCheckmarks();
+
+    private void OnThumbnailSizeClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { Tag: string tagStr } || !int.TryParse(tagStr, out var px)) return;
+        if (settingsService is null) return;
+        var current = settingsService.Load();
+        current.ThumbnailSizePx = px;
+        settingsService.Save(current);
+        SyncThumbnailSizeCheckmarks();
+        _ = ShowRestartHintAsync();
+    }
+
+    private void SyncThumbnailSizeCheckmarks()
+    {
+        var current = settingsService?.Load().ThumbnailSizePx ?? 0;
+        foreach (var item in ThumbnailsMenu.Items)
+        {
+            if (item is ToggleMenuFlyoutItem t && t.Tag is string s && int.TryParse(s, out var px))
+                t.IsChecked = px == current;
+        }
+    }
+
     private void OnColumnToggleClick(object sender, RoutedEventArgs e)
     {
-        var settingsService = services.GetService(typeof(WhereIsIt.App.Services.AppSettingsService))
-            as WhereIsIt.App.Services.AppSettingsService;
         if (settingsService is null) return;
         settingsService.SaveColumnVisibility(
             ColCreatedItem.IsChecked,
@@ -405,15 +547,11 @@ public sealed partial class MainWindow : Window
         if (string.IsNullOrEmpty(path)) return;
         TryStart(path, null);
 
-        var counts = services.GetService(typeof(WhereIsIt.App.Services.RunCountService))
-            as WhereIsIt.App.Services.RunCountService;
-        var settingsService = services.GetService(typeof(WhereIsIt.App.Services.AppSettingsService))
-            as WhereIsIt.App.Services.AppSettingsService;
-        if (counts is not null)
+        if (runCountService is not null)
         {
-            counts.Increment(path);
-            row.RunCount = counts.Get(path);
-            settingsService?.SaveRunCounts(counts.Snapshot());
+            runCountService.Increment(path);
+            row.RunCount = runCountService.Get(path);
+            settingsService?.SaveRunCounts(runCountService.Snapshot());
         }
     }
 

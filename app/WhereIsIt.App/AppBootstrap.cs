@@ -17,6 +17,7 @@ public static class AppBootstrap
         WhereIsIt.App.ViewModels.ResultRowViewModel.ShowCreatedColumn  = settings.ShowCreatedColumn;
         WhereIsIt.App.ViewModels.ResultRowViewModel.ShowAccessedColumn = settings.ShowAccessedColumn;
         WhereIsIt.App.ViewModels.ResultRowViewModel.ShowRunCountColumn = settings.ShowRunCountColumn;
+        ColumnSettings.ThumbnailSizePx = settings.ThumbnailSizePx;
 
         var history = new SearchHistory();
         history.Load(settings.SearchHistory);
@@ -31,6 +32,7 @@ public static class AppBootstrap
         services.AddSingleton<SearchHistory>(_ => history);
         services.AddSingleton<BookmarkService>(_ => bookmarks);
         services.AddSingleton<RunCountService>(_ => runCounts);
+        services.AddSingleton(_ => new ThumbnailService { CurrentSize = (ThumbnailSize)settings.ThumbnailSizePx });
         services.AddSingleton<IEngineClient>(_ => EngineClientFactory.Create(
             scopeRoots: settings.ScopeRoots.Length > 0 ? settings.ScopeRoots : null));
 

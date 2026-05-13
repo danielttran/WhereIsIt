@@ -159,6 +159,19 @@ public class InProcEngineClientFilterTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Search_CodeMacro_ReturnsSourceFilesOnly()
+    {
+        await File.WriteAllTextAsync(Path.Combine(_root.FullName, "main.cs"),    "");
+        await File.WriteAllTextAsync(Path.Combine(_root.FullName, "util.py"),    "");
+        await File.WriteAllTextAsync(Path.Combine(_root.FullName, "readme.md"),  "");
+        await File.WriteAllTextAsync(Path.Combine(_root.FullName, "photo.jpg"),  "");
+
+        var names = await GetNamesAsync("code:");
+
+        names.Should().BeEquivalentTo("main.cs", "util.py");
+    }
+
+    [Fact]
     public async Task Search_PicMacro_ReturnsPictureFilesOnly()
     {
         await File.WriteAllTextAsync(Path.Combine(_root.FullName, "photo.jpg"), "");

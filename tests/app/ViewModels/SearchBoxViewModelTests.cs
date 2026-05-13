@@ -1,6 +1,4 @@
-using System.ComponentModel;
-using System.Reactive.Concurrency;
-using Microsoft.Reactive.Testing;
+using WhereIsIt.App.Services;
 using WhereIsIt.App.ViewModels;
 using Xunit;
 
@@ -9,13 +7,13 @@ namespace WhereIsIt.App.Tests.ViewModels;
 public class SearchBoxViewModelTests
 {
     [Fact]
-    public void Query_PropertyChanged_Fires()
+    public void DisplayQuery_PropertyChanged_Fires()
     {
         var vm = new SearchBoxViewModel();
         string? changed = null;
-        vm.PropertyChanged += (_, e) => changed = e.PropertyName;
-        vm.Query = "hello";
-        Assert.Equal(nameof(SearchBoxViewModel.Query), changed);
+        vm.PropertyChanged += (_, e) => { if (e.PropertyName == nameof(SearchBoxViewModel.DisplayQuery)) changed = e.PropertyName; };
+        vm.DisplayQuery = "hello";
+        Assert.Equal(nameof(SearchBoxViewModel.DisplayQuery), changed);
     }
 
     [Fact]
@@ -25,54 +23,87 @@ public class SearchBoxViewModelTests
         Assert.True(vm.SubmitCommand.CanExecute(null));
     }
 
-    // ── modifier toggles ↔ query sync ───────────────────────────────────
+    // ── DisplayQuery vs. Query split ────────────────────────────────────
 
     [Fact]
-    public void ToggleMatchCase_InjectsCaseTokenIntoQuery()
+    public void Typing_Updates_Query_Without_LeakingFilterIntoDisplay()
     {
-        var vm = new SearchBoxViewModel { Query = "foo" };
+        var vm = new SearchBoxViewModel();
+        vm.ActiveFilter = "audio:";
+        vm.DisplayQuery = "foo";
+        // The TextBox-bound DisplayQuery stays clean — Everything-style.
+        Assert.Equal("foo", vm.DisplayQuery);
+        // The engine-facing Query carries the filter.
+        Assert.Equal("foo audio:", vm.Query);
+    }
+
+    [Fact]
+    public void TogglingModifier_LeavesDisplayQueryClean()
+    {
+        var vm = new SearchBoxViewModel { DisplayQuery = "foo" };
         vm.MatchCase = true;
+        Assert.Equal("foo", vm.DisplayQuery);
         Assert.Equal("case: foo", vm.Query);
     }
 
     [Fact]
-    public void ClearingMatchCase_RemovesCaseToken()
+    public void TogglingFilter_AndModifier_TogetherComposesQuery()
     {
-        var vm = new SearchBoxViewModel { Query = "case: foo" };
-        // Setting Query already synced MatchCase to true above.
-        Assert.True(vm.MatchCase);
-        vm.MatchCase = false;
+        var vm = new SearchBoxViewModel { DisplayQuery = "report" };
+        vm.MatchCase   = true;
+        vm.ActiveFilter = "doc:";
+        Assert.Equal("report", vm.DisplayQuery);
+        Assert.Equal("case: report doc:", vm.Query);
+    }
+
+    [Fact]
+    public void ClearingFilter_RemovesItFromQuery()
+    {
+        var vm = new SearchBoxViewModel { DisplayQuery = "foo", ActiveFilter = "audio:" };
+        vm.ActiveFilter = QueryComposer.AllFilter;
         Assert.Equal("foo", vm.Query);
     }
 
+    // ── SetQueryFromRaw: reverse-sync from external sources ─────────────
+
     [Fact]
-    public void EditingQuery_SyncsTogglesAutomatically()
+    public void SetQueryFromRaw_DecomposesFlagsFilter_AndCleanText()
     {
         var vm = new SearchBoxViewModel();
-        vm.Query = "regex: word: foo";
-        Assert.True(vm.UseRegex);
-        Assert.True(vm.WholeWord);
+        vm.SetQueryFromRaw("case: audio: foo");
+        Assert.True(vm.MatchCase);
+        Assert.Equal("audio:", vm.ActiveFilter);
+        Assert.Equal("foo", vm.DisplayQuery);
+        // Recomposed Query must round-trip equivalently (ordering may differ
+        // but every component is present).
+        Assert.Contains("case:",  vm.Query);
+        Assert.Contains("audio:", vm.Query);
+        Assert.Contains("foo",    vm.Query);
+    }
+
+    [Fact]
+    public void SetQueryFromRaw_Empty_ClearsEverything()
+    {
+        var vm = new SearchBoxViewModel
+        {
+            DisplayQuery = "foo",
+            MatchCase = true,
+            ActiveFilter = "audio:",
+        };
+        vm.SetQueryFromRaw("");
+        Assert.Equal("",  vm.DisplayQuery);
         Assert.False(vm.MatchCase);
-        Assert.False(vm.MatchPath);
+        Assert.Equal(QueryComposer.AllFilter, vm.ActiveFilter);
+        Assert.Equal("",  vm.Query);
     }
 
     [Fact]
-    public void TogglingMultipleModifiers_AccumulatesTokensInStableOrder()
+    public void SetQueryFromRaw_RawWithoutTokens_LeavesFlagsCleared()
     {
-        var vm = new SearchBoxViewModel { Query = "foo" };
-        vm.MatchCase = true;
-        vm.UseRegex  = true;
-        Assert.Equal("case: regex: foo", vm.Query);
-    }
-
-    [Fact]
-    public void ToggleSync_DoesNotLoopOrDoubleApply()
-    {
-        var vm = new SearchBoxViewModel { Query = "foo" };
-        int changes = 0;
-        vm.PropertyChanged += (_, e) => { if (e.PropertyName == nameof(SearchBoxViewModel.Query)) changes++; };
-        vm.MatchCase = true;          // 1 query change
-        vm.MatchCase = false;         // 1 query change
-        Assert.Equal(2, changes);
+        var vm = new SearchBoxViewModel { MatchCase = true, ActiveFilter = "audio:" };
+        vm.SetQueryFromRaw("plain query");
+        Assert.False(vm.MatchCase);
+        Assert.Equal(QueryComposer.AllFilter, vm.ActiveFilter);
+        Assert.Equal("plain query", vm.DisplayQuery);
     }
 }

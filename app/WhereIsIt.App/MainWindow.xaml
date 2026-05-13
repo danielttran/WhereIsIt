@@ -54,7 +54,7 @@
                 </MenuFlyoutItem>
             </MenuBarItem>
 
-            <MenuBarItem Title="Search">
+            <MenuBarItem Title="Search" Loaded="OnSearchMenuLoaded">
                 <ToggleMenuFlyoutItem Text="Match case"
                     IsChecked="{x:Bind ViewModel.SearchBox.MatchCase, Mode=TwoWay}"/>
                 <ToggleMenuFlyoutItem Text="Regex"
@@ -64,15 +64,16 @@
                 <ToggleMenuFlyoutItem Text="Match path"
                     IsChecked="{x:Bind ViewModel.SearchBox.MatchPath, Mode=TwoWay}"/>
                 <MenuFlyoutSeparator/>
-                <MenuFlyoutSubItem Text="Quick filter">
-                    <MenuFlyoutItem Text="Everything"  Tag="all:"    Click="OnFilterClick"/>
-                    <MenuFlyoutItem Text="Audio"       Tag="audio:"  Click="OnFilterClick"/>
-                    <MenuFlyoutItem Text="Video"       Tag="video:"  Click="OnFilterClick"/>
-                    <MenuFlyoutItem Text="Document"    Tag="doc:"    Click="OnFilterClick"/>
-                    <MenuFlyoutItem Text="Picture"     Tag="pic:"    Click="OnFilterClick"/>
-                    <MenuFlyoutItem Text="Executable"  Tag="exe:"    Click="OnFilterClick"/>
-                    <MenuFlyoutItem Text="Compressed"  Tag="zip:"    Click="OnFilterClick"/>
-                    <MenuFlyoutItem Text="Folder"      Tag="folder:" Click="OnFilterClick"/>
+                <MenuFlyoutSubItem x:Name="QuickFilterMenu" Text="Quick filter">
+                    <ToggleMenuFlyoutItem Text="Everything"  Tag="all:"    Click="OnFilterClick"/>
+                    <ToggleMenuFlyoutItem Text="Audio"       Tag="audio:"  Click="OnFilterClick"/>
+                    <ToggleMenuFlyoutItem Text="Video"       Tag="video:"  Click="OnFilterClick"/>
+                    <ToggleMenuFlyoutItem Text="Document"    Tag="doc:"    Click="OnFilterClick"/>
+                    <ToggleMenuFlyoutItem Text="Picture"     Tag="pic:"    Click="OnFilterClick"/>
+                    <ToggleMenuFlyoutItem Text="Executable"  Tag="exe:"    Click="OnFilterClick"/>
+                    <ToggleMenuFlyoutItem Text="Compressed"  Tag="zip:"    Click="OnFilterClick"/>
+                    <ToggleMenuFlyoutItem Text="Code"        Tag="code:"   Click="OnFilterClick"/>
+                    <ToggleMenuFlyoutItem Text="Folder"      Tag="folder:" Click="OnFilterClick"/>
                 </MenuFlyoutSubItem>
                 <MenuFlyoutSeparator/>
                 <MenuFlyoutItem Text="Focus search box" Click="OnFocusSearchClick">
@@ -104,11 +105,18 @@
                 <!-- Dynamic bookmarks are inserted here at runtime. -->
             </MenuBarItem>
 
-            <MenuBarItem Title="View">
+            <MenuBarItem Title="View" Loaded="OnViewMenuLoaded">
                 <MenuFlyoutSubItem Text="Columns">
                     <ToggleMenuFlyoutItem x:Name="ColCreatedItem"  Text="Created"  Click="OnColumnToggleClick"/>
                     <ToggleMenuFlyoutItem x:Name="ColAccessedItem" Text="Accessed" Click="OnColumnToggleClick"/>
                     <ToggleMenuFlyoutItem x:Name="ColRunsItem"     Text="Runs"     Click="OnColumnToggleClick"/>
+                </MenuFlyoutSubItem>
+                <MenuFlyoutSubItem x:Name="ThumbnailsMenu" Text="Thumbnails">
+                    <ToggleMenuFlyoutItem Text="Off"          Tag="0"   Click="OnThumbnailSizeClick"/>
+                    <ToggleMenuFlyoutItem Text="Small"        Tag="32"  Click="OnThumbnailSizeClick"/>
+                    <ToggleMenuFlyoutItem Text="Medium"       Tag="64"  Click="OnThumbnailSizeClick"/>
+                    <ToggleMenuFlyoutItem Text="Large"        Tag="128" Click="OnThumbnailSizeClick"/>
+                    <ToggleMenuFlyoutItem Text="Extra Large"  Tag="256" Click="OnThumbnailSizeClick"/>
                 </MenuFlyoutSubItem>
             </MenuBarItem>
 
@@ -127,7 +135,7 @@
                  Margin="12,8,12,4"
                  PlaceholderText="Search files and folders   (Ctrl+F focus, Esc clear, ↑/↓ history)"
                  KeyDown="OnSearchBoxKeyDown"
-                 Text="{x:Bind ViewModel.SearchBox.Query, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
+                 Text="{x:Bind ViewModel.SearchBox.DisplayQuery, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
 
         <!-- Tab strip -->
         <muxc:TabView Grid.Row="2"
@@ -152,31 +160,32 @@
                   BorderBrush="{ThemeResource SystemControlForegroundBaseLowBrush}"
                   BorderThickness="0,0,0,1">
                 <Grid.ColumnDefinitions>
+                    <!-- Column 0: thumbnail gutter; collapses to zero when thumbnails are Off -->
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.ThumbnailColumnWidth, Mode=OneTime}"/>
                     <ColumnDefinition Width="2*"/>
                     <ColumnDefinition Width="3*"/>
                     <ColumnDefinition Width="120"/>
                     <ColumnDefinition Width="160"/>
-                    <!-- column indexes 4,5,6 are toggleable (Created/Accessed/Runs) -->
                     <ColumnDefinition Width="{x:Bind app:ColumnSettings.CreatedColumnWidth,  Mode=OneTime}"/>
                     <ColumnDefinition Width="{x:Bind app:ColumnSettings.AccessedColumnWidth, Mode=OneTime}"/>
                     <ColumnDefinition Width="{x:Bind app:ColumnSettings.RunCountColumnWidth, Mode=OneTime}"/>
                     <ColumnDefinition Width="80"/>
                 </Grid.ColumnDefinitions>
-                <Button Grid.Column="0" Style="{StaticResource ColumnHeaderButton}"
+                <Button Grid.Column="1" Style="{StaticResource ColumnHeaderButton}"
                         Command="{x:Bind ViewModel.ResultsList.SortByCommand}" CommandParameter="name">
                     <StackPanel Orientation="Horizontal" Spacing="2">
                         <TextBlock Text="Name" FontWeight="SemiBold"/>
                         <TextBlock Text="{x:Bind ViewModel.ResultsList.NameSortIndicator, Mode=OneWay}" Opacity="0.7"/>
                     </StackPanel>
                 </Button>
-                <Button Grid.Column="1" Style="{StaticResource ColumnHeaderButton}"
+                <Button Grid.Column="2" Style="{StaticResource ColumnHeaderButton}"
                         Command="{x:Bind ViewModel.ResultsList.SortByCommand}" CommandParameter="path">
                     <StackPanel Orientation="Horizontal" Spacing="2">
                         <TextBlock Text="Path" FontWeight="SemiBold"/>
                         <TextBlock Text="{x:Bind ViewModel.ResultsList.PathSortIndicator, Mode=OneWay}" Opacity="0.7"/>
                     </StackPanel>
                 </Button>
-                <Button Grid.Column="2" Style="{StaticResource ColumnHeaderButton}"
+                <Button Grid.Column="3" Style="{StaticResource ColumnHeaderButton}"
                         Width="120" HorizontalContentAlignment="Right"
                         Command="{x:Bind ViewModel.ResultsList.SortByCommand}" CommandParameter="size">
                     <StackPanel Orientation="Horizontal" Spacing="2">
@@ -184,7 +193,7 @@
                         <TextBlock Text="{x:Bind ViewModel.ResultsList.SizeSortIndicator, Mode=OneWay}" Opacity="0.7"/>
                     </StackPanel>
                 </Button>
-                <Button Grid.Column="3" Style="{StaticResource ColumnHeaderButton}"
+                <Button Grid.Column="4" Style="{StaticResource ColumnHeaderButton}"
                         Width="160"
                         Command="{x:Bind ViewModel.ResultsList.SortByCommand}" CommandParameter="modified">
                     <StackPanel Orientation="Horizontal" Spacing="2">
@@ -192,16 +201,16 @@
                         <TextBlock Text="{x:Bind ViewModel.ResultsList.ModifiedSortIndicator, Mode=OneWay}" Opacity="0.7"/>
                     </StackPanel>
                 </Button>
-                <Button Grid.Column="4" Style="{StaticResource ColumnHeaderButton}"
+                <Button Grid.Column="5" Style="{StaticResource ColumnHeaderButton}"
                         Content="Created"
                         Visibility="{x:Bind app:ColumnSettings.CreatedColumnVisibility,  Mode=OneTime}"/>
-                <Button Grid.Column="5" Style="{StaticResource ColumnHeaderButton}"
+                <Button Grid.Column="6" Style="{StaticResource ColumnHeaderButton}"
                         Content="Accessed"
                         Visibility="{x:Bind app:ColumnSettings.AccessedColumnVisibility, Mode=OneTime}"/>
-                <Button Grid.Column="6" Style="{StaticResource ColumnHeaderButton}"
+                <Button Grid.Column="7" Style="{StaticResource ColumnHeaderButton}"
                         Content="Runs"
                         Visibility="{x:Bind app:ColumnSettings.RunCountColumnVisibility, Mode=OneTime}"/>
-                <Button Grid.Column="7" Style="{StaticResource ColumnHeaderButton}"
+                <Button Grid.Column="8" Style="{StaticResource ColumnHeaderButton}"
                         Width="80"
                         Content="Attr"/>
             </Grid>
@@ -259,6 +268,7 @@
                     <DataTemplate x:DataType="vm:ResultRowViewModel">
                         <Grid Padding="8,2">
                             <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.ThumbnailColumnWidth, Mode=OneTime}"/>
                                 <ColumnDefinition Width="2*"/>
                                 <ColumnDefinition Width="3*"/>
                                 <ColumnDefinition Width="120"/>
@@ -268,17 +278,24 @@
                                 <ColumnDefinition Width="{x:Bind app:ColumnSettings.RunCountColumnWidth, Mode=OneTime}"/>
                                 <ColumnDefinition Width="80"/>
                             </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0" Text="{x:Bind Name, Mode=OneWay}" TextTrimming="CharacterEllipsis"/>
-                            <TextBlock Grid.Column="1" Text="{x:Bind ParentPath, Mode=OneWay}"
+                            <Image Grid.Column="0"
+                                   Source="{x:Bind app:Converters.AsImageSource(ThumbnailSource), Mode=OneWay}"
+                                   Width="{x:Bind app:ColumnSettings.ThumbnailRenderSize, Mode=OneTime}"
+                                   Height="{x:Bind app:ColumnSettings.ThumbnailRenderSize, Mode=OneTime}"
+                                   Stretch="Uniform"
+                                   Margin="0,0,8,0"
+                                   Visibility="{x:Bind app:ColumnSettings.ThumbnailColumnVisibility, Mode=OneTime}"/>
+                            <TextBlock Grid.Column="1" Text="{x:Bind Name, Mode=OneWay}" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock Grid.Column="2" Text="{x:Bind ParentPath, Mode=OneWay}"
                                        Opacity="0.7" TextTrimming="CharacterEllipsis"/>
-                            <TextBlock Grid.Column="2" Text="{x:Bind SizeText, Mode=OneWay}"
+                            <TextBlock Grid.Column="3" Text="{x:Bind SizeText, Mode=OneWay}"
                                        HorizontalAlignment="Right"/>
-                            <TextBlock Grid.Column="3" Text="{x:Bind ModifiedText, Mode=OneWay}" Opacity="0.7"/>
-                            <TextBlock Grid.Column="4" Text="{x:Bind CreatedText,  Mode=OneWay}" Opacity="0.55"/>
-                            <TextBlock Grid.Column="5" Text="{x:Bind AccessedText, Mode=OneWay}" Opacity="0.55"/>
-                            <TextBlock Grid.Column="6" Text="{x:Bind RunCount, Mode=OneWay}"
+                            <TextBlock Grid.Column="4" Text="{x:Bind ModifiedText, Mode=OneWay}" Opacity="0.7"/>
+                            <TextBlock Grid.Column="5" Text="{x:Bind CreatedText,  Mode=OneWay}" Opacity="0.55"/>
+                            <TextBlock Grid.Column="6" Text="{x:Bind AccessedText, Mode=OneWay}" Opacity="0.55"/>
+                            <TextBlock Grid.Column="7" Text="{x:Bind RunCount, Mode=OneWay}"
                                        HorizontalAlignment="Right" Opacity="0.55"/>
-                            <TextBlock Grid.Column="7" Text="{x:Bind AttributesText, Mode=OneWay}" Opacity="0.6"/>
+                            <TextBlock Grid.Column="8" Text="{x:Bind AttributesText, Mode=OneWay}" Opacity="0.6"/>
                         </Grid>
                     </DataTemplate>
                 </ListView.ItemTemplate>

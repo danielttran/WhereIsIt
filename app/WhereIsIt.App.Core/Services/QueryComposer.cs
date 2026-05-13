@@ -14,7 +14,7 @@ public static class QueryComposer
     public const string AllFilter = "all:";
 
     public static readonly string[] TypeFilters =
-        ["audio:", "video:", "doc:", "pic:", "exe:", "zip:", "folder:", "file:"];
+        ["audio:", "video:", "doc:", "pic:", "exe:", "zip:", "code:", "folder:", "file:"];
 
     public static string ApplyFilter(string currentQuery, string filter)
     {

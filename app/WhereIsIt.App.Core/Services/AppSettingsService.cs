@@ -19,16 +19,30 @@ public sealed class AppSettingsService
 
     public AppSettings Load()
     {
+        if (!File.Exists(settingsPath)) return new AppSettings();
         try
         {
-            if (!File.Exists(settingsPath)) return new AppSettings();
             var json = File.ReadAllText(settingsPath);
             return JsonSerializer.Deserialize<AppSettings>(json, JsonOpts) ?? new AppSettings();
         }
         catch
         {
+            // Corrupt JSON would silently wipe bookmarks/history/run-counts/
+            // scope-roots if we just returned defaults — move the bad file
+            // aside so the user (or a later schema-migrating Load) can recover.
+            TryBackupCorruptSettings();
             return new AppSettings();
         }
+    }
+
+    private void TryBackupCorruptSettings()
+    {
+        try
+        {
+            var bak = settingsPath + ".bak." + DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+            File.Move(settingsPath, bak);
+        }
+        catch { /* best-effort; never throw out of Load */ }
     }
 
     public void Save(AppSettings settings)
@@ -68,6 +82,13 @@ public sealed class AppSettingsService
     {
         var current = Load();
         current.RunCounts = counts;
+        Save(current);
+    }
+
+    public void SaveLastSessionTabs(string[] tabs)
+    {
+        var current = Load();
+        current.LastSessionTabs = tabs ?? [];
         Save(current);
     }
 }
