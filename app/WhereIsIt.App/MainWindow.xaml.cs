@@ -42,17 +42,8 @@ public sealed partial class MainWindow : Window
         Closed += OnClosedReleaseHotkey;
         Closed += OnClosedPersistTabs;
 
-        InitColumnVisibilityMenu();
         RefreshBookmarksMenu();
         Activated += OnFirstActivatedShowRestorePrompt;
-
-        // Keep the Search → Quick filter checkmarks in sync when the active
-        // filter changes from anywhere (menu click, bookmark, tab switch, CLI).
-        ViewModel.SearchBox.PropertyChanged += (_, e) =>
-        {
-            if (e.PropertyName == nameof(ViewModels.SearchBoxViewModel.ActiveFilter))
-                SyncQuickFilterCheckmarks();
-        };
     }
 
     private void OnFirstActivatedShowRestorePrompt(object sender, WindowActivatedEventArgs args)
@@ -152,15 +143,6 @@ public sealed partial class MainWindow : Window
         // User made an explicit decision — clear the snapshot so we don't
         // re-prompt on the next launch.
         try { settingsService.SaveLastSessionTabs(System.Array.Empty<string>()); } catch { }
-    }
-
-    private void InitColumnVisibilityMenu()
-    {
-        if (settingsService is null) return;
-        var s = settingsService.Load();
-        ColCreatedItem.IsChecked  = s.ShowCreatedColumn;
-        ColAccessedItem.IsChecked = s.ShowAccessedColumn;
-        ColRunsItem.IsChecked     = s.ShowRunCountColumn;
     }
 
     private void RefreshBookmarksMenu()
@@ -399,20 +381,6 @@ public sealed partial class MainWindow : Window
     {
         if (sender is not FrameworkElement { Tag: string tag }) return;
         ViewModel.SearchBox.ActiveFilter = tag;
-        SyncQuickFilterCheckmarks();
-    }
-
-    private void OnSearchMenuLoaded(object sender, RoutedEventArgs e)
-        => SyncQuickFilterCheckmarks();
-
-    private void SyncQuickFilterCheckmarks()
-    {
-        var active = ViewModel.SearchBox.ActiveFilter;
-        foreach (var item in QuickFilterMenu.Items)
-        {
-            if (item is ToggleMenuFlyoutItem t && t.Tag is string tag)
-                t.IsChecked = string.Equals(tag, active, StringComparison.OrdinalIgnoreCase);
-        }
     }
 
     private void OnFocusSearchClick(object sender, RoutedEventArgs e)
@@ -448,53 +416,28 @@ public sealed partial class MainWindow : Window
     }
 
     // ── View menu ───────────────────────────────────────────────────────
-
-    private void OnViewMenuLoaded(object sender, RoutedEventArgs e)
-        => SyncThumbnailSizeCheckmarks();
+    // Column/thumbnail toggles are bound TwoWay (or OneWay for radios) to
+    // ColumnSettings.Current — the XAML reflows live. Click handlers only
+    // need to persist the new state to settings.
 
     private void OnThumbnailSizeClick(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement { Tag: string tagStr } || !int.TryParse(tagStr, out var px)) return;
+        ColumnSettings.Current.ThumbnailSizePx = px;
+        if (thumbnailService is not null) thumbnailService.CurrentSize = (WhereIsIt.App.Services.ThumbnailSize)px;
         if (settingsService is null) return;
         var current = settingsService.Load();
         current.ThumbnailSizePx = px;
         settingsService.Save(current);
-        SyncThumbnailSizeCheckmarks();
-        _ = ShowRestartHintAsync();
-    }
-
-    private void SyncThumbnailSizeCheckmarks()
-    {
-        var current = settingsService?.Load().ThumbnailSizePx ?? 0;
-        foreach (var item in ThumbnailsMenu.Items)
-        {
-            if (item is ToggleMenuFlyoutItem t && t.Tag is string s && int.TryParse(s, out var px))
-                t.IsChecked = px == current;
-        }
     }
 
     private void OnColumnToggleClick(object sender, RoutedEventArgs e)
     {
         if (settingsService is null) return;
         settingsService.SaveColumnVisibility(
-            ColCreatedItem.IsChecked,
-            ColAccessedItem.IsChecked,
-            ColRunsItem.IsChecked);
-        // Column widths are bound OneTime in XAML — column changes take effect
-        // on next launch. Tell the user.
-        _ = ShowRestartHintAsync();
-    }
-
-    private async System.Threading.Tasks.Task ShowRestartHintAsync()
-    {
-        var dialog = new ContentDialog
-        {
-            Title = "Restart to apply",
-            Content = "Column visibility changes take effect the next time WhereIsIt starts.",
-            CloseButtonText = "OK",
-            XamlRoot = (Content as FrameworkElement)?.XamlRoot,
-        };
-        try { await dialog.ShowAsync(); } catch { /* ignore double-open */ }
+            ColumnSettings.Current.ShowCreatedColumn,
+            ColumnSettings.Current.ShowAccessedColumn,
+            ColumnSettings.Current.ShowRunCountColumn);
     }
 
     // ── Tools menu ──────────────────────────────────────────────────────

@@ -10,12 +10,6 @@ namespace WhereIsIt.App.ViewModels;
 
 public partial class ResultRowViewModel : ObservableObject
 {
-    // Plain-bool toggles for column visibility — set at bootstrap from
-    // AppSettings; the App-project's static `ColumnSettings` class projects
-    // these into WinUI GridLength/Visibility values for OneTime XAML binding.
-    public static bool ShowCreatedColumn  { get; set; }
-    public static bool ShowAccessedColumn { get; set; }
-    public static bool ShowRunCountColumn { get; set; }
 
     private readonly IEngineClient engineClient;
     private readonly uint id;

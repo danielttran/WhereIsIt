@@ -14,10 +14,10 @@ public static class AppBootstrap
 
         // Apply persisted column-visibility BEFORE any view model loads — the
         // DataTemplate ColumnDefinition.Width binds OneTime to these statics.
-        WhereIsIt.App.ViewModels.ResultRowViewModel.ShowCreatedColumn  = settings.ShowCreatedColumn;
-        WhereIsIt.App.ViewModels.ResultRowViewModel.ShowAccessedColumn = settings.ShowAccessedColumn;
-        WhereIsIt.App.ViewModels.ResultRowViewModel.ShowRunCountColumn = settings.ShowRunCountColumn;
-        ColumnSettings.ThumbnailSizePx = settings.ThumbnailSizePx;
+        ColumnSettings.Current.ShowCreatedColumn  = settings.ShowCreatedColumn;
+        ColumnSettings.Current.ShowAccessedColumn = settings.ShowAccessedColumn;
+        ColumnSettings.Current.ShowRunCountColumn = settings.ShowRunCountColumn;
+        ColumnSettings.Current.ThumbnailSizePx    = settings.ThumbnailSizePx;
 
         var history = new SearchHistory();
         history.Load(settings.SearchHistory);

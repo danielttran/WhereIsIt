@@ -1,45 +1,56 @@
+using CommunityToolkit.Mvvm.ComponentModel;
 using Microsoft.UI.Xaml;
-using WhereIsIt.App.ViewModels;
 
 namespace WhereIsIt.App;
 
 /// <summary>
-/// WinUI projection of the column-visibility booleans on
-/// <see cref="ResultRowViewModel"/>. Lives in the App project because Core
-/// can't reference WinUI types. XAML binds <c>ColumnDefinition.Width</c> and
-/// header <c>Visibility</c> to these via <c>x:Bind ... Mode=OneTime</c>, so
-/// the toggle takes effect on next app launch.
+/// Live, observable view settings — column visibility plus thumbnail size.
+/// XAML binds to <c>app:ColumnSettings.Current.Xxx</c> with Mode=OneWay so
+/// toggling a checkmark in the View menu reflows the result grid immediately
+/// (no restart). A singleton holds the state; AppBootstrap seeds it from
+/// AppSettings on launch and the View menu mutates it directly.
 /// </summary>
-public static class ColumnSettings
+public partial class ColumnSettings : ObservableObject
 {
-    public static GridLength CreatedColumnWidth
-        => ResultRowViewModel.ShowCreatedColumn  ? new GridLength(140) : new GridLength(0);
+    public static ColumnSettings Current { get; } = new();
 
-    public static GridLength AccessedColumnWidth
-        => ResultRowViewModel.ShowAccessedColumn ? new GridLength(140) : new GridLength(0);
+    // ── User-visible knobs (set by the View menu) ────────────────────────
 
-    public static Visibility CreatedColumnVisibility
-        => ResultRowViewModel.ShowCreatedColumn  ? Visibility.Visible : Visibility.Collapsed;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CreatedColumnWidth), nameof(CreatedColumnVisibility))]
+    private bool showCreatedColumn;
 
-    public static Visibility AccessedColumnVisibility
-        => ResultRowViewModel.ShowAccessedColumn ? Visibility.Visible : Visibility.Collapsed;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AccessedColumnWidth), nameof(AccessedColumnVisibility))]
+    private bool showAccessedColumn;
 
-    public static GridLength RunCountColumnWidth
-        => ResultRowViewModel.ShowRunCountColumn ? new GridLength(80) : new GridLength(0);
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(RunCountColumnWidth), nameof(RunCountColumnVisibility))]
+    private bool showRunCountColumn;
 
-    public static Visibility RunCountColumnVisibility
-        => ResultRowViewModel.ShowRunCountColumn ? Visibility.Visible : Visibility.Collapsed;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ThumbnailColumnWidth), nameof(ThumbnailColumnVisibility), nameof(ThumbnailRenderSize),
+        nameof(IsThumbOff), nameof(IsThumbSmall), nameof(IsThumbMedium), nameof(IsThumbLarge), nameof(IsThumbXL))]
+    private int thumbnailSizePx;
 
-    // Thumbnail gutter — driven by the persisted ThumbnailSize. OneTime XAML
-    // bindings read this once on row instantiation so per-row Image elements
-    // don't allocate space when thumbnails are Off.
-    public static int ThumbnailSizePx { get; set; }   // set from AppBootstrap
+    // Radio-button-style flags bound by each Thumbnails menu item's IsChecked.
+    public bool IsThumbOff    => ThumbnailSizePx == 0;
+    public bool IsThumbSmall  => ThumbnailSizePx == 32;
+    public bool IsThumbMedium => ThumbnailSizePx == 64;
+    public bool IsThumbLarge  => ThumbnailSizePx == 128;
+    public bool IsThumbXL     => ThumbnailSizePx == 256;
 
-    public static GridLength ThumbnailColumnWidth
-        => ThumbnailSizePx > 0 ? new GridLength(ThumbnailSizePx + 16) : new GridLength(0);
+    // ── XAML-bound derived properties ────────────────────────────────────
 
-    public static Visibility ThumbnailColumnVisibility
-        => ThumbnailSizePx > 0 ? Visibility.Visible : Visibility.Collapsed;
+    public GridLength CreatedColumnWidth  => ShowCreatedColumn  ? new GridLength(140) : new GridLength(0);
+    public GridLength AccessedColumnWidth => ShowAccessedColumn ? new GridLength(140) : new GridLength(0);
+    public GridLength RunCountColumnWidth => ShowRunCountColumn ? new GridLength(80)  : new GridLength(0);
+    public GridLength ThumbnailColumnWidth => ThumbnailSizePx > 0 ? new GridLength(ThumbnailSizePx + 16) : new GridLength(0);
 
-    public static double ThumbnailRenderSize => ThumbnailSizePx > 0 ? ThumbnailSizePx : 0d;
+    public Visibility CreatedColumnVisibility  => ShowCreatedColumn  ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility AccessedColumnVisibility => ShowAccessedColumn ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility RunCountColumnVisibility => ShowRunCountColumn ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility ThumbnailColumnVisibility => ThumbnailSizePx > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    public double ThumbnailRenderSize => ThumbnailSizePx > 0 ? ThumbnailSizePx : 0d;
 }

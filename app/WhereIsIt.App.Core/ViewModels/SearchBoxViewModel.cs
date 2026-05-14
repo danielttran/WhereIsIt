@@ -20,7 +20,22 @@ public partial class SearchBoxViewModel : ObservableObject
     [ObservableProperty] private bool matchPath;
 
     // The currently-selected quick filter (Everything / Audio / Video / ...).
-    [ObservableProperty] private string activeFilter = QueryComposer.AllFilter;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsAllFilter), nameof(IsAudioFilter), nameof(IsVideoFilter),
+        nameof(IsDocFilter), nameof(IsPicFilter), nameof(IsExeFilter), nameof(IsZipFilter),
+        nameof(IsCodeFilter), nameof(IsFolderFilter))]
+    private string activeFilter = QueryComposer.AllFilter;
+
+    // Radio-button-style flags bound by each quick-filter menu item's IsChecked.
+    public bool IsAllFilter    => ActiveFilter == "all:";
+    public bool IsAudioFilter  => ActiveFilter == "audio:";
+    public bool IsVideoFilter  => ActiveFilter == "video:";
+    public bool IsDocFilter    => ActiveFilter == "doc:";
+    public bool IsPicFilter    => ActiveFilter == "pic:";
+    public bool IsExeFilter    => ActiveFilter == "exe:";
+    public bool IsZipFilter    => ActiveFilter == "zip:";
+    public bool IsCodeFilter   => ActiveFilter == "code:";
+    public bool IsFolderFilter => ActiveFilter == "folder:";
 
     // Engine-facing composed query. Recomputed automatically whenever any of
     // the inputs above changes. External callers (bookmarks, tab restore,

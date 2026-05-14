@@ -19,13 +19,12 @@
             </Style>
         </Grid.Resources>
 
-        <!-- Menu bar (Everything-style: File / Edit / Search / Bookmarks / View / Tools / Help) -->
+        <!-- Flat MenuBar: every item is one click away — no nested submenus.
+             Sections are marked by disabled section-header items + separators. -->
         <MenuBar Grid.Row="0">
             <MenuBarItem Title="File">
-                <MenuFlyoutSubItem Text="Export results to…">
-                    <MenuFlyoutItem Text="CSV…" Click="OnExportCsvClick"/>
-                    <MenuFlyoutItem Text="TSV…" Click="OnExportTsvClick"/>
-                </MenuFlyoutSubItem>
+                <MenuFlyoutItem Text="Export to CSV…" Click="OnExportCsvClick"/>
+                <MenuFlyoutItem Text="Export to TSV…" Click="OnExportTsvClick"/>
                 <MenuFlyoutSeparator/>
                 <MenuFlyoutItem Text="Exit" Click="OnExitClick">
                     <MenuFlyoutItem.KeyboardAccelerators>
@@ -54,7 +53,8 @@
                 </MenuFlyoutItem>
             </MenuBarItem>
 
-            <MenuBarItem Title="Search" Loaded="OnSearchMenuLoaded">
+            <MenuBarItem Title="Search">
+                <MenuFlyoutItem Text="Modifiers" IsEnabled="False" FontWeight="SemiBold"/>
                 <ToggleMenuFlyoutItem Text="Match case"
                     IsChecked="{x:Bind ViewModel.SearchBox.MatchCase, Mode=TwoWay}"/>
                 <ToggleMenuFlyoutItem Text="Regex"
@@ -64,17 +64,37 @@
                 <ToggleMenuFlyoutItem Text="Match path"
                     IsChecked="{x:Bind ViewModel.SearchBox.MatchPath, Mode=TwoWay}"/>
                 <MenuFlyoutSeparator/>
-                <MenuFlyoutSubItem x:Name="QuickFilterMenu" Text="Quick filter">
-                    <ToggleMenuFlyoutItem Text="Everything"  Tag="all:"    Click="OnFilterClick"/>
-                    <ToggleMenuFlyoutItem Text="Audio"       Tag="audio:"  Click="OnFilterClick"/>
-                    <ToggleMenuFlyoutItem Text="Video"       Tag="video:"  Click="OnFilterClick"/>
-                    <ToggleMenuFlyoutItem Text="Document"    Tag="doc:"    Click="OnFilterClick"/>
-                    <ToggleMenuFlyoutItem Text="Picture"     Tag="pic:"    Click="OnFilterClick"/>
-                    <ToggleMenuFlyoutItem Text="Executable"  Tag="exe:"    Click="OnFilterClick"/>
-                    <ToggleMenuFlyoutItem Text="Compressed"  Tag="zip:"    Click="OnFilterClick"/>
-                    <ToggleMenuFlyoutItem Text="Code"        Tag="code:"   Click="OnFilterClick"/>
-                    <ToggleMenuFlyoutItem Text="Folder"      Tag="folder:" Click="OnFilterClick"/>
-                </MenuFlyoutSubItem>
+                <MenuFlyoutItem Text="Filter" IsEnabled="False" FontWeight="SemiBold"/>
+                <ToggleMenuFlyoutItem Text="Everything" Tag="all:"    Click="OnFilterClick"
+                    IsChecked="{x:Bind ViewModel.SearchBox.IsAllFilter,    Mode=OneWay}"/>
+                <ToggleMenuFlyoutItem Text="Audio"      Tag="audio:"  Click="OnFilterClick"
+                    IsChecked="{x:Bind ViewModel.SearchBox.IsAudioFilter,  Mode=OneWay}"/>
+                <ToggleMenuFlyoutItem Text="Video"      Tag="video:"  Click="OnFilterClick"
+                    IsChecked="{x:Bind ViewModel.SearchBox.IsVideoFilter,  Mode=OneWay}"/>
+                <ToggleMenuFlyoutItem Text="Document"   Tag="doc:"    Click="OnFilterClick"
+                    IsChecked="{x:Bind ViewModel.SearchBox.IsDocFilter,    Mode=OneWay}"/>
+                <ToggleMenuFlyoutItem Text="Picture"    Tag="pic:"    Click="OnFilterClick"
+                    IsChecked="{x:Bind ViewModel.SearchBox.IsPicFilter,    Mode=OneWay}"/>
+                <ToggleMenuFlyoutItem Text="Executable" Tag="exe:"    Click="OnFilterClick"
+                    IsChecked="{x:Bind ViewModel.SearchBox.IsExeFilter,    Mode=OneWay}"/>
+                <ToggleMenuFlyoutItem Text="Compressed" Tag="zip:"    Click="OnFilterClick"
+                    IsChecked="{x:Bind ViewModel.SearchBox.IsZipFilter,    Mode=OneWay}"/>
+                <ToggleMenuFlyoutItem Text="Code"       Tag="code:"   Click="OnFilterClick"
+                    IsChecked="{x:Bind ViewModel.SearchBox.IsCodeFilter,   Mode=OneWay}"/>
+                <ToggleMenuFlyoutItem Text="Folder"     Tag="folder:" Click="OnFilterClick"
+                    IsChecked="{x:Bind ViewModel.SearchBox.IsFolderFilter, Mode=OneWay}"/>
+                <MenuFlyoutSeparator/>
+                <MenuFlyoutItem Text="Tabs" IsEnabled="False" FontWeight="SemiBold"/>
+                <MenuFlyoutItem Text="New tab" Click="OnNewTabClick">
+                    <MenuFlyoutItem.KeyboardAccelerators>
+                        <KeyboardAccelerator Modifiers="Control" Key="T"/>
+                    </MenuFlyoutItem.KeyboardAccelerators>
+                </MenuFlyoutItem>
+                <MenuFlyoutItem Text="Close tab" Click="OnCloseTabClick">
+                    <MenuFlyoutItem.KeyboardAccelerators>
+                        <KeyboardAccelerator Modifiers="Control" Key="W"/>
+                    </MenuFlyoutItem.KeyboardAccelerators>
+                </MenuFlyoutItem>
                 <MenuFlyoutSeparator/>
                 <MenuFlyoutItem Text="Focus search box" Click="OnFocusSearchClick">
                     <MenuFlyoutItem.KeyboardAccelerators>
@@ -86,17 +106,6 @@
                         <KeyboardAccelerator Key="Escape"/>
                     </MenuFlyoutItem.KeyboardAccelerators>
                 </MenuFlyoutItem>
-                <MenuFlyoutSeparator/>
-                <MenuFlyoutItem Text="New tab" Click="OnNewTabClick">
-                    <MenuFlyoutItem.KeyboardAccelerators>
-                        <KeyboardAccelerator Modifiers="Control" Key="T"/>
-                    </MenuFlyoutItem.KeyboardAccelerators>
-                </MenuFlyoutItem>
-                <MenuFlyoutItem Text="Close tab" Click="OnCloseTabClick">
-                    <MenuFlyoutItem.KeyboardAccelerators>
-                        <KeyboardAccelerator Modifiers="Control" Key="W"/>
-                    </MenuFlyoutItem.KeyboardAccelerators>
-                </MenuFlyoutItem>
             </MenuBarItem>
 
             <MenuBarItem x:Name="BookmarksMenu" Title="Bookmarks">
@@ -105,19 +114,29 @@
                 <!-- Dynamic bookmarks are inserted here at runtime. -->
             </MenuBarItem>
 
-            <MenuBarItem Title="View" Loaded="OnViewMenuLoaded">
-                <MenuFlyoutSubItem Text="Columns">
-                    <ToggleMenuFlyoutItem x:Name="ColCreatedItem"  Text="Created"  Click="OnColumnToggleClick"/>
-                    <ToggleMenuFlyoutItem x:Name="ColAccessedItem" Text="Accessed" Click="OnColumnToggleClick"/>
-                    <ToggleMenuFlyoutItem x:Name="ColRunsItem"     Text="Runs"     Click="OnColumnToggleClick"/>
-                </MenuFlyoutSubItem>
-                <MenuFlyoutSubItem x:Name="ThumbnailsMenu" Text="Thumbnails">
-                    <ToggleMenuFlyoutItem Text="Off"          Tag="0"   Click="OnThumbnailSizeClick"/>
-                    <ToggleMenuFlyoutItem Text="Small"        Tag="32"  Click="OnThumbnailSizeClick"/>
-                    <ToggleMenuFlyoutItem Text="Medium"       Tag="64"  Click="OnThumbnailSizeClick"/>
-                    <ToggleMenuFlyoutItem Text="Large"        Tag="128" Click="OnThumbnailSizeClick"/>
-                    <ToggleMenuFlyoutItem Text="Extra Large"  Tag="256" Click="OnThumbnailSizeClick"/>
-                </MenuFlyoutSubItem>
+            <MenuBarItem Title="View">
+                <MenuFlyoutItem Text="Columns" IsEnabled="False" FontWeight="SemiBold"/>
+                <ToggleMenuFlyoutItem Text="Created"
+                    IsChecked="{x:Bind app:ColumnSettings.Current.ShowCreatedColumn,  Mode=TwoWay}"
+                    Click="OnColumnToggleClick"/>
+                <ToggleMenuFlyoutItem Text="Accessed"
+                    IsChecked="{x:Bind app:ColumnSettings.Current.ShowAccessedColumn, Mode=TwoWay}"
+                    Click="OnColumnToggleClick"/>
+                <ToggleMenuFlyoutItem Text="Runs"
+                    IsChecked="{x:Bind app:ColumnSettings.Current.ShowRunCountColumn, Mode=TwoWay}"
+                    Click="OnColumnToggleClick"/>
+                <MenuFlyoutSeparator/>
+                <MenuFlyoutItem Text="Thumbnails" IsEnabled="False" FontWeight="SemiBold"/>
+                <ToggleMenuFlyoutItem Text="Off"         Tag="0"   Click="OnThumbnailSizeClick"
+                    IsChecked="{x:Bind app:ColumnSettings.Current.IsThumbOff,    Mode=OneWay}"/>
+                <ToggleMenuFlyoutItem Text="Small"       Tag="32"  Click="OnThumbnailSizeClick"
+                    IsChecked="{x:Bind app:ColumnSettings.Current.IsThumbSmall,  Mode=OneWay}"/>
+                <ToggleMenuFlyoutItem Text="Medium"      Tag="64"  Click="OnThumbnailSizeClick"
+                    IsChecked="{x:Bind app:ColumnSettings.Current.IsThumbMedium, Mode=OneWay}"/>
+                <ToggleMenuFlyoutItem Text="Large"      Tag="128" Click="OnThumbnailSizeClick"
+                    IsChecked="{x:Bind app:ColumnSettings.Current.IsThumbLarge,  Mode=OneWay}"/>
+                <ToggleMenuFlyoutItem Text="Extra Large" Tag="256" Click="OnThumbnailSizeClick"
+                    IsChecked="{x:Bind app:ColumnSettings.Current.IsThumbXL,     Mode=OneWay}"/>
             </MenuBarItem>
 
             <MenuBarItem Title="Tools">
@@ -161,14 +180,14 @@
                   BorderThickness="0,0,0,1">
                 <Grid.ColumnDefinitions>
                     <!-- Column 0: thumbnail gutter; collapses to zero when thumbnails are Off -->
-                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.ThumbnailColumnWidth, Mode=OneTime}"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.ThumbnailColumnWidth, Mode=OneWay}"/>
                     <ColumnDefinition Width="2*"/>
                     <ColumnDefinition Width="3*"/>
                     <ColumnDefinition Width="120"/>
                     <ColumnDefinition Width="160"/>
-                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.CreatedColumnWidth,  Mode=OneTime}"/>
-                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.AccessedColumnWidth, Mode=OneTime}"/>
-                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.RunCountColumnWidth, Mode=OneTime}"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.CreatedColumnWidth, Mode=OneWay}"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AccessedColumnWidth, Mode=OneWay}"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.RunCountColumnWidth, Mode=OneWay}"/>
                     <ColumnDefinition Width="80"/>
                 </Grid.ColumnDefinitions>
                 <Button Grid.Column="1" Style="{StaticResource ColumnHeaderButton}"
@@ -203,13 +222,13 @@
                 </Button>
                 <Button Grid.Column="5" Style="{StaticResource ColumnHeaderButton}"
                         Content="Created"
-                        Visibility="{x:Bind app:ColumnSettings.CreatedColumnVisibility,  Mode=OneTime}"/>
+                        Visibility="{x:Bind app:ColumnSettings.Current.CreatedColumnVisibility, Mode=OneWay}"/>
                 <Button Grid.Column="6" Style="{StaticResource ColumnHeaderButton}"
                         Content="Accessed"
-                        Visibility="{x:Bind app:ColumnSettings.AccessedColumnVisibility, Mode=OneTime}"/>
+                        Visibility="{x:Bind app:ColumnSettings.Current.AccessedColumnVisibility, Mode=OneWay}"/>
                 <Button Grid.Column="7" Style="{StaticResource ColumnHeaderButton}"
                         Content="Runs"
-                        Visibility="{x:Bind app:ColumnSettings.RunCountColumnVisibility, Mode=OneTime}"/>
+                        Visibility="{x:Bind app:ColumnSettings.Current.RunCountColumnVisibility, Mode=OneWay}"/>
                 <Button Grid.Column="8" Style="{StaticResource ColumnHeaderButton}"
                         Width="80"
                         Content="Attr"/>
@@ -268,23 +287,23 @@
                     <DataTemplate x:DataType="vm:ResultRowViewModel">
                         <Grid Padding="8,2">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.ThumbnailColumnWidth, Mode=OneTime}"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.ThumbnailColumnWidth, Mode=OneWay}"/>
                                 <ColumnDefinition Width="2*"/>
                                 <ColumnDefinition Width="3*"/>
                                 <ColumnDefinition Width="120"/>
                                 <ColumnDefinition Width="160"/>
-                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.CreatedColumnWidth,  Mode=OneTime}"/>
-                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.AccessedColumnWidth, Mode=OneTime}"/>
-                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.RunCountColumnWidth, Mode=OneTime}"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.CreatedColumnWidth, Mode=OneWay}"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AccessedColumnWidth, Mode=OneWay}"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.RunCountColumnWidth, Mode=OneWay}"/>
                                 <ColumnDefinition Width="80"/>
                             </Grid.ColumnDefinitions>
                             <Image Grid.Column="0"
                                    Source="{x:Bind app:Converters.AsImageSource(ThumbnailSource), Mode=OneWay}"
-                                   Width="{x:Bind app:ColumnSettings.ThumbnailRenderSize, Mode=OneTime}"
-                                   Height="{x:Bind app:ColumnSettings.ThumbnailRenderSize, Mode=OneTime}"
+                                   Width="{x:Bind app:ColumnSettings.Current.ThumbnailRenderSize, Mode=OneWay}"
+                                   Height="{x:Bind app:ColumnSettings.Current.ThumbnailRenderSize, Mode=OneWay}"
                                    Stretch="Uniform"
                                    Margin="0,0,8,0"
-                                   Visibility="{x:Bind app:ColumnSettings.ThumbnailColumnVisibility, Mode=OneTime}"/>
+                                   Visibility="{x:Bind app:ColumnSettings.Current.ThumbnailColumnVisibility, Mode=OneWay}"/>
                             <TextBlock Grid.Column="1" Text="{x:Bind Name, Mode=OneWay}" TextTrimming="CharacterEllipsis"/>
                             <TextBlock Grid.Column="2" Text="{x:Bind ParentPath, Mode=OneWay}"
                                        Opacity="0.7" TextTrimming="CharacterEllipsis"/>
