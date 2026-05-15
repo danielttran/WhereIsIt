@@ -130,6 +130,9 @@ public sealed class HttpSearchServer : IDisposable
                                 parentPath  = row.ParentPath,
                                 size        = row.SizeBytes,
                                 modifiedUtc = row.ModifiedUtc.UtcDateTime.ToString("O"),
+                                createdUtc  = row.CreatedUtc  == default ? null : row.CreatedUtc.UtcDateTime.ToString("O"),
+                                accessedUtc = row.AccessedUtc == default ? null : row.AccessedUtc.UtcDateTime.ToString("O"),
+                                attributes  = row.Attributes,
                             });
                         }
                         catch { }
@@ -163,9 +166,12 @@ public sealed class HttpSearchServer : IDisposable
 
     private sealed class ResultEntry
     {
-        public string name        { get; set; } = "";
-        public string parentPath  { get; set; } = "";
-        public ulong  size        { get; set; }
-        public string modifiedUtc { get; set; } = "";
+        public string  name        { get; set; } = "";
+        public string  parentPath  { get; set; } = "";
+        public ulong   size        { get; set; }
+        public string  modifiedUtc { get; set; } = "";
+        public string? createdUtc  { get; set; }
+        public string? accessedUtc { get; set; }
+        public string  attributes  { get; set; } = "";
     }
 }

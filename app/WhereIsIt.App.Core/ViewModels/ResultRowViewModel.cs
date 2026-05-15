@@ -84,13 +84,17 @@ public partial class ResultRowViewModel : ObservableObject
     public static string FormatOptionalDate(DateTimeOffset d)
         => d == default ? "—" : d.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
 
+    // Hoisted out of FormatBytes so the array isn't re-allocated per call.
+    // FormatBytes is called for every row (DisplayCap = 2000) — the original
+    // collection-expression-in-method-body allocated a fresh string[] each time.
+    private static readonly string[] SizeUnits = ["B", "KB", "MB", "GB", "TB"];
+
     public static string FormatBytes(ulong bytes)
     {
         if (bytes < 1024) return $"{bytes} B";
         double value = bytes;
-        string[] units = ["B", "KB", "MB", "GB", "TB"];
         var idx = 0;
-        while (value >= 1024 && idx < units.Length - 1) { value /= 1024; idx++; }
-        return $"{value:0.##} {units[idx]}";
+        while (value >= 1024 && idx < SizeUnits.Length - 1) { value /= 1024; idx++; }
+        return $"{value:0.##} {SizeUnits[idx]}";
     }
 }
