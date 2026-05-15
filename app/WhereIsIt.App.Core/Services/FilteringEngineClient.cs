@@ -46,6 +46,15 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
     private CompiledQuery currentCompiled = new();
     private long currentSeq;
 
+    // A regex that never matches anything. Used as the compiled slot when a
+    // regex/wildcard pattern fails to compile, so an invalid pattern yields
+    // "no match" — exactly the original behaviour — rather than silently
+    // falling back to a literal-substring search.
+    // \b\B can never both hold at one position, so this matches nothing.
+    // (Both tokens are well-formed, so the pattern itself always compiles.)
+    private static readonly Regex NeverMatch =
+        new(@"\b\B", RegexOptions.CultureInvariant);
+
     public FilteringEngineClient(IEngineClient inner)
     {
         this.inner = inner;
@@ -130,7 +139,10 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
                             else if (alt.Contains('*') || alt.Contains('?'))
                                 rx = new Regex("^" + Regex.Escape(alt).Replace(@"\*", ".*").Replace(@"\?", ".") + "$", opts);
                         }
-                        catch (ArgumentException) { rx = null; }
+                        // A failed compile here means a regex/wildcard WAS
+                        // intended (the substring case never enters a Regex
+                        // ctor) — fall back to never-match, not substring.
+                        catch (ArgumentException) { rx = NeverMatch; }
                         arr[idx++] = rx;
                     }
                 }

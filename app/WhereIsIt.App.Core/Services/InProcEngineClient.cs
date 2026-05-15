@@ -12,6 +12,13 @@ namespace WhereIsIt.App.Services;
 
 public sealed class InProcEngineClient : IEngineClient, IDisposable
 {
+    // Never-matching regex used when a regex/wildcard pattern fails to
+    // compile, so an invalid pattern yields no results (original behaviour)
+    // instead of degrading to a literal-substring search.
+    // \b\B can never both hold at one position, so this matches nothing.
+    private static readonly Regex NeverMatch =
+        new(@"\b\B", RegexOptions.CultureInvariant);
+
     private readonly Func<IReadOnlyList<string>> rootProvider;
     private readonly Subject<string> statusChanges = new();
     private readonly Subject<int> metricsChanges = new();
@@ -296,7 +303,9 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
                     else if (alt.Contains('*') || alt.Contains('?'))
                         rx = new Regex("^" + Regex.Escape(alt).Replace(@"\*", ".*").Replace(@"\?", ".") + "$", opts);
                 }
-                catch (ArgumentException) { rx = null; }
+                // Failed compile ⇒ a regex/wildcard was intended; never-match
+                // rather than fall through to substring.
+                catch (ArgumentException) { rx = NeverMatch; }
                 arr[idx++] = rx;
             }
         }
@@ -358,10 +367,21 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         // the OrderBy(...).Reverse() pattern which materializes the entire
         // sequence twice and allocates a second array.
         int dir = descending ? -1 : 1;
+        // Array.Sort is not stable, so size/modified ties get a deterministic
+        // name tiebreaker — otherwise equal-key rows reshuffle on every
+        // re-sort, which looks like a UI glitch.
         Comparison<FileSystemInfo> cmp = key switch
         {
-            "size" => (a, b) => dir * Compare(GetSize(a), GetSize(b)),
-            "modified" => (a, b) => dir * GetModified(a).CompareTo(GetModified(b)),
+            "size" => (a, b) =>
+            {
+                int c = dir * Compare(GetSize(a), GetSize(b));
+                return c != 0 ? c : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+            },
+            "modified" => (a, b) =>
+            {
+                int c = dir * GetModified(a).CompareTo(GetModified(b));
+                return c != 0 ? c : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+            },
             "path" => (a, b) => dir * string.Compare(a.FullName, b.FullName, StringComparison.OrdinalIgnoreCase),
             _ => (a, b) => dir * string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase),
         };
