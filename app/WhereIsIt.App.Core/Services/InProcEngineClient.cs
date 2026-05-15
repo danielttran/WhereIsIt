@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -13,6 +12,13 @@ namespace WhereIsIt.App.Services;
 
 public sealed class InProcEngineClient : IEngineClient, IDisposable
 {
+    // Never-matching regex used when a regex/wildcard pattern fails to
+    // compile, so an invalid pattern yields no results (original behaviour)
+    // instead of degrading to a literal-substring search.
+    // \b\B can never both hold at one position, so this matches nothing.
+    private static readonly Regex NeverMatch =
+        new(@"\b\B", RegexOptions.CultureInvariant);
+
     private readonly Func<IReadOnlyList<string>> rootProvider;
     private readonly Subject<string> statusChanges = new();
     private readonly Subject<int> metricsChanges = new();
@@ -104,13 +110,24 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
     {
         if (parsed.IsEmpty) return [];
 
-        var bag = new ConcurrentBag<FileSystemInfo>();
+        // Pre-compute path-scope predicates once so the per-entry loop avoids
+        // repeated ToLowerInvariant and TrimEnd allocations.
+        string? childPrefixLower = parsed.ChildOfPath is null ? null
+            : TrimTrailingSeparators(parsed.ChildOfPath).ToLowerInvariant() + Path.DirectorySeparatorChar;
+        string? parentLower = parsed.ParentIsPath is null ? null
+            : TrimTrailingSeparators(parsed.ParentIsPath).ToLowerInvariant();
+        // Pre-compile clause regexes once — without this, every file with a
+        // wildcard or regex query pays a Regex compile+JIT per row.
+        var clauseRegexes = BuildClauseRegexes(parsed);
+
+        var results = new List<FileSystemInfo>(256);
         var opts = new EnumerationOptions
         {
             RecurseSubdirectories = true,
             IgnoreInaccessible = true,
             MatchCasing = MatchCasing.CaseInsensitive,
             AttributesToSkip = 0,
+            // ReturnSpecialDirectories defaults to false, which is what we want.
         };
 
         foreach (var root in roots)
@@ -120,44 +137,48 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
 
             try
             {
-                foreach (var path in Directory.EnumerateFileSystemEntries(root, "*", opts))
+                var rootInfo = new DirectoryInfo(root);
+                // EnumerateFileSystemInfos returns FileSystemInfo objects with
+                // attributes already cached from the directory entry — no
+                // separate File.GetAttributes / Directory.Exists stat per item
+                // like the old EnumerateFileSystemEntries path required.
+                foreach (var info in rootInfo.EnumerateFileSystemInfos("*", opts))
                 {
                     if (cancellationToken.IsCancellationRequested) break;
-                    if (!Matches(path, parsed, root)) continue;
-                    bag.Add(Directory.Exists(path)
-                        ? (FileSystemInfo)new DirectoryInfo(path)
-                        : new FileInfo(path));
+                    if (!Matches(info, parsed, root, childPrefixLower, parentLower, clauseRegexes)) continue;
+                    results.Add(info);
                 }
             }
             catch (Exception) { }
         }
 
-        return [.. bag];
+        return results.ToArray();
     }
 
-    private static bool Matches(string fullPath, ParsedQuery q, string root)
+    private static bool Matches(FileSystemInfo info, ParsedQuery q, string root, string? childPrefixLower, string? parentLower, Regex?[]? clauseRegexes)
     {
         FileAttributes attr;
-        try { attr = File.GetAttributes(fullPath); }
+        try { attr = info.Attributes; }
         catch { return false; }
-        bool isDir = attr.HasFlag(FileAttributes.Directory);
+        bool isDir = (attr & FileAttributes.Directory) != 0;
 
         if (q.FileOnly && isDir) return false;
         if (q.FolderOnly && !isDir) return false;
 
         if (q.Attribute is not null && !q.Attribute.Matches(attr)) return false;
 
-        var name = Path.GetFileName(fullPath);
+        var name = info.Name;
+        var fullPath = info.FullName;
 
         if (q.ExtWhitelist is { Length: > 0 })
         {
             if (isDir) return false;
-            var ext = Path.GetExtension(name);
+            var ext = Path.GetExtension(name.AsSpan());
             if (ext.Length > 0 && ext[0] == '.') ext = ext[1..];
             bool extMatch = false;
             foreach (var allowed in q.ExtWhitelist)
             {
-                if (string.Equals(ext, allowed, StringComparison.OrdinalIgnoreCase))
+                if (ext.Equals(allowed.AsSpan(), StringComparison.OrdinalIgnoreCase))
                 {
                     extMatch = true;
                     break;
@@ -170,31 +191,37 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         {
             if (isDir) return false;
             ulong size;
-            try { size = (ulong)new FileInfo(fullPath).Length; }
+            try { size = info is FileInfo fi ? (ulong)fi.Length : 0; }
             catch { return false; }
             if (!q.Size.Matches(size)) return false;
         }
 
-        if (q.ChildOfPath is not null)
+        if (childPrefixLower is not null)
         {
-            var prefix = NormalisePathPrefix(q.ChildOfPath);
-            var lowerFull = fullPath.ToLowerInvariant();
-            if (!lowerFull.StartsWith(prefix)) return false;
+            if (!fullPath.StartsWith(childPrefixLower, StringComparison.OrdinalIgnoreCase))
+                return false;
         }
-        if (q.ParentIsPath is not null)
+        if (parentLower is not null)
         {
-            var target = TrimTrailingSeparators(q.ParentIsPath).ToLowerInvariant();
-            var parent = (Path.GetDirectoryName(fullPath) ?? "").ToLowerInvariant();
-            if (TrimTrailingSeparators(parent) != target) return false;
+            var parent = Path.GetDirectoryName(fullPath.AsSpan());
+            // Trim trailing separators on the span — no allocation.
+            int end = parent.Length;
+            while (end > 0 && (parent[end - 1] == Path.DirectorySeparatorChar
+                            || parent[end - 1] == Path.AltDirectorySeparatorChar))
+                end--;
+            if (!parent[..end].Equals(parentLower.AsSpan(), StringComparison.OrdinalIgnoreCase))
+                return false;
         }
 
         if (q.Modified is not null || q.Created is not null || q.Accessed is not null)
         {
             try
             {
-                if (q.Modified is not null && !q.Modified.Matches(File.GetLastWriteTime(fullPath))) return false;
-                if (q.Created  is not null && !q.Created.Matches(File.GetCreationTime(fullPath))) return false;
-                if (q.Accessed is not null && !q.Accessed.Matches(File.GetLastAccessTime(fullPath))) return false;
+                // FileSystemInfo carries the timestamps cached from the entry —
+                // no extra stat call per attribute the way separate File.* did.
+                if (q.Modified is not null && !q.Modified.Matches(info.LastWriteTime)) return false;
+                if (q.Created  is not null && !q.Created.Matches(info.CreationTime)) return false;
+                if (q.Accessed is not null && !q.Accessed.Matches(info.LastAccessTime)) return false;
             }
             catch { return false; }
         }
@@ -202,19 +229,30 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         if (q.Clauses.Count == 0) return true;
 
         var cmp = q.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+        // Build the relative path only when a clause needs it (i.e. we have
+        // any clauses). For a typical extension-only or size-only query the
+        // clauses list is empty so we short-circuited above without paying for
+        // GetRelativePath/Replace allocations.
         var relative = Path.GetRelativePath(root, fullPath).Replace('\\', '/');
 
+        int rxIdx = 0;
         foreach (var clause in q.Clauses)
         {
             bool clauseHit = false;
-            foreach (var alt in clause.Alternatives)
+            int altCount = clause.Alternatives.Count;
+            int start = rxIdx;
+            for (int a = 0; a < altCount; a++)
             {
-                if (AlternativeMatches(alt, q, name, relative, cmp))
+                var alt = clause.Alternatives[a];
+                var rx = clauseRegexes is not null && (start + a) < clauseRegexes.Length
+                    ? clauseRegexes[start + a] : null;
+                if (AlternativeMatches(alt, rx, q, name, relative, cmp))
                 {
                     clauseHit = true;
                     break;
                 }
             }
+            rxIdx += altCount;
             if (clause.Negated)
             {
                 if (clauseHit) return false;
@@ -228,21 +266,56 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         return true;
     }
 
-    private static bool AlternativeMatches(string alt, ParsedQuery q, string name, string relative, StringComparison cmp)
+    private static Regex?[]? BuildClauseRegexes(ParsedQuery parsed)
     {
-        if (q.RegexMode)
-        {
-            try
-            {
-                var opts = (q.CaseSensitive ? RegexOptions.None : RegexOptions.IgnoreCase) | RegexOptions.CultureInvariant;
-                return Regex.IsMatch(name, alt, opts) || Regex.IsMatch(relative, alt, opts);
-            }
-            catch (ArgumentException) { return false; }
-        }
+        if (parsed.Clauses.Count == 0) return null;
 
-        if (alt.Contains('*') || alt.Contains('?'))
+        bool anyNeedsRegex = parsed.RegexMode;
+        if (!anyNeedsRegex)
         {
-            var rx = WildcardToRegex(alt, q.CaseSensitive);
+            foreach (var clause in parsed.Clauses)
+            {
+                foreach (var alt in clause.Alternatives)
+                {
+                    if (alt.Contains('*') || alt.Contains('?')) { anyNeedsRegex = true; break; }
+                }
+                if (anyNeedsRegex) break;
+            }
+        }
+        if (!anyNeedsRegex) return null;
+
+        int total = 0;
+        foreach (var clause in parsed.Clauses) total += clause.Alternatives.Count;
+        var arr = new Regex?[total];
+        int idx = 0;
+        var opts = (parsed.CaseSensitive ? RegexOptions.None : RegexOptions.IgnoreCase)
+                 | RegexOptions.CultureInvariant
+                 | RegexOptions.Compiled;
+        foreach (var clause in parsed.Clauses)
+        {
+            foreach (var alt in clause.Alternatives)
+            {
+                Regex? rx = null;
+                try
+                {
+                    if (parsed.RegexMode)
+                        rx = new Regex(alt, opts);
+                    else if (alt.Contains('*') || alt.Contains('?'))
+                        rx = new Regex("^" + Regex.Escape(alt).Replace(@"\*", ".*").Replace(@"\?", ".") + "$", opts);
+                }
+                // Failed compile ⇒ a regex/wildcard was intended; never-match
+                // rather than fall through to substring.
+                catch (ArgumentException) { rx = NeverMatch; }
+                arr[idx++] = rx;
+            }
+        }
+        return arr;
+    }
+
+    private static bool AlternativeMatches(string alt, Regex? rx, ParsedQuery q, string name, string relative, StringComparison cmp)
+    {
+        if (rx is not null)
+        {
             return rx.IsMatch(name) || rx.IsMatch(relative);
         }
 
@@ -267,23 +340,8 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         return false;
     }
 
-    private static string NormalisePathPrefix(string path)
-    {
-        var p = TrimTrailingSeparators(path).ToLowerInvariant();
-        return p + Path.DirectorySeparatorChar;
-    }
-
     private static string TrimTrailingSeparators(string path)
         => path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-
-    private static Regex WildcardToRegex(string wildcard, bool caseSensitive)
-    {
-        var pattern = "^" + Regex.Escape(wildcard)
-            .Replace(@"\*", ".*")
-            .Replace(@"\?", ".") + "$";
-        var opts = caseSensitive ? RegexOptions.None : RegexOptions.IgnoreCase;
-        return new Regex(pattern, opts | RegexOptions.CultureInvariant | RegexOptions.Compiled);
-    }
 
     private static IReadOnlyList<string> GetDefaultRoots()
     {
@@ -305,15 +363,35 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
 
     private static FileSystemInfo[] SortResults(FileSystemInfo[] items, string key, bool descending)
     {
-        IEnumerable<FileSystemInfo> sorted = key switch
+        // In-place sort with an inverted comparison for descending — avoids
+        // the OrderBy(...).Reverse() pattern which materializes the entire
+        // sequence twice and allocates a second array.
+        int dir = descending ? -1 : 1;
+        // Array.Sort is not stable, so size/modified ties get a deterministic
+        // name tiebreaker — otherwise equal-key rows reshuffle on every
+        // re-sort, which looks like a UI glitch.
+        Comparison<FileSystemInfo> cmp = key switch
         {
-            "size" => items.OrderBy(f => f is FileInfo fi ? (long)fi.Length : 0L),
-            "modified" => items.OrderBy(f => { try { return f.LastWriteTimeUtc; } catch { return DateTime.MinValue; } }),
-            _ => items.OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase),
+            "size" => (a, b) =>
+            {
+                int c = dir * Compare(GetSize(a), GetSize(b));
+                return c != 0 ? c : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+            },
+            "modified" => (a, b) =>
+            {
+                int c = dir * GetModified(a).CompareTo(GetModified(b));
+                return c != 0 ? c : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+            },
+            "path" => (a, b) => dir * string.Compare(a.FullName, b.FullName, StringComparison.OrdinalIgnoreCase),
+            _ => (a, b) => dir * string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase),
         };
-        if (descending) sorted = sorted.Reverse();
-        return sorted.ToArray();
+        Array.Sort(items, cmp);
+        return items;
     }
+
+    private static long GetSize(FileSystemInfo f) => f is FileInfo fi ? (long)fi.Length : 0L;
+    private static DateTime GetModified(FileSystemInfo f) { try { return f.LastWriteTimeUtc; } catch { return DateTime.MinValue; } }
+    private static int Compare(long a, long b) => a < b ? -1 : (a > b ? 1 : 0);
 
     private static string GetAttributeString(FileAttributes attr)
     {
