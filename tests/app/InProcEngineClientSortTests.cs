@@ -100,4 +100,28 @@ public class InProcEngineClientSortTests
         }
         finally { root.Delete(recursive: true); }
     }
+
+
+    [Fact]
+    public async Task Sort_BySize_DoesNotThrow_WhenFileDisappears()
+    {
+        var root = Directory.CreateTempSubdirectory("whereisit-sort-");
+        try
+        {
+            var gone = Path.Combine(root.FullName, "gone.bin");
+            var stay = Path.Combine(root.FullName, "stay.bin");
+            await File.WriteAllTextAsync(gone, "1234567890");
+            await File.WriteAllTextAsync(stay, "1");
+
+            using var client = new InProcEngineClient(() => new[] { root.FullName });
+            await client.SearchAsync("*", CancellationToken.None);
+
+            File.Delete(gone);
+
+            var act = async () => await client.SortAsync("size", descending: false, CancellationToken.None);
+            await act.Should().NotThrowAsync();
+        }
+        finally { root.Delete(recursive: true); }
+    }
+
 }
