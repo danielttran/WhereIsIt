@@ -85,6 +85,12 @@ void IndexingEngine::CloseAllDriveHandles() {
 }
 
 void IndexingEngine::Stop() {
+    // Idempotent: engine_stop() and ~IndexingEngine() both call Stop(). Running
+    // the body twice would re-spawn the saver and re-evaluate the clean-stop
+    // flag after a thread was already detached. exchange() lets exactly the
+    // first caller through.
+    if (m_stopGuard.exchange(true)) return;
+
     // Signal stop FIRST so MonitorChanges drains and releases m_dataMutex
     // before the saver thread tries to take it as a shared_lock. Otherwise
     // SaveIndex's 5s budget is spent waiting on a busy MonitorChanges instead
@@ -93,12 +99,18 @@ void IndexingEngine::Stop() {
     if (m_stopEvent) SetEvent(m_stopEvent);
     m_searchEvent.notify_all();
 
-    // Use a safety timeout for thread joins to prevent the process from hanging in the background.
-    auto joinWithTimeout = [](std::thread& t, DWORD timeoutMs) {
+    // Use a safety timeout for thread joins to prevent the process from
+    // hanging in the background (e.g. Stop() arriving mid initial full-disk
+    // scan, which is not cancellable). A timed-out thread is detached and
+    // keeps running on this object's memory — anyDetached records that so the
+    // owner knows it must NOT free this instance.
+    bool anyDetached = false;
+    auto joinWithTimeout = [&anyDetached](std::thread& t, DWORD timeoutMs) {
         if (t.joinable()) {
             HANDLE h = t.native_handle();
             if (WaitForSingleObject(h, timeoutMs) == WAIT_TIMEOUT) {
                 t.detach();
+                anyDetached = true;
             } else {
                 t.join();
             }
@@ -119,6 +131,8 @@ void IndexingEngine::Stop() {
 
     if (m_stopEvent) { CloseHandle(m_stopEvent); m_stopEvent = NULL; }
     CloseAllDriveHandles();
+
+    m_cleanStop.store(!anyDetached, std::memory_order_release);
 }
 
 std::shared_ptr<std::vector<uint32_t>> IndexingEngine::GetSearchResults() {
@@ -1259,6 +1273,14 @@ void IndexingEngine::SearchThread() {
                         if (sa < sb) primary = -1; else if (sa > sb) primary = 1;
                     } else if (sortKey == QuerySortKey::Date) {
                         if (ra.LastModifiedEpoch < rb.LastModifiedEpoch) primary = -1; else if (ra.LastModifiedEpoch > rb.LastModifiedEpoch) primary = 1;
+                    } else if (sortKey == QuerySortKey::Extension) {
+                        const char* na = m_pool.GetString(ra.NamePoolOffset);
+                        const char* nb = m_pool.GetString(rb.NamePoolOffset);
+                        const char* ea = strrchr(na, '.');
+                        const char* eb = strrchr(nb, '.');
+                        primary = FastCompareIgnoreCase(ea ? ea + 1 : "", eb ? eb + 1 : "");
+                    } else if (sortKey == QuerySortKey::Attributes) {
+                        if (ra.FileAttributes < rb.FileAttributes) primary = -1; else if (ra.FileAttributes > rb.FileAttributes) primary = 1;
                     }
 
                     if (primary == 0) {
