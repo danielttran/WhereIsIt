@@ -23,11 +23,7 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
     private readonly Subject<string> statusChanges = new();
     private readonly Subject<int> metricsChanges = new();
     private readonly Subject<IReadOnlyList<uint>> results = new();
-    private readonly object stateGate = new();
-
-    private FileSystemInfo[] currentResults = [];
-    private string sortKey = "name";
-    private bool sortDescending;
+    private volatile SearchState state = new(Array.Empty<FileSystemInfo>(), "name", false);
     private int searchGeneration;
 
     public InProcEngineClient()
@@ -52,22 +48,14 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         var found = await Task.Run(
             () => ScanFileSystem(parsed, rootProvider(), cancellationToken),
             cancellationToken);
-        string key;
-        bool descending;
-        lock (stateGate)
-        {
-            // A newer search has already started; drop stale completion so we
-            // never overwrite fresh results with an older scan.
-            if (generation != searchGeneration) return;
-            key = sortKey;
-            descending = sortDescending;
-        }
-        var sorted = SortResults(found, key, descending);
-        lock (stateGate)
-        {
-            if (generation != searchGeneration) return;
-            currentResults = sorted;
-        }
+
+        // A newer search already started; drop stale completion so we never
+        // overwrite fresh results with older scan output.
+        if (generation != Volatile.Read(ref searchGeneration)) return;
+
+        var snapshot = Volatile.Read(ref state);
+        var sorted = SortResults(found, snapshot.SortKey, snapshot.SortDescending);
+        Volatile.Write(ref state, snapshot with { Results = sorted });
         var ids = Enumerable.Range(0, sorted.Length).Select(i => (uint)i).ToList();
         metricsChanges.OnNext(ids.Count);
         results.OnNext(ids);
@@ -76,14 +64,10 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
 
     public Task SortAsync(string key, bool descending, CancellationToken cancellationToken)
     {
-        FileSystemInfo[] sorted;
-        lock (stateGate)
-        {
-            sortKey = key;
-            sortDescending = descending;
-            sorted = SortResults(currentResults, key, descending);
-            currentResults = sorted;
-        }
+        var snapshot = Volatile.Read(ref state);
+        var working = snapshot.Results.ToArray();
+        var sorted = SortResults(working, key, descending);
+        Volatile.Write(ref state, new SearchState(sorted, key, descending));
         var ids = Enumerable.Range(0, sorted.Length).Select(i => (uint)i).ToList();
         results.OnNext(ids);
         return Task.CompletedTask;
@@ -91,8 +75,7 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
 
     public Task<ResultRowModel> GetRowAsync(uint id, CancellationToken cancellationToken)
     {
-        FileSystemInfo[] snapshot;
-        lock (stateGate) snapshot = currentResults;
+        var snapshot = Volatile.Read(ref state).Results;
         if (id >= snapshot.Length)
             return Task.FromResult(new ResultRowModel("?", "?", 0, DateTimeOffset.UtcNow, ""));
 
@@ -461,4 +444,6 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         metricsChanges.Dispose();
         results.Dispose();
     }
+
+    private sealed record SearchState(FileSystemInfo[] Results, string SortKey, bool SortDescending);
 }
