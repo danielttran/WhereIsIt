@@ -23,10 +23,8 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
     private readonly Subject<string> statusChanges = new();
     private readonly Subject<int> metricsChanges = new();
     private readonly Subject<IReadOnlyList<uint>> results = new();
-
-    private FileSystemInfo[] currentResults = [];
-    private string sortKey = "name";
-    private bool sortDescending;
+    private volatile SearchState state = new(Array.Empty<FileSystemInfo>(), "name", false);
+    private int searchGeneration;
 
     public InProcEngineClient()
         : this(GetDefaultRoots)
@@ -44,13 +42,21 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
 
     public async Task SearchAsync(string query, CancellationToken cancellationToken)
     {
+        int generation = Interlocked.Increment(ref searchGeneration);
         statusChanges.OnNext("searching");
         var parsed = QueryParser.Parse(query);
         var found = await Task.Run(
             () => ScanFileSystem(parsed, rootProvider(), cancellationToken),
             cancellationToken);
-        currentResults = SortResults(found, sortKey, sortDescending);
-        var ids = Enumerable.Range(0, currentResults.Length).Select(i => (uint)i).ToList();
+
+        // A newer search already started; drop stale completion so we never
+        // overwrite fresh results with older scan output.
+        if (generation != Volatile.Read(ref searchGeneration)) return;
+
+        var snapshot = Volatile.Read(ref state);
+        var sorted = SortResults(found, snapshot.SortKey, snapshot.SortDescending);
+        Volatile.Write(ref state, snapshot with { Results = sorted });
+        var ids = Enumerable.Range(0, sorted.Length).Select(i => (uint)i).ToList();
         metricsChanges.OnNext(ids.Count);
         results.OnNext(ids);
         statusChanges.OnNext($"Found {ids.Count} results");
@@ -58,20 +64,22 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
 
     public Task SortAsync(string key, bool descending, CancellationToken cancellationToken)
     {
-        sortKey = key;
-        sortDescending = descending;
-        currentResults = SortResults(currentResults, key, descending);
-        var ids = Enumerable.Range(0, currentResults.Length).Select(i => (uint)i).ToList();
+        var snapshot = Volatile.Read(ref state);
+        var working = snapshot.Results.ToArray();
+        var sorted = SortResults(working, key, descending);
+        Volatile.Write(ref state, new SearchState(sorted, key, descending));
+        var ids = Enumerable.Range(0, sorted.Length).Select(i => (uint)i).ToList();
         results.OnNext(ids);
         return Task.CompletedTask;
     }
 
     public Task<ResultRowModel> GetRowAsync(uint id, CancellationToken cancellationToken)
     {
-        if (id >= currentResults.Length)
+        var snapshot = Volatile.Read(ref state).Results;
+        if (id >= snapshot.Length)
             return Task.FromResult(new ResultRowModel("?", "?", 0, DateTimeOffset.UtcNow, ""));
 
-        var fsi = currentResults[id];
+        var fsi = snapshot[id];
         DateTimeOffset modified  = fsi.Exists ? new(fsi.LastWriteTimeUtc,  TimeSpan.Zero) : DateTimeOffset.UtcNow;
         DateTimeOffset created   = SafeTime(() => fsi.CreationTimeUtc);
         DateTimeOffset accessed  = SafeTime(() => fsi.LastAccessTimeUtc);
@@ -404,7 +412,12 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         return items;
     }
 
-    private static long GetSize(FileSystemInfo f) => f is FileInfo fi ? (long)fi.Length : 0L;
+    private static long GetSize(FileSystemInfo f)
+    {
+        if (f is not FileInfo fi) return 0L;
+        try { return fi.Length; }
+        catch { return 0L; }
+    }
     private static DateTime GetModified(FileSystemInfo f) { try { return f.LastWriteTimeUtc; } catch { return DateTime.MinValue; } }
     private static DateTime GetTime(FileSystemInfo f, Func<FileSystemInfo, DateTime> get)
     { try { return get(f); } catch { return DateTime.MinValue; } }
@@ -431,4 +444,6 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         metricsChanges.Dispose();
         results.Dispose();
     }
+
+    private sealed record SearchState(FileSystemInfo[] Results, string SortKey, bool SortDescending);
 }
