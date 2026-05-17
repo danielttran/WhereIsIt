@@ -125,12 +125,17 @@ public sealed class NativeEngineClient : IEngineClient, IDisposable
     public Task SortAsync(string key, bool descending, CancellationToken cancellationToken)
     {
         if (_handle == IntPtr.Zero) return Task.CompletedTask;
+        // created/accessed are not in the native 32-byte FileRecord, so they
+        // fall through to Name (0) on the native engine; the InProc fallback
+        // sorts them correctly.
         int sortKey = key switch
         {
-            "path"     => 1,
-            "size"     => 2,
-            "modified" => 3,
-            _          => 0,
+            "path"                      => 1,
+            "size"                      => 2,
+            "modified"                  => 3,
+            "extension" or "type" or "ext" => 4,
+            "attributes" or "attrib"    => 5,
+            _                           => 0,
         };
         Native.engine_sort(_handle, sortKey, descending ? 1 : 0);
         return Task.CompletedTask;

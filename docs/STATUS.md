@@ -75,9 +75,19 @@ The original P-1…P4 plan is done:
 | **P3** perf gates (BenchmarkDotNet, footprint) | Deferred |
 | **P4** delete `src/legacy/` | Done 2026-05-13 — folder removed entirely |
 
+Closed 2026-05-17 (Everything-parity bridge):
+
+- ✅ Query funcs: `startwith:`/`endwith:`, `wfn:`/`wholefilename:`, `root:`, `empty:`, `len:`, `count:`, and the dupe family (`sizedupe:`/`namepartdupe:`/`attribdupe:` alongside the existing name+size `dupe:`). Parsed in `QueryParser`, post-filtered in `FilteringEngineClient`. `bool Dupe` is now a back-compat shim over the new `DupeKind DupeMode`.
+- ✅ Sort parity: added created / accessed / extension(type) / attributes. In-proc engine sorts all of them; native engine gained `Extension`/`Attributes` (appended to `QuerySortKey` so the `engine_sort` ints stay stable).
+- ✅ EFU (Everything File List) import/export in `ResultExporter` (`ToEfu`/`WriteEfu`/`ParseEfu`/`ReadEfu`) — FILETIME ticks + numeric attribute mask, round-trips with voidtools.
+- ✅ Shutdown use-after-free fix: `IndexingEngine::Stop()` is now idempotent and records whether any worker had to be detached (timeout during the non-cancellable initial full-disk scan). `engine_destroy` refuses to free the `EngineState` when a worker is still live, converting a use-after-free into a one-shot leak at process exit.
+
 Remaining Everything-parity gaps:
 
+- **Native created/accessed sort** — the 32-byte `FileRecord` has no created/accessed field; native sort on those keys falls back to name. The in-proc fallback sorts them correctly. Closing this needs an index-schema bump.
 - **ETP / FTP server** — proprietary Everything protocol. Skipped; HTTP server covers the cross-device search use case.
+- **Everything IPC/SDK & `es.exe` CLI** — third-party-tool integration surface; not started.
+- **UI tier** — system tray / run-on-startup, match-term highlighting, file-ops context menu (delete/rename/properties). Not started.
 
 Closed this session:
 

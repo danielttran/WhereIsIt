@@ -382,6 +382,21 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
                 int c = dir * GetModified(a).CompareTo(GetModified(b));
                 return c != 0 ? c : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
             },
+            "created" => (a, b) =>
+            {
+                int c = dir * GetTime(a, static f => f.CreationTimeUtc).CompareTo(GetTime(b, static f => f.CreationTimeUtc));
+                return c != 0 ? c : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+            },
+            "accessed" => (a, b) =>
+            {
+                int c = dir * GetTime(a, static f => f.LastAccessTimeUtc).CompareTo(GetTime(b, static f => f.LastAccessTimeUtc));
+                return c != 0 ? c : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+            },
+            "extension" or "type" or "ext" => (a, b) =>
+            {
+                int c = dir * string.Compare(Ext(a), Ext(b), StringComparison.OrdinalIgnoreCase);
+                return c != 0 ? c : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+            },
             "path" => (a, b) => dir * string.Compare(a.FullName, b.FullName, StringComparison.OrdinalIgnoreCase),
             _ => (a, b) => dir * string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase),
         };
@@ -391,6 +406,10 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
 
     private static long GetSize(FileSystemInfo f) => f is FileInfo fi ? (long)fi.Length : 0L;
     private static DateTime GetModified(FileSystemInfo f) { try { return f.LastWriteTimeUtc; } catch { return DateTime.MinValue; } }
+    private static DateTime GetTime(FileSystemInfo f, Func<FileSystemInfo, DateTime> get)
+    { try { return get(f); } catch { return DateTime.MinValue; } }
+    private static string Ext(FileSystemInfo f)
+        => f is FileInfo ? Path.GetExtension(f.Name) : string.Empty;
     private static int Compare(long a, long b) => a < b ? -1 : (a > b ? 1 : 0);
 
     private static string GetAttributeString(FileAttributes attr)

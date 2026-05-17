@@ -7,7 +7,8 @@ enum class DriveFileSystem {
     Generic
 };
 
-enum class QuerySortKey { Name, Path, Size, Date };
+// Appended values keep the existing ints stable for the engine_sort C-ABI.
+enum class QuerySortKey { Name, Path, Size, Date, Extension, Attributes };
 
 constexpr uint32_t kInvalidIndex   = 0xFFFFFFFFu;
 // Sentinel stored in FileRecord::FileSize when the file/dir is >=4 GB.

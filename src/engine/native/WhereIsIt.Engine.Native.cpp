@@ -73,7 +73,25 @@ EngineHandle engine_create() {
 }
 
 void engine_destroy(EngineHandle h) {
-    delete static_cast<EngineState*>(h);
+    if (!h) return;
+    auto* s = static_cast<EngineState*>(h);
+
+    // Ensure the engine is stopped (idempotent) so WasCleanStop() is decided
+    // before we consider freeing. engine_stop() normally already did this.
+    s->engine.Stop();
+
+    if (s->engine.WasCleanStop()) {
+        delete s;
+    } else {
+        // A worker (typically the initial, non-cancellable full-disk scan)
+        // could not be joined within the shutdown budget and was detached.
+        // It is still executing on this object's memory; deleting now would
+        // be a use-after-free. The process is terminating anyway, so leak
+        // the EngineState intentionally and let the OS reclaim it.
+        OutputDebugStringW(
+            L"[WhereIsIt] engine_destroy: worker still running; "
+            L"leaking EngineState to avoid use-after-free.\n");
+    }
 }
 
 void engine_start(EngineHandle h) {
@@ -112,6 +130,8 @@ void engine_sort(EngineHandle h, int sortKey, int descending) {
         case 1:  key = QuerySortKey::Path; break;
         case 2:  key = QuerySortKey::Size; break;
         case 3:  key = QuerySortKey::Date; break;
+        case 4:  key = QuerySortKey::Extension; break;
+        case 5:  key = QuerySortKey::Attributes; break;
         default: key = QuerySortKey::Name; break;
     }
     static_cast<EngineState*>(h)->engine.Sort(key, descending != 0);

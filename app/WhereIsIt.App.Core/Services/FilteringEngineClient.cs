@@ -40,6 +40,9 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
         // One slot per (clause, alternative) flattened. Null slot means
         // "match as a substring" rather than via a compiled Regex.
         public Regex?[]? ClauseRegexes;
+        // Compiled, anchored wildcard regexes for wfn:/wholefilename: — one per
+        // listed pattern, all of which must match the whole filename.
+        public Regex[]? WholeFilenameRegexes;
         public bool NeedsFullPath;         // true when any predicate needs the joined path
     }
 
@@ -100,7 +103,26 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             || parsed.Accessed is not null
             || parsed.ChildOfPath is not null
             || parsed.ContentSearch is not null
+            || parsed.EmptyOnly
             || parsed.MatchPath;
+
+        if (parsed.WholeFilename is { Length: > 0 })
+        {
+            var opts = (parsed.CaseSensitive ? RegexOptions.None : RegexOptions.IgnoreCase)
+                     | RegexOptions.CultureInvariant | RegexOptions.Compiled;
+            var rxs = new Regex[parsed.WholeFilename.Length];
+            for (int i = 0; i < rxs.Length; i++)
+            {
+                try
+                {
+                    rxs[i] = new Regex(
+                        "^" + Regex.Escape(parsed.WholeFilename[i])
+                            .Replace(@"\*", ".*").Replace(@"\?", ".") + "$", opts);
+                }
+                catch (ArgumentException) { rxs[i] = NeverMatch; }
+            }
+            c.WholeFilenameRegexes = rxs;
+        }
 
         // Pre-compile regexes for each clause/alternative when needed. Done once
         // per parse instead of per row, and per-alternative instead of per row*alt.
@@ -177,12 +199,13 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             return;
         }
 
-        var kept = new List<uint>(Math.Min(ids.Count, DisplayCap));
-        // Dupe needs to inspect every kept row even after DisplayCap, so the
-        // bucketing list is separate. NameKey is the case-insensitive dedup key
-        // — we pass an OrdinalIgnoreCase dictionary later instead of forcing
-        // ToLowerInvariant on every row name here.
-        List<(uint Id, string Name, ulong Size)>? bucketing = parsed.Dupe ? new() : null;
+        // count: caps the visible rows; never exceed the safety DisplayCap.
+        int cap = parsed.MaxResults is int m ? Math.Min(DisplayCap, m) : DisplayCap;
+
+        var kept = new List<uint>(Math.Min(ids.Count, cap));
+        // Dupe needs to inspect every kept row even after the cap, so the
+        // bucketing list is separate. Key is the per-mode dedup string.
+        List<(uint Id, string Key)>? bucketing = parsed.Dupe ? new() : null;
         int scanLimit = Math.Min(ids.Count, MaxScan);
         for (int i = 0; i < scanLimit; i++)
         {
@@ -193,26 +216,22 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
                 var row = await inner.GetRowAsync(ids[i], default);
                 if (!Passes(row, compiled)) continue;
                 kept.Add(ids[i]);
-                bucketing?.Add((ids[i], row.Name, row.SizeBytes));
+                bucketing?.Add((ids[i], DupeKeyFor(parsed.DupeMode, row)));
             }
             catch { /* skip unreadable */ }
-            if (!parsed.Dupe && kept.Count >= DisplayCap) break;
+            if (!parsed.Dupe && kept.Count >= cap) break;
         }
 
         if (parsed.Dupe && bucketing is not null)
         {
-            var buckets = new Dictionary<(string Name, ulong Size), int>(
-                bucketing.Count, NameSizeComparer.Instance);
+            var buckets = new Dictionary<string, int>(bucketing.Count, StringComparer.Ordinal);
             foreach (var entry in bucketing)
-            {
-                var key = (entry.Name, entry.Size);
-                buckets[key] = buckets.TryGetValue(key, out var n) ? n + 1 : 1;
-            }
+                buckets[entry.Key] = buckets.TryGetValue(entry.Key, out var n) ? n + 1 : 1;
             kept = new List<uint>(bucketing.Count);
             foreach (var entry in bucketing)
             {
-                if (buckets[(entry.Name, entry.Size)] >= 2) kept.Add(entry.Id);
-                if (kept.Count >= DisplayCap) break;
+                if (buckets[entry.Key] >= 2) kept.Add(entry.Id);
+                if (kept.Count >= cap) break;
             }
         }
 
@@ -221,14 +240,16 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             filteredResults.OnNext(kept);
     }
 
-    private sealed class NameSizeComparer : IEqualityComparer<(string Name, ulong Size)>
+    /// <summary>Builds the duplicate-grouping key for a row under the active
+    /// <see cref="DupeKind"/>. Name-based keys are upper-cased so grouping is
+    /// case-insensitive (matching Everything).</summary>
+    private static string DupeKeyFor(DupeKind mode, ResultRowModel row) => mode switch
     {
-        public static readonly NameSizeComparer Instance = new();
-        public bool Equals((string Name, ulong Size) a, (string Name, ulong Size) b)
-            => a.Size == b.Size && string.Equals(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
-        public int GetHashCode((string Name, ulong Size) k)
-            => HashCode.Combine(StringComparer.OrdinalIgnoreCase.GetHashCode(k.Name), k.Size);
-    }
+        DupeKind.Size     => row.SizeBytes.ToString(),
+        DupeKind.NamePart => Path.GetFileNameWithoutExtension(row.Name).ToUpperInvariant(),
+        DupeKind.Attrib   => (row.Attributes ?? string.Empty).ToUpperInvariant(),
+        _                 => row.Name.ToUpperInvariant() + " " + row.SizeBytes,
+    };
 
     private static bool NeedsPostFiltering(ParsedQuery q)
     {
@@ -240,6 +261,10 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
         if (q.FileOnly || q.FolderOnly) return true;
         if (q.Dupe) return true;
         if (q.ContentSearch is not null) return true;
+        if (q.StartsWith is not null || q.EndsWith is not null
+            || q.WholeFilename is not null) return true;
+        if (q.RootOnly || q.EmptyOnly || q.NameLength is not null) return true;
+        if (q.MaxResults is not null) return true;
         // Any negated clause or |-alternatives need post-filtering because the
         // native engine treats those tokens as literal substrings.
         foreach (var c in q.Clauses)
@@ -258,6 +283,21 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
 
         if (q.FileOnly   &&  isDir) return false;
         if (q.FolderOnly && !isDir) return false;
+
+        // Name-only predicates (startwith:/endwith:/wfn:/len:) — cheap, no
+        // path build or stat, so test them before the heavier filters.
+        var nameCmp = q.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+        if (q.StartsWith is not null)
+            foreach (var p in q.StartsWith)
+                if (!row.Name.StartsWith(p, nameCmp)) return false;
+        if (q.EndsWith is not null)
+            foreach (var s in q.EndsWith)
+                if (!row.Name.EndsWith(s, nameCmp)) return false;
+        if (compiled.WholeFilenameRegexes is not null)
+            foreach (var rx in compiled.WholeFilenameRegexes)
+                if (!rx.IsMatch(row.Name)) return false;
+        if (q.NameLength is not null && !q.NameLength.Matches((ulong)row.Name.Length))
+            return false;
 
         if (q.ExtWhitelist is { Length: > 0 })
         {
@@ -331,6 +371,22 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             if (isDir) return false;
             if (row.SizeBytes > MaxContentSearchBytes) return false;
             if (!FileContains(fullPath, q.ContentSearch, q.CaseSensitive)) return false;
+        }
+
+        if (q.RootOnly && !IsRootParent(row.ParentPath)) return false;
+
+        if (q.EmptyOnly)
+        {
+            if (isDir)
+            {
+                try
+                {
+                    using var e = Directory.EnumerateFileSystemEntries(fullPath).GetEnumerator();
+                    if (e.MoveNext()) return false;
+                }
+                catch { return false; }
+            }
+            else if (row.SizeBytes != 0) return false;
         }
 
         if (q.Clauses.Count == 0) return true;
@@ -420,6 +476,23 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
 
     private static string TrimSep(string p)
         => p.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+    /// <summary>True when <paramref name="parent"/> is a volume root
+    /// (<c>C:\</c>) or a UNC share root (<c>\\server\share</c>).</summary>
+    private static bool IsRootParent(string? parent)
+    {
+        if (string.IsNullOrEmpty(parent)) return true;
+        var p = parent.AsSpan().TrimEnd('\\').TrimEnd('/');
+        if (p.Length == 2 && char.IsLetter(p[0]) && p[1] == ':') return true;
+        if (p.Length > 2 && (p[0] == '\\' || p[0] == '/') && (p[1] == '\\' || p[1] == '/'))
+        {
+            int sep = 0;
+            for (int i = 2; i < p.Length; i++)
+                if (p[i] == '\\' || p[i] == '/') sep++;
+            return sep == 1;
+        }
+        return false;
+    }
 
     private static bool FileContains(string path, string needle, bool caseSensitive)
     {

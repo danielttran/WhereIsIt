@@ -136,6 +136,13 @@ public:
 
     void SetDriveEnumeratorForTesting(std::unique_ptr<IDriveEnumerator> driveEnumerator);
 
+    // True only when Stop() joined every worker within the shutdown budget.
+    // When false, a worker was detached (still running on this object's
+    // memory) and the owner MUST NOT free this instance — see engine_destroy.
+    bool WasCleanStop() const noexcept {
+        return m_cleanStop.load(std::memory_order_acquire);
+    }
+
 private:
     struct PendingUsnDelta {
         enum class Kind { Upsert, Delete } Type = Kind::Upsert;
@@ -218,6 +225,8 @@ private:
     std::thread m_searchWorker;
     std::atomic<bool> m_running;
     std::atomic<bool> m_ready;
+    std::atomic<bool> m_stopGuard{ false };  // makes Stop() run its body exactly once
+    std::atomic<bool> m_cleanStop{ false };  // set true iff all workers joined (none detached)
     std::atomic<bool> m_indexDirty{ false };  // set on bad_alloc during USN processing; triggers full re-scan
     // Incremental SaveIndex throttle — flush to disk at most every 60 seconds
     // and only after at least N applied USN records, so per-keystroke drains
