@@ -53,9 +53,21 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         // overwrite fresh results with older scan output.
         if (generation != Volatile.Read(ref searchGeneration)) return;
 
-        var snapshot = Volatile.Read(ref state);
-        var sorted = SortResults(found, snapshot.SortKey, snapshot.SortDescending);
-        Volatile.Write(ref state, snapshot with { Results = sorted });
+        FileSystemInfo[]? sorted = null;
+        while (true)
+        {
+            // If another search started while we were preparing this state
+            // update, this completion is stale and must not publish.
+            if (generation != Volatile.Read(ref searchGeneration)) return;
+
+            var snapshot = Volatile.Read(ref state);
+            var working = found.ToArray();
+            sorted = SortResults(working, snapshot.SortKey, snapshot.SortDescending);
+            var next = snapshot with { Results = sorted };
+            var observed = Interlocked.CompareExchange(ref state, next, snapshot);
+            if (ReferenceEquals(observed, snapshot)) break;
+        }
+
         var ids = Enumerable.Range(0, sorted.Length).Select(i => (uint)i).ToList();
         metricsChanges.OnNext(ids.Count);
         results.OnNext(ids);
@@ -64,10 +76,17 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
 
     public Task SortAsync(string key, bool descending, CancellationToken cancellationToken)
     {
-        var snapshot = Volatile.Read(ref state);
-        var working = snapshot.Results.ToArray();
-        var sorted = SortResults(working, key, descending);
-        Volatile.Write(ref state, new SearchState(sorted, key, descending));
+        FileSystemInfo[] sorted;
+        while (true)
+        {
+            var snapshot = Volatile.Read(ref state);
+            var working = snapshot.Results.ToArray();
+            sorted = SortResults(working, key, descending);
+            var next = new SearchState(sorted, key, descending);
+            var observed = Interlocked.CompareExchange(ref state, next, snapshot);
+            if (ReferenceEquals(observed, snapshot)) break;
+        }
+
         var ids = Enumerable.Range(0, sorted.Length).Select(i => (uint)i).ToList();
         results.OnNext(ids);
         return Task.CompletedTask;
