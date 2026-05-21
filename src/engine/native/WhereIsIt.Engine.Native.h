@@ -68,6 +68,13 @@ ENGINE_API int engine_result_count(EngineHandle h);
    IDs are opaque handles passed back to engine_get_row. */
 ENGINE_API void engine_get_result_ids(EngineHandle h, uint32_t* buf, int count);
 
+/* Race-free alternative to engine_result_count + engine_get_result_ids: copies
+   up to 'capacity' IDs from the snapshot last observed by
+   engine_wait_results_changed and (optionally via outTotal) reports that
+   snapshot's full size, so the count and the copied IDs always agree.
+   Returns the number of IDs written. */
+ENGINE_API int engine_get_results(EngineHandle h, uint32_t* buf, int capacity, int* outTotal);
+
 /* Fetch display data for one record.
    Returns 0 on success, -1 if recordId is out of range.
    modifiedFileTime: Windows FILETIME ticks (100-ns intervals since 1601-01-01). */

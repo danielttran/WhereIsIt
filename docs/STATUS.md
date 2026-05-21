@@ -75,6 +75,12 @@ The original P-1…P4 plan is done:
 | **P3** perf gates (BenchmarkDotNet, footprint) | Deferred |
 | **P4** delete `src/legacy/` | Done 2026-05-13 — folder removed entirely |
 
+Closed 2026-05-21 (technical-debt audit):
+
+- ✅ Engine handle/mapping leak: `~IndexingEngine` now unmaps both shared-memory views (`m_recordsCount`, `m_driveLettersShared`) and closes the file mappings, data mutex, and data-changed event. Previously it closed only the data-changed event, leaking the rest on every clean engine teardown.
+- ✅ Result-delivery race: the C# watch loop sized its buffer from `engine_result_count` then filled it from `engine_get_result_ids` — two independent snapshots, so a search completing between the calls could publish stale/zero-filled IDs. New `engine_get_results` copies count + IDs from the single snapshot the last `engine_wait_results_changed` observed, and the loop publishes only the IDs actually written.
+- ✅ Watcher resilience: `NativeEngineClient.WatchLoop` wraps its iteration in try/catch so a faulting P/Invoke, throwing subscriber, or post-dispose `Subject` access exits the loop cleanly instead of faulting `_watchTask` with an unobserved exception.
+
 Closed 2026-05-17 (Everything-parity bridge):
 
 - ✅ Query funcs: `startwith:`/`endwith:`, `wfn:`/`wholefilename:`, `root:`, `empty:`, `len:`, `count:`, and the dupe family (`sizedupe:`/`namepartdupe:`/`attribdupe:` alongside the existing name+size `dupe:`). Parsed in `QueryParser`, post-filtered in `FilteringEngineClient`. `bool Dupe` is now a back-compat shim over the new `DupeKind DupeMode`.
