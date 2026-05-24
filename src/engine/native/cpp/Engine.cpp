@@ -129,8 +129,16 @@ void IndexingEngine::Stop() {
     joinWithTimeout(m_mainWorker, 5000);
     joinWithTimeout(m_searchWorker, 5000);
 
-    if (m_stopEvent) { CloseHandle(m_stopEvent); m_stopEvent = NULL; }
-    CloseAllDriveHandles();
+    // Only tear down handles when every worker was actually joined. If a worker
+    // was detached (timeout during the non-cancellable initial scan) it may
+    // still be inside ReadFile on a drive handle or WaitForMultipleObjects on
+    // m_stopEvent; closing those out from under it is a use-after-free that
+    // can read recycled handles. engine_destroy already leaks the whole
+    // EngineState in that case, so leaking these handles too is the safe choice.
+    if (!anyDetached) {
+        if (m_stopEvent) { CloseHandle(m_stopEvent); m_stopEvent = NULL; }
+        CloseAllDriveHandles();
+    }
 
     m_cleanStop.store(!anyDetached, std::memory_order_release);
 }
@@ -1527,6 +1535,12 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
 }
 
 void IndexingEngine::HandleUsnJournalRecord(USN_RECORD_V2* r, uint8_t di) {
+    // Drop records for an unknown drive index before any m_drives[di] /
+    // m_mftLookupTables[di] access below — mirrors the guard in
+    // ApplyPendingUsnDeltas. Without this, a di past the per-drive tables is an
+    // out-of-bounds vector read.
+    if (di >= m_mftLookupTables.size() || di >= m_drives.size()) return;
+
     uint32_t mftIdx = (uint32_t)(r->FileReferenceNumber & 0xFFFFFFFFFFFFLL);
     uint16_t seq = (uint16_t)(r->FileReferenceNumber >> 48);
     uint32_t pIdx = (uint32_t)(r->ParentFileReferenceNumber & 0xFFFFFFFFFFFFLL);
