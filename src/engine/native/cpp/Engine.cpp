@@ -63,7 +63,18 @@ IndexingEngine::IndexingEngine() : m_running(false), m_ready(false), m_pool(true
 
 IndexingEngine::~IndexingEngine() {
     Stop();
-    if (m_hDataChangedEvent) CloseHandle(m_hDataChangedEvent);
+    // Release every shared-memory mapping and named kernel object created in the
+    // constructor. The previous version only closed m_hDataChangedEvent, leaking
+    // the data mutex, both file mappings, and both mapped views on every engine
+    // teardown. ~IndexingEngine only runs on the clean-stop path (engine_destroy
+    // refuses to delete when a worker was detached), so no worker can still be
+    // touching these mappings here.
+    if (m_recordsCount)         { UnmapViewOfFile(const_cast<LONG*>(m_recordsCount)); m_recordsCount = nullptr; }
+    if (m_hRecordsCountMapping) { CloseHandle(m_hRecordsCountMapping); m_hRecordsCountMapping = NULL; }
+    if (m_driveLettersShared)   { UnmapViewOfFile(m_driveLettersShared); m_driveLettersShared = nullptr; }
+    if (m_hDrivesMapping)       { CloseHandle(m_hDrivesMapping); m_hDrivesMapping = NULL; }
+    if (m_hDataMutex)           { CloseHandle(m_hDataMutex); m_hDataMutex = NULL; }
+    if (m_hDataChangedEvent)    { CloseHandle(m_hDataChangedEvent); m_hDataChangedEvent = NULL; }
 }
 
 void IndexingEngine::Start() {

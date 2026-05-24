@@ -768,7 +768,9 @@ public class NativeEngineIntegrationTests
         const int iterations = 50;
 
         // Fire alternating searches without waiting for results — stresses the
-        // engine_wait_results_changed / engine_get_result_ids race window.
+        // result-snapshot delivery path (engine_wait_results_changed +
+        // engine_get_results), which must keep the reported count and the copied
+        // IDs coherent even as searches complete concurrently.
         for (int i = 0; i < iterations; i++)
         {
             await _fx.Client!.SearchAsync("alpha", CancellationToken.None);

@@ -53,6 +53,11 @@ public sealed class NativeEngineClient : IEngineClient, IDisposable
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern void engine_get_result_ids(IntPtr h, [Out] uint[] buf, int count);
 
+        // Race-free count + copy from the snapshot last seen by
+        // engine_wait_results_changed. Returns the number of IDs written.
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int engine_get_results(IntPtr h, [Out] uint[] buf, int capacity, out int total);
+
         // Returns 0 on success, -1 on not found
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
         public static extern int engine_get_row(IntPtr h, uint recordId,
@@ -190,39 +195,47 @@ public sealed class NativeEngineClient : IEngineClient, IDisposable
             var h = _handle;
             if (h == IntPtr.Zero) break;
 
-            int rc = Native.engine_wait_results_changed(h, 16, out int count);
-
-            if (rc == -1) break; // engine stopped
-
-            statusBuf.Clear();
-            string? currentStatus = null;
-            if (Native.engine_get_status(h, statusBuf, 1024) == 0 && statusBuf.Length > 0)
-                currentStatus = statusBuf.ToString();
-
-            if (rc == 0)
+            try
             {
-                if (currentStatus != null && currentStatus != lastStatus)
+                int rc = Native.engine_wait_results_changed(h, 16, out int count);
+                if (rc == -1) break; // engine stopped
+
+                statusBuf.Clear();
+                string? currentStatus = null;
+                if (Native.engine_get_status(h, statusBuf, 1024) == 0 && statusBuf.Length > 0)
+                    currentStatus = statusBuf.ToString();
+
+                // On a result change (rc != 0) always surface the status; on a
+                // bare timeout (rc == 0) only surface it when it actually changed.
+                if (currentStatus != null && (rc != 0 || currentStatus != lastStatus))
                 {
                     lastStatus = currentStatus;
                     _statusChanges.OnNext(currentStatus);
                 }
-                continue;
-            }
 
-            if (currentStatus != null)
+                if (rc == 0) continue;
+
+                // Atomic count + copy from the same snapshot the wait observed.
+                // 'count' (the snapshot size reported by the wait) sizes the
+                // buffer; engine_get_results returns how many IDs it actually
+                // wrote, so a snapshot that shrank between calls never leaves a
+                // zero-padded tail in the published list.
+                var ids = count > 0 ? new uint[count] : Array.Empty<uint>();
+                int idCount = ids.Length > 0
+                    ? Native.engine_get_results(h, ids, ids.Length, out _)
+                    : 0;
+
+                _metricsChanges.OnNext(idCount);
+                _results.OnNext(idCount == ids.Length ? ids : ids[..idCount]);
+            }
+            catch (Exception ex)
             {
-                lastStatus = currentStatus;
-                _statusChanges.OnNext(currentStatus);
+                // A faulting P/Invoke, a throwing subscriber, or a post-dispose
+                // Subject access must not leave _watchTask faulted with an
+                // unobserved exception. Exit the loop cleanly instead.
+                System.Diagnostics.Debug.WriteLine($"[WhereIsIt] WatchLoop terminating: {ex}");
+                break;
             }
-
-            int actualCount = Native.engine_result_count(h);
-            _metricsChanges.OnNext(actualCount);
-
-            var ids = new uint[actualCount];
-            if (actualCount > 0)
-                Native.engine_get_result_ids(h, ids, actualCount);
-
-            _results.OnNext(ids);
         }
     }
 
