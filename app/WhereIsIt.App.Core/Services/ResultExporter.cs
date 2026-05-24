@@ -181,6 +181,8 @@ public static class ResultExporter
         AppendRow(sb, sep, Headers);
         foreach (var r in rows)
         {
+            // guardFormulas: true — these CSV/TSV files are meant to be opened
+            // in spreadsheet apps, so neutralise formula-injection payloads.
             AppendRow(sb, sep,
             [
                 r.Name,
@@ -188,24 +190,36 @@ public static class ResultExporter
                 r.SizeBytes.ToString(CultureInfo.InvariantCulture),
                 r.ModifiedUtc.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
                 r.Attributes ?? string.Empty,
-            ]);
+            ], guardFormulas: true);
         }
         return sb.ToString();
     }
 
-    private static void AppendRow(StringBuilder sb, char sep, string[] fields)
+    private static void AppendRow(StringBuilder sb, char sep, string[] fields, bool guardFormulas = false)
     {
         for (int i = 0; i < fields.Length; i++)
         {
             if (i > 0) sb.Append(sep);
-            sb.Append(Escape(fields[i], sep));
+            sb.Append(Escape(fields[i], sep, guardFormulas));
         }
         sb.Append('\n');
     }
 
-    private static string Escape(string s, char sep)
+    // Characters that a spreadsheet (Excel / Sheets / LibreOffice) treats as the
+    // start of a formula when they lead a cell. A filename like "=cmd|'/c calc'!A1"
+    // would otherwise execute on open.
+    private static bool IsFormulaLead(char c)
+        => c is '=' or '+' or '-' or '@' or '\t' or '\r';
+
+    private static string Escape(string s, char sep, bool guardFormulas = false)
     {
         if (s is null) return string.Empty;
+        // Defuse CSV formula injection by prefixing an apostrophe so the cell is
+        // shown as literal text. Only for human-facing CSV/TSV — the EFU writer
+        // passes guardFormulas:false so column 0 (a full path) round-trips
+        // byte-for-byte with Everything.
+        if (guardFormulas && s.Length > 0 && IsFormulaLead(s[0]))
+            s = "'" + s;
         bool quote = s.Contains(sep) || s.Contains('"') || s.Contains('\n') || s.Contains('\r');
         if (!quote) return s;
         return "\"" + s.Replace("\"", "\"\"") + "\"";

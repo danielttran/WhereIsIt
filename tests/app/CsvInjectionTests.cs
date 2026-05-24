@@ -8,23 +8,18 @@ using Xunit;
 namespace WhereIsIt.App.Tests;
 
 /// <summary>
-/// AUDIT FOLLOW-UP — KNOWN-FAILING until fixed on Windows.
+/// Regression tests for CSV/TSV formula-injection neutralisation in
+/// <see cref="ResultExporter"/>. A result row whose Name begins with one of
+/// <c>= + - @</c> (or a leading TAB / CR) must NOT be written verbatim, or
+/// opening the exported CSV/TSV in Excel / LibreOffice would execute the cell as
+/// a formula (e.g. <c>=cmd|'/c calc'!A1</c>). <c>ResultExporter.Escape</c>
+/// prefixes such a cell with an apostrophe; the EFU writer is deliberately left
+/// alone so column 0 (a full path) round-trips byte-for-byte with Everything.
 ///
-/// CSV formula injection. A result row whose Name begins with one of
-/// <c>= + - @</c> (or a leading TAB / CR) is written verbatim by
-/// <see cref="ResultExporter"/> today, so opening the exported CSV/TSV in
-/// Excel or LibreOffice executes the cell as a formula
-/// (e.g. <c>=cmd|'/c calc'!A1</c>).
-///
-/// Intended fix: in <c>ResultExporter.Escape</c>, when a cell's first character
-/// is a formula trigger, neutralise it (the usual convention is to prefix a
-/// single apostrophe) WITHOUT dropping the original text. Do NOT change the EFU
-/// writer — its column 0 is a full path that must round-trip with Everything.
-///
-/// Each finding is checked from two angles: the dangerous leading character is
+/// Each case is checked from two angles: the dangerous leading character is
 /// neutralised (no exported field begins with it) AND the payload text survives.
-/// The assertions are deliberately neutralisation-scheme-agnostic: they only
-/// require that no data field starts with the trigger character.
+/// The assertions are neutralisation-scheme-agnostic: they only require that no
+/// data field starts with the trigger character.
 /// </summary>
 public class CsvInjectionTests
 {

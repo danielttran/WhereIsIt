@@ -6,21 +6,12 @@ using Xunit;
 namespace WhereIsIt.App.Tests;
 
 /// <summary>
-/// AUDIT FOLLOW-UP — KNOWN-FAILING until fixed on Windows.
-///
-/// <c>QueryParser.Tokenize</c> flips an in-quote flag on every <c>"</c> with no
-/// handling for an unterminated quote and no escape for a literal quote. A
-/// single stray <c>"</c> (a common typo, or a pasted quoted path) puts the
-/// tokenizer into quote mode for the rest of the string, swallowing every
-/// following modifier into one giant literal term — so <c>report" ext:cs</c>
-/// silently loses the <c>ext:</c> filter and searches for the literal phrase
-/// <c>report ext:cs</c> instead.
-///
-/// Intended fix: make a dangling quote deterministic so it cannot consume
-/// trailing modifier tokens (treat a lone quote as a literal character, or
-/// close it at the next whitespace, or support a "" escape — implementer's
-/// choice). These tests pin only the load-bearing property: a stray quote must
-/// not eat the rest of the query.
+/// Regression tests for stray-quote handling in <c>QueryParser.Tokenize</c>.
+/// A single unterminated <c>"</c> (a common typo or a pasted quoted path) must
+/// NOT put the tokenizer into quote mode for the rest of the string and swallow
+/// every following modifier into one literal term — so <c>report" ext:cs</c>
+/// still parses the <c>ext:</c> filter. A quote only groups when it has a
+/// matching close quote; balanced quoted phrases stay a single term.
 /// </summary>
 public class QueryTokenizeQuoteTests
 {

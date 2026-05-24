@@ -255,6 +255,22 @@ public static class QueryParser
             // ── modifier: match path ──────────────────────────────────────
             if (lower == "path:" || lower == "matchpath:" || lower == "matchpath:true") { matchPath = true; continue; }
             if (lower == "nopath:" || lower == "matchpath:false") { matchPath = false; continue; }
+            // path:VALUE / matchpath:VALUE — enable match-path AND search VALUE,
+            // mirroring case:/word:. Without this, "path:report" fell through to a
+            // literal substring search for the token "path:report".
+            if (lower.StartsWith("path:") && lower.Length > 5)
+            {
+                matchPath = true;
+                AddTerm(clauses, token[5..], false);
+                continue;
+            }
+            if (lower.StartsWith("matchpath:") && lower.Length > 10
+                && lower != "matchpath:true" && lower != "matchpath:false")
+            {
+                matchPath = true;
+                AddTerm(clauses, token[10..], false);
+                continue;
+            }
 
             // ── type: file / folder ───────────────────────────────────────
             if (lower == "file:" || lower == "files:") { fileOnly = true; continue; }
@@ -547,17 +563,31 @@ public static class QueryParser
     {
         var tokens = new List<string>();
         var current = new StringBuilder();
-        bool inQuote = false;
 
-        foreach (char c in query)
+        int i = 0;
+        while (i < query.Length)
         {
-            if (c == '"') { inQuote = !inQuote; continue; }
-            if (!inQuote && c == ' ')
+            char c = query[i];
+            if (c == '"')
+            {
+                // A quote only groups when it has a matching close quote. A lone,
+                // unterminated quote is skipped so it cannot swallow the rest of
+                // the query (and any following modifier tokens) into one literal
+                // term — e.g. `report" ext:cs` must still parse the ext: filter.
+                int close = query.IndexOf('"', i + 1);
+                if (close < 0) { i++; continue; }
+                current.Append(query, i + 1, close - (i + 1));  // spaces preserved
+                i = close + 1;
+                continue;
+            }
+            if (c == ' ')
             {
                 if (current.Length > 0) { tokens.Add(current.ToString()); current.Clear(); }
+                i++;
                 continue;
             }
             current.Append(c);
+            i++;
         }
         if (current.Length > 0) tokens.Add(current.ToString());
         return tokens;
