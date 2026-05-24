@@ -19,6 +19,10 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
     private static readonly Regex NeverMatch =
         new(@"\b\B", RegexOptions.CultureInvariant);
 
+    // Bound every user-supplied regex/wildcard match so a catastrophic-
+    // backtracking pattern can't wedge the background scan thread.
+    private static readonly TimeSpan RegexTimeout = TimeSpan.FromSeconds(1);
+
     private readonly Func<IReadOnlyList<string>> rootProvider;
     private readonly Subject<string> statusChanges = new();
     private readonly Subject<int> metricsChanges = new();
@@ -315,9 +319,10 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         foreach (var clause in parsed.Clauses) total += clause.Alternatives.Count;
         var arr = new Regex?[total];
         int idx = 0;
+        // No RegexOptions.Compiled: rebuilt per search, so the JIT cost of
+        // compiling outweighs the per-match saving on a throwaway pattern.
         var opts = (parsed.CaseSensitive ? RegexOptions.None : RegexOptions.IgnoreCase)
-                 | RegexOptions.CultureInvariant
-                 | RegexOptions.Compiled;
+                 | RegexOptions.CultureInvariant;
         foreach (var clause in parsed.Clauses)
         {
             foreach (var alt in clause.Alternatives)
@@ -326,9 +331,9 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
                 try
                 {
                     if (parsed.RegexMode)
-                        rx = new Regex(alt, opts);
+                        rx = new Regex(alt, opts, RegexTimeout);
                     else if (alt.Contains('*') || alt.Contains('?'))
-                        rx = new Regex("^" + Regex.Escape(alt).Replace(@"\*", ".*").Replace(@"\?", ".") + "$", opts);
+                        rx = new Regex("^" + Regex.Escape(alt).Replace(@"\*", ".*").Replace(@"\?", ".") + "$", opts, RegexTimeout);
                 }
                 // Failed compile ⇒ a regex/wildcard was intended; never-match
                 // rather than fall through to substring.

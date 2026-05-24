@@ -58,6 +58,11 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
     private static readonly Regex NeverMatch =
         new(@"\b\B", RegexOptions.CultureInvariant);
 
+    // User-supplied regex/wildcard patterns can backtrack catastrophically
+    // (e.g. regex:(a+)+$). Cap every match so a pathological pattern can't
+    // wedge the result-watcher thread; a timeout abandons the current scan.
+    private static readonly TimeSpan RegexTimeout = TimeSpan.FromSeconds(1);
+
     public FilteringEngineClient(IEngineClient inner)
     {
         this.inner = inner;
@@ -108,8 +113,10 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
 
         if (parsed.WholeFilename is { Length: > 0 })
         {
+            // No RegexOptions.Compiled: these patterns are rebuilt on every
+            // keystroke, so JIT-compiling them each time costs more than it saves.
             var opts = (parsed.CaseSensitive ? RegexOptions.None : RegexOptions.IgnoreCase)
-                     | RegexOptions.CultureInvariant | RegexOptions.Compiled;
+                     | RegexOptions.CultureInvariant;
             var rxs = new Regex[parsed.WholeFilename.Length];
             for (int i = 0; i < rxs.Length; i++)
             {
@@ -117,7 +124,7 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
                 {
                     rxs[i] = new Regex(
                         "^" + Regex.Escape(parsed.WholeFilename[i])
-                            .Replace(@"\*", ".*").Replace(@"\?", ".") + "$", opts);
+                            .Replace(@"\*", ".*").Replace(@"\?", ".") + "$", opts, RegexTimeout);
                 }
                 catch (ArgumentException) { rxs[i] = NeverMatch; }
             }
@@ -147,8 +154,7 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
                 var arr = new Regex?[total];
                 int idx = 0;
                 var opts = (parsed.CaseSensitive ? RegexOptions.None : RegexOptions.IgnoreCase)
-                         | RegexOptions.CultureInvariant
-                         | RegexOptions.Compiled;
+                         | RegexOptions.CultureInvariant;
                 foreach (var clause in parsed.Clauses)
                 {
                     foreach (var alt in clause.Alternatives)
@@ -157,9 +163,9 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
                         try
                         {
                             if (parsed.RegexMode)
-                                rx = new Regex(alt, opts);
+                                rx = new Regex(alt, opts, RegexTimeout);
                             else if (alt.Contains('*') || alt.Contains('?'))
-                                rx = new Regex("^" + Regex.Escape(alt).Replace(@"\*", ".*").Replace(@"\?", ".") + "$", opts);
+                                rx = new Regex("^" + Regex.Escape(alt).Replace(@"\*", ".*").Replace(@"\?", ".") + "$", opts, RegexTimeout);
                         }
                         // A failed compile here means a regex/wildcard WAS
                         // intended (the substring case never enters a Regex
@@ -218,6 +224,10 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
                 kept.Add(ids[i]);
                 bucketing?.Add((ids[i], DupeKeyFor(parsed.DupeMode, row)));
             }
+            // A catastrophic-backtracking regex/wildcard will time out on every
+            // row, so abandon the whole scan rather than paying the timeout per
+            // row. The seq fence lets the next keystroke start fresh.
+            catch (RegexMatchTimeoutException) { return; }
             catch { /* skip unreadable */ }
             if (!parsed.Dupe && kept.Count >= cap) break;
         }
@@ -510,11 +520,14 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             {
                 var chunk = carry + new string(buf, 0, read);
                 if (chunk.Contains(needle, cmp)) return true;
-                // Carry the last (needle.Length - 1) chars so matches that straddle
-                // chunk boundaries aren't missed.
-                carry = needle.Length > 1 && chunk.Length >= needle.Length - 1
-                    ? chunk[^(needle.Length - 1)..]
-                    : chunk;
+                // Carry only the last (needle.Length - 1) chars so matches that
+                // straddle chunk boundaries aren't missed. A 0/1-char needle can
+                // never straddle; carrying nothing avoids the unbounded growth
+                // that "carry = chunk" would cause on a large no-match file.
+                int keep = needle.Length - 1;
+                carry = keep <= 0 ? string.Empty
+                      : chunk.Length > keep ? chunk[^keep..]
+                      : chunk;
             }
             return false;
         }

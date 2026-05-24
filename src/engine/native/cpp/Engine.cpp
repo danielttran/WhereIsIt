@@ -63,7 +63,18 @@ IndexingEngine::IndexingEngine() : m_running(false), m_ready(false), m_pool(true
 
 IndexingEngine::~IndexingEngine() {
     Stop();
-    if (m_hDataChangedEvent) CloseHandle(m_hDataChangedEvent);
+    // Release every shared-memory mapping and named kernel object created in the
+    // constructor. The previous version only closed m_hDataChangedEvent, leaking
+    // the data mutex, both file mappings, and both mapped views on every engine
+    // teardown. ~IndexingEngine only runs on the clean-stop path (engine_destroy
+    // refuses to delete when a worker was detached), so no worker can still be
+    // touching these mappings here.
+    if (m_recordsCount)         { UnmapViewOfFile(const_cast<LONG*>(m_recordsCount)); m_recordsCount = nullptr; }
+    if (m_hRecordsCountMapping) { CloseHandle(m_hRecordsCountMapping); m_hRecordsCountMapping = NULL; }
+    if (m_driveLettersShared)   { UnmapViewOfFile(m_driveLettersShared); m_driveLettersShared = nullptr; }
+    if (m_hDrivesMapping)       { CloseHandle(m_hDrivesMapping); m_hDrivesMapping = NULL; }
+    if (m_hDataMutex)           { CloseHandle(m_hDataMutex); m_hDataMutex = NULL; }
+    if (m_hDataChangedEvent)    { CloseHandle(m_hDataChangedEvent); m_hDataChangedEvent = NULL; }
 }
 
 void IndexingEngine::Start() {
@@ -129,8 +140,16 @@ void IndexingEngine::Stop() {
     joinWithTimeout(m_mainWorker, 5000);
     joinWithTimeout(m_searchWorker, 5000);
 
-    if (m_stopEvent) { CloseHandle(m_stopEvent); m_stopEvent = NULL; }
-    CloseAllDriveHandles();
+    // Only tear down handles when every worker was actually joined. If a worker
+    // was detached (timeout during the non-cancellable initial scan) it may
+    // still be inside ReadFile on a drive handle or WaitForMultipleObjects on
+    // m_stopEvent; closing those out from under it is a use-after-free that
+    // can read recycled handles. engine_destroy already leaks the whole
+    // EngineState in that case, so leaking these handles too is the safe choice.
+    if (!anyDetached) {
+        if (m_stopEvent) { CloseHandle(m_stopEvent); m_stopEvent = NULL; }
+        CloseAllDriveHandles();
+    }
 
     m_cleanStop.store(!anyDetached, std::memory_order_release);
 }
@@ -1527,6 +1546,12 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
 }
 
 void IndexingEngine::HandleUsnJournalRecord(USN_RECORD_V2* r, uint8_t di) {
+    // Drop records for an unknown drive index before any m_drives[di] /
+    // m_mftLookupTables[di] access below — mirrors the guard in
+    // ApplyPendingUsnDeltas. Without this, a di past the per-drive tables is an
+    // out-of-bounds vector read.
+    if (di >= m_mftLookupTables.size() || di >= m_drives.size()) return;
+
     uint32_t mftIdx = (uint32_t)(r->FileReferenceNumber & 0xFFFFFFFFFFFFLL);
     uint16_t seq = (uint16_t)(r->FileReferenceNumber >> 48);
     uint32_t pIdx = (uint32_t)(r->ParentFileReferenceNumber & 0xFFFFFFFFFFFFLL);

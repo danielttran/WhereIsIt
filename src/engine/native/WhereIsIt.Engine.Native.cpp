@@ -178,6 +178,37 @@ void engine_get_result_ids(EngineHandle h, uint32_t* buf, int count) {
     std::copy(results->begin(), results->begin() + n, buf);
 }
 
+/*
+ * Atomic count + copy from the SAME result snapshot that the last
+ * engine_wait_results_changed observed. The two-call pattern
+ * (engine_result_count then engine_get_result_ids) raced: each call fetched a
+ * fresh GetSearchResults() snapshot, so a search completing between them made
+ * the C# caller size its buffer to one result set but fill it from another —
+ * leaking stale/zero-filled IDs. Reading s->prevResults under the lock keeps
+ * the count and the copied IDs coherent. Returns the number of IDs written;
+ * *outTotal (optional) receives the snapshot's full size so the caller can tell
+ * when its buffer was too small.
+ */
+int engine_get_results(EngineHandle h, uint32_t* buf, int capacity, int* outTotal) {
+    if (outTotal) *outTotal = 0;
+    if (!h) return 0;
+    auto* s = static_cast<EngineState*>(h);
+
+    std::shared_ptr<std::vector<uint32_t>> snap;
+    {
+        std::lock_guard<std::mutex> lk(s->mutex);
+        snap = s->prevResults;
+    }
+    if (!snap) return 0;
+
+    const int total = static_cast<int>(snap->size());
+    if (outTotal) *outTotal = total;
+    if (!buf || capacity <= 0) return 0;
+    const int n = std::min(capacity, total);
+    std::copy(snap->begin(), snap->begin() + n, buf);
+    return n;
+}
+
 int engine_get_row(EngineHandle h, uint32_t recordId,
     wchar_t* name,       int nameMax,
     wchar_t* parentPath, int parentMax,

@@ -513,13 +513,20 @@ public static class QueryParser
             if (upper == "OR" && output.Count > 0 && i + 1 < tokens.Count)
             {
                 var prev = output[^1];
-                var next = tokens[++i];
-                // If prev or next already negated, leave the OR untransformed.
-                if (!prev.StartsWith('!') && !next.StartsWith('!'))
+                var next = tokens[i + 1];
+                // Only fold two plain terms into the a|b alternative form. A
+                // modifier token (ext:, size:, …) or a negated term can't be
+                // OR-folded into one token without corrupting it — e.g.
+                // "ext:cs OR txt" must NOT become the bogus extension "cs|txt".
+                // For those, drop the OR and let the neighbours stand as
+                // implicit-AND terms (peek, don't consume, so no term is lost).
+                if (!prev.StartsWith('!') && !next.StartsWith('!')
+                    && !prev.Contains(':') && !next.Contains(':'))
                 {
                     output[^1] = prev + "|" + next;
-                    continue;
+                    i++; // consume the folded next term
                 }
+                continue; // the OR keyword itself is never emitted as a term
             }
 
             if (negateNext)
