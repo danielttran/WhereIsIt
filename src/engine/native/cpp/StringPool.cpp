@@ -8,10 +8,10 @@ char* StringPool::Reserve(size_t needed) {
     if (m_chunks.empty() || m_chunkUsed + needed > kChunkSize) {
         size_t allocSize = (needed > kChunkSize) ? needed : kChunkSize;
         size_t chunkIdx = m_chunks.size();
-        wchar_t mapName[64];
+        wchar_t mapName[128];
         const wchar_t* pMapName = nullptr;
         if (m_shared) {
-            swprintf_s(mapName, L"Global\\WhereIsIt_PoolChunk_%zu", chunkIdx);
+            swprintf_s(mapName, L"Global\\WhereIsIt_v10_%lu_PoolChunk_%zu", GetCurrentProcessId(), chunkIdx);
             pMapName = mapName;
         }
 

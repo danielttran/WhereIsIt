@@ -422,16 +422,23 @@ QueryPlan BuildQueryPlan(const std::string& rawQuery) {
             else if (filt == "folder")     plan.Config.FolderOnly = true;
             continue;
         }
+        // Direction tokens must be consumed before the generic sort:<key>
+        // branch; otherwise sort:desc is mistaken for an unknown key, resets
+        // the key to Name, and never enables descending order.
+        if (low == "desc" || low == "sort:desc") { plan.Config.SortDescending = true; continue; }
+        if (low == "asc" || low == "sort:asc") { plan.Config.SortDescending = false; continue; }
         if (low.rfind("sort:", 0) == 0) {
             std::string key = low.substr(5);
             if (key == "path") plan.Config.SortKey = QuerySortKey::Path;
             else if (key == "size") plan.Config.SortKey = QuerySortKey::Size;
-            else if (key == "date") plan.Config.SortKey = QuerySortKey::Date;
+            else if (key == "date" || key == "modified") plan.Config.SortKey = QuerySortKey::Date;
+            else if (key == "created") plan.Config.SortKey = QuerySortKey::Created;
+            else if (key == "accessed") plan.Config.SortKey = QuerySortKey::Accessed;
+            else if (key == "extension" || key == "type" || key == "ext") plan.Config.SortKey = QuerySortKey::Extension;
+            else if (key == "attributes" || key == "attrib") plan.Config.SortKey = QuerySortKey::Attributes;
             else plan.Config.SortKey = QuerySortKey::Name;
             continue;
         }
-        if (low == "desc" || low == "sort:desc") { plan.Config.SortDescending = true; continue; }
-        if (low == "asc" || low == "sort:asc") { plan.Config.SortDescending = false; continue; }
         exprTokens.push_back(token);
     }
     

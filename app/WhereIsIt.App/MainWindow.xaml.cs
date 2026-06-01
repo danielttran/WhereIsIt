@@ -316,6 +316,7 @@ public sealed partial class MainWindow : Window
 
     private void OnExportCsvClick(object sender, RoutedEventArgs e) => _ = ExportAsync(".csv");
     private void OnExportTsvClick(object sender, RoutedEventArgs e) => _ = ExportAsync(".tsv");
+    private void OnExportEfuClick(object sender, RoutedEventArgs e) => _ = ExportAsync(".efu");
 
     private async System.Threading.Tasks.Task ExportAsync(string extension)
     {
@@ -324,6 +325,8 @@ public sealed partial class MainWindow : Window
         WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
         if (extension == ".tsv")
             picker.FileTypeChoices.Add("TSV (tab-separated)", new System.Collections.Generic.List<string> { ".tsv" });
+        else if (extension == ".efu")
+            picker.FileTypeChoices.Add("Everything file list", new System.Collections.Generic.List<string> { ".efu" });
         else
             picker.FileTypeChoices.Add("CSV (comma-separated)", new System.Collections.Generic.List<string> { ".csv" });
         picker.SuggestedFileName = string.IsNullOrEmpty(ViewModel.SearchBox.Query)
@@ -341,9 +344,12 @@ public sealed partial class MainWindow : Window
             models.Add(row.ToModel());
         }
 
-        var content = extension == ".tsv"
-            ? WhereIsIt.App.Services.ResultExporter.ToTsv(models)
-            : WhereIsIt.App.Services.ResultExporter.ToCsv(models);
+        var content = extension switch
+        {
+            ".tsv" => WhereIsIt.App.Services.ResultExporter.ToTsv(models),
+            ".efu" => WhereIsIt.App.Services.ResultExporter.ToEfu(models),
+            _ => WhereIsIt.App.Services.ResultExporter.ToCsv(models),
+        };
 
         await Windows.Storage.FileIO.WriteTextAsync(file, content);
     }
@@ -373,6 +379,72 @@ public sealed partial class MainWindow : Window
         var row = ViewModel.ResultsList.SelectedRow;
         if (row is null) return;
         SetClipboardText(row.FullPath);
+    }
+
+
+    private async void OnRenameClick(object sender, RoutedEventArgs e)
+    {
+        var row = ViewModel.ResultsList.SelectedRow;
+        if (row is null || string.IsNullOrEmpty(row.FullPath)) return;
+        var newName = await PromptForTextAsync("Rename", "New name", row.Name, "Rename");
+        if (string.IsNullOrWhiteSpace(newName) || newName == row.Name) return;
+        if (!IsValidFileName(newName))
+        {
+            await ShowErrorAsync("Rename failed", "The new name contains characters that Windows does not allow in file names.");
+            return;
+        }
+
+        try
+        {
+            var destination = System.IO.Path.Combine(row.ParentPath, newName);
+            if (System.IO.Directory.Exists(row.FullPath)) System.IO.Directory.Move(row.FullPath, destination);
+            else System.IO.File.Move(row.FullPath, destination);
+        }
+        catch (Exception ex)
+        {
+            await ShowErrorAsync("Rename failed", ex.Message);
+        }
+    }
+
+    private async void OnDeleteClick(object sender, RoutedEventArgs e)
+    {
+        var row = ViewModel.ResultsList.SelectedRow;
+        if (row is null || string.IsNullOrEmpty(row.FullPath)) return;
+        var dialog = new ContentDialog
+        {
+            Title = "Move to Recycle Bin?",
+            Content = $"Move “{row.Name}” to the Recycle Bin?",
+            PrimaryButtonText = "Move to Recycle Bin",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = (Content as FrameworkElement)?.XamlRoot,
+        };
+        ContentDialogResult result;
+        try { result = await dialog.ShowAsync(); } catch { return; }
+        if (result != ContentDialogResult.Primary) return;
+
+        try
+        {
+            if (System.IO.Directory.Exists(row.FullPath))
+                Microsoft.VisualBasic.FileIO.FileSystem.DeleteDirectory(row.FullPath,
+                    Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
+                    Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+            else
+                Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(row.FullPath,
+                    Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
+                    Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+        }
+        catch (Exception ex)
+        {
+            await ShowErrorAsync("Delete failed", ex.Message);
+        }
+    }
+
+    private void OnPropertiesClick(object sender, RoutedEventArgs e)
+    {
+        var row = ViewModel.ResultsList.SelectedRow;
+        if (row is null || string.IsNullOrEmpty(row.FullPath)) return;
+        TryStart(row.FullPath, null, "properties");
     }
 
     // ── Search menu ─────────────────────────────────────────────────────
@@ -407,7 +479,7 @@ public sealed partial class MainWindow : Window
     {
         if (bookmarkService is null) return;
 
-        var name = await PromptForNameAsync(ViewModel.SearchBox.Query);
+        var name = await PromptForTextAsync("Save bookmark", "Bookmark name", ViewModel.SearchBox.Query, "Save");
         if (string.IsNullOrWhiteSpace(name)) return;
 
         bookmarkService.Add(name, ViewModel.SearchBox.Query);
@@ -467,19 +539,32 @@ public sealed partial class MainWindow : Window
 
     // ── Shared helpers ──────────────────────────────────────────────────
 
-    private async System.Threading.Tasks.Task<string?> PromptForNameAsync(string defaultName)
+    private async System.Threading.Tasks.Task<string?> PromptForTextAsync(
+        string title, string placeholder, string defaultValue, string primaryButtonText)
     {
-        var input = new TextBox { PlaceholderText = "Bookmark name", Text = defaultName };
+        var input = new TextBox { PlaceholderText = placeholder, Text = defaultValue };
         var dialog = new ContentDialog
         {
-            Title = "Save bookmark",
+            Title = title,
             Content = input,
-            PrimaryButtonText = "Save",
+            PrimaryButtonText = primaryButtonText,
             CloseButtonText = "Cancel",
             XamlRoot = (Content as FrameworkElement)?.XamlRoot,
         };
         var res = await dialog.ShowAsync();
         return res == ContentDialogResult.Primary ? input.Text : null;
+    }
+
+    private async System.Threading.Tasks.Task ShowErrorAsync(string title, string message)
+    {
+        var dialog = new ContentDialog
+        {
+            Title = title,
+            Content = message,
+            CloseButtonText = "Close",
+            XamlRoot = (Content as FrameworkElement)?.XamlRoot,
+        };
+        try { await dialog.ShowAsync(); } catch { }
     }
 
     private void OpenSelected()
@@ -498,7 +583,21 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private static void TryStart(string fileName, string? args)
+    private static bool IsValidFileName(string name)
+    {
+        if (name is "." or ".." || name.TrimEnd(' ', '.') != name) return false;
+        if (name.IndexOfAny(System.IO.Path.GetInvalidFileNameChars()) >= 0 ||
+            name.IndexOf(System.IO.Path.DirectorySeparatorChar) >= 0 ||
+            name.IndexOf(System.IO.Path.AltDirectorySeparatorChar) >= 0) return false;
+
+        var stem = System.IO.Path.GetFileNameWithoutExtension(name).TrimEnd(' ', '.').ToUpperInvariant();
+        if (stem is "CON" or "PRN" or "AUX" or "NUL" or "CLOCK$") return false;
+        return !(stem.Length == 4 &&
+            (stem.StartsWith("COM", StringComparison.Ordinal) || stem.StartsWith("LPT", StringComparison.Ordinal)) &&
+            stem[3] is >= '1' and <= '9');
+    }
+
+    private static void TryStart(string fileName, string? args, string? verb = null)
     {
         try
         {
@@ -507,6 +606,7 @@ public sealed partial class MainWindow : Window
                 FileName = fileName,
                 Arguments = args ?? string.Empty,
                 UseShellExecute = true,
+                Verb = verb ?? string.Empty,
             });
         }
         catch { /* swallow — UI must not crash on bad path */ }

@@ -15,7 +15,9 @@ public partial class ResultRowViewModel : ObservableObject
     private readonly uint id;
     private bool loaded;
 
-    [ObservableProperty] private string name = string.Empty;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ExtensionText))]
+    private string name = string.Empty;
     [ObservableProperty] private string parentPath = string.Empty;
     [ObservableProperty] private string sizeText = string.Empty;
     [ObservableProperty] private string modifiedText = string.Empty;
@@ -52,11 +54,19 @@ public partial class ResultRowViewModel : ObservableObject
 
     public ulong SizeBytes { get; private set; }
     public DateTimeOffset ModifiedUtc { get; private set; }
+    public DateTimeOffset CreatedUtc { get; private set; }
+    public DateTimeOffset AccessedUtc { get; private set; }
 
     public string FullPath =>
         string.IsNullOrEmpty(ParentPath) ? Name : Path.Combine(ParentPath, Name);
 
-    public ResultRowModel ToModel() => new(Name, ParentPath, SizeBytes, ModifiedUtc, AttributesText);
+    public string ExtensionText => Path.GetExtension(Name).TrimStart('.');
+
+    public ResultRowModel ToModel() => new(Name, ParentPath, SizeBytes, ModifiedUtc, AttributesText)
+    {
+        CreatedUtc = this.CreatedUtc,
+        AccessedUtc = this.AccessedUtc,
+    };
 
     public ResultRowViewModel(IEngineClient engineClient, uint id)
     {
@@ -74,8 +84,10 @@ public partial class ResultRowViewModel : ObservableObject
         SizeText = FormatBytes(row.SizeBytes);
         ModifiedUtc = row.ModifiedUtc;
         ModifiedText = row.ModifiedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
-        CreatedText  = FormatOptionalDate(row.CreatedUtc);
-        AccessedText = FormatOptionalDate(row.AccessedUtc);
+        CreatedUtc = row.CreatedUtc;
+        AccessedUtc = row.AccessedUtc;
+        CreatedText  = FormatOptionalDate(CreatedUtc);
+        AccessedText = FormatOptionalDate(AccessedUtc);
         AttributesText = row.Attributes;
         loaded = true;
         OnPropertyChanged(nameof(FullPath));

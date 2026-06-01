@@ -77,6 +77,13 @@ public sealed class NativeEngineFixture : IDisposable
         CreateFile(Path.Combine("subdir", "report-feb.log"), ReportFebSize);
         CreateFile(Path.Combine("subdir", "archive.zip"),    ArchiveSize);
 
+        // Give native Created/Accessed sorting deterministic values. The
+        // scoped native fixture uses the generic scanner, which reads these
+        // timestamps from WIN32_FIND_DATA during its initial index build.
+        SetTimes("beta.log", createdDaysAgo: 10, accessedDaysAgo: 8);
+        SetTimes(Path.Combine("subdir", "report-jan.log"), createdDaysAgo: 5, accessedDaysAgo: 4);
+        SetTimes(Path.Combine("subdir", "report-feb.log"), createdDaysAgo: 1, accessedDaysAgo: 1);
+
         // Nested subdirectory files
         Directory.CreateDirectory(Path.Combine(Root.FullName, "logs", "daily"));
         CreateFile(Path.Combine("logs", "daily", "app.log"),   AppLogSize);
@@ -161,6 +168,13 @@ public sealed class NativeEngineFixture : IDisposable
         var full = Path.Combine(Root.FullName, relativePath);
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
         File.WriteAllText(full, content, Encoding.UTF8);
+    }
+
+    private void SetTimes(string relativePath, int createdDaysAgo, int accessedDaysAgo)
+    {
+        var full = Path.Combine(Root.FullName, relativePath);
+        File.SetCreationTimeUtc(full, DateTime.UtcNow.AddDays(-createdDaysAgo));
+        File.SetLastAccessTimeUtc(full, DateTime.UtcNow.AddDays(-accessedDaysAgo));
     }
 
     public void Dispose()
@@ -434,6 +448,19 @@ public class NativeEngineIntegrationTests
     }
 
     [Fact]
+    public async Task Search_WithSortDescDirective_OrdersLargestFirst()
+    {
+        if (Skip()) return;
+        var sorted = await Search("*.log sort:size sort:desc");
+        sorted.Should().NotBeEmpty();
+        if (sorted.Count < 2) return;
+
+        var first = await _fx.Client!.GetRowAsync(sorted[0], CancellationToken.None);
+        var last = await _fx.Client!.GetRowAsync(sorted[^1], CancellationToken.None);
+        first.SizeBytes.Should().BeGreaterThanOrEqualTo(last.SizeBytes);
+    }
+
+    [Fact]
     public async Task Sort_ByModifiedAscending_OldestFirst()
     {
         if (Skip()) return;
@@ -447,6 +474,26 @@ public class NativeEngineIntegrationTests
         var first = await _fx.Client!.GetRowAsync(sorted[0],  CancellationToken.None);
         var last  = await _fx.Client!.GetRowAsync(sorted[^1], CancellationToken.None);
         first.ModifiedUtc.Should().BeOnOrBefore(last.ModifiedUtc);
+    }
+
+    [Theory]
+    [InlineData("created")]
+    [InlineData("accessed")]
+    public async Task Sort_ByNativeOptionalDateAscending_OldestFirst(string key)
+    {
+        if (Skip()) return;
+        var initial = await Search("*.log");
+        initial.Should().NotBeEmpty();
+
+        var sorted = await SortAndWait(key, descending: false);
+        sorted.Should().NotBeNull();
+        if (sorted!.Count < 2) return;
+
+        var first = await _fx.Client!.GetRowAsync(sorted[0], CancellationToken.None);
+        var last = await _fx.Client!.GetRowAsync(sorted[^1], CancellationToken.None);
+        var firstDate = key == "created" ? first.CreatedUtc : first.AccessedUtc;
+        var lastDate = key == "created" ? last.CreatedUtc : last.AccessedUtc;
+        firstDate.Should().BeOnOrBefore(lastDate);
     }
 
     // ================================================================== //
@@ -496,6 +543,18 @@ public class NativeEngineIntegrationTests
         row.Should().NotBeNull("alpha.txt should be found in the test temp directory");
         row!.ModifiedUtc.Should().BeAfter(DateTimeOffset.UtcNow.AddMinutes(-5),
             "file was just created");
+    }
+
+    [Fact]
+    public async Task GetRow_CreatedAndAccessedDatesArePopulated()
+    {
+        if (Skip()) return;
+        var ids = await Search("alpha.txt");
+        ids.Should().NotBeEmpty();
+        var row = await _fx.FindOurRowAsync(ids, "alpha.txt");
+        row.Should().NotBeNull("alpha.txt should be found in the test temp directory");
+        row!.CreatedUtc.Should().NotBe(default);
+        row.AccessedUtc.Should().NotBe(default);
     }
 
     [Fact]

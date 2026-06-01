@@ -20,11 +20,13 @@ public sealed class AppSettingsService : IDisposable
 {
     private readonly string settingsPath;
     private readonly object gate = new();
+    private readonly object writeGate = new();
 
     // In-memory cache of the parsed settings file. SaveXxx methods all need
     // the full current state (settings.json is one document) — without this
     // cache, every Save reloads and re-parses the JSON from disk.
     private AppSettings? cached;
+    private long revision;
 
     // Background coalescing flusher. A burst of run-count / history writes
     // collapses into a single debounced disk write off the UI thread.
@@ -86,31 +88,48 @@ public sealed class AppSettingsService : IDisposable
         lock (gate)
         {
             cached = Clone(settings);
-            WriteToDisk(cached);
+            var currentRevision = ++revision;
+            WriteToDisk(cached, currentRevision);
+            // Clear while still holding `gate`: a partial SaveXxx must not
+            // update the cache between the durable write and this reset.
+            ClearDirty();
         }
-        // We just wrote the complete latest state, so any pending debounced
-        // write is now redundant.
-        ClearDirty();
     }
 
-    private void WriteToDisk(AppSettings settings)
+    private void WriteToDisk(AppSettings settings, long snapshotRevision)
     {
-        var dir = Path.GetDirectoryName(settingsPath)!;
-        Directory.CreateDirectory(dir);
-        // Atomic write: serialise to a sibling .tmp file, then File.Replace so
-        // a crash mid-write doesn't leave a half-written settings.json that
-        // would then be backed up as corrupt on next Load.
-        var tmp = settingsPath + ".tmp";
-        File.WriteAllText(tmp, JsonSerializer.Serialize(settings, JsonOpts));
-        try
+        // Debounced writes intentionally clone outside `gate` so callers never
+        // block on disk I/O. Serialise the actual file swap separately: without
+        // this lock a background flush and a synchronous Save could race over
+        // the same .tmp path and allow an older snapshot to win.
+        lock (writeGate)
         {
-            if (File.Exists(settingsPath)) File.Replace(tmp, settingsPath, destinationBackupFileName: null);
-            else File.Move(tmp, settingsPath);
-        }
-        catch
-        {
-            // Fallback if Replace fails (e.g. cross-volume tmp): plain overwrite.
-            try { File.Copy(tmp, settingsPath, overwrite: true); File.Delete(tmp); } catch { }
+            // A newer cache snapshot may have been committed while this
+            // background write waited for the file lock. Never let stale data
+            // overwrite the newer durable save.
+            if (snapshotRevision != Interlocked.Read(ref revision)) return;
+
+            var dir = Path.GetDirectoryName(settingsPath)!;
+            Directory.CreateDirectory(dir);
+            // Atomic write: serialise to a sibling .tmp file, then File.Replace so
+            // a crash mid-write doesn't leave a half-written settings.json that
+            // would then be backed up as corrupt on next Load.
+            var tmp = settingsPath + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(settings, JsonOpts));
+            try
+            {
+                if (File.Exists(settingsPath)) File.Replace(tmp, settingsPath, destinationBackupFileName: null);
+                else File.Move(tmp, settingsPath);
+            }
+            catch
+            {
+                // Fallback if Replace fails (e.g. filesystem limitation): plain overwrite.
+                // Let Copy failures escape so synchronous saves report failure
+                // and background saves can retain their dirty state. Cleanup is
+                // best-effort once the destination contains the complete JSON.
+                File.Copy(tmp, settingsPath, overwrite: true);
+                try { File.Delete(tmp); } catch { }
+            }
         }
     }
 
@@ -136,6 +155,7 @@ public sealed class AppSettingsService : IDisposable
         {
             cached ??= LoadFromDisk();
             cached.SearchHistory = history;
+            revision++;
         }
         ScheduleFlush();
     }
@@ -146,6 +166,7 @@ public sealed class AppSettingsService : IDisposable
         {
             cached ??= LoadFromDisk();
             cached.Bookmarks = bookmarks;
+            revision++;
         }
         ScheduleFlush();
     }
@@ -158,6 +179,7 @@ public sealed class AppSettingsService : IDisposable
             cached.ShowCreatedColumn  = showCreated;
             cached.ShowAccessedColumn = showAccessed;
             cached.ShowRunCountColumn = showRunCount;
+            revision++;
         }
         ScheduleFlush();
     }
@@ -168,6 +190,7 @@ public sealed class AppSettingsService : IDisposable
         {
             cached ??= LoadFromDisk();
             cached.RunCounts = counts;
+            revision++;
         }
         ScheduleFlush();
     }
@@ -179,9 +202,10 @@ public sealed class AppSettingsService : IDisposable
         {
             cached ??= LoadFromDisk();
             cached.LastSessionTabs = tabs ?? [];
-            WriteToDisk(cached);
+            var currentRevision = ++revision;
+            WriteToDisk(cached, currentRevision);
+            ClearDirty();
         }
-        ClearDirty();
     }
 
     private void ScheduleFlush()
@@ -207,6 +231,7 @@ public sealed class AppSettingsService : IDisposable
     private void FlushIfDirty()
     {
         AppSettings snapshot;
+        long snapshotRevision;
         lock (gate)
         {
             lock (flushGate)
@@ -219,9 +244,15 @@ public sealed class AppSettingsService : IDisposable
             // + write to disk OUTSIDE the lock so a slow disk never stalls a
             // UI-thread SaveXxx that just needs to update the cache.
             snapshot = Clone(cached);
+            snapshotRevision = revision;
         }
-        try { WriteToDisk(snapshot); }
-        catch { /* best-effort; the next change or Dispose will retry */ }
+        try { WriteToDisk(snapshot, snapshotRevision); }
+        catch
+        {
+            // Preserve durability intent: Dispose() retries the newest dirty
+            // snapshot even if no further user action occurs after this fault.
+            lock (flushGate) dirty = true;
+        }
     }
 
     public void Dispose()
@@ -236,15 +267,20 @@ public sealed class AppSettingsService : IDisposable
         // Final synchronous flush so a debounced write in flight isn't lost on
         // shutdown. Blocking here is acceptable — the app is exiting.
         AppSettings? snapshot = null;
+        long snapshotRevision = 0;
         lock (gate)
         {
             bool needWrite;
             lock (flushGate) { needWrite = dirty; dirty = false; }
-            if (needWrite && cached is not null) snapshot = Clone(cached);
+            if (needWrite && cached is not null)
+            {
+                snapshot = Clone(cached);
+                snapshotRevision = revision;
+            }
         }
         if (snapshot is not null)
         {
-            try { WriteToDisk(snapshot); } catch { }
+            try { WriteToDisk(snapshot, snapshotRevision); } catch { }
         }
     }
 }

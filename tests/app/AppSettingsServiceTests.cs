@@ -17,6 +17,7 @@ public class AppSettingsServiceTests : IDisposable
 
     public void Dispose()
     {
+        sut.Dispose();
         if (File.Exists(tempPath)) File.Delete(tempPath);
         var dir = Path.GetDirectoryName(tempPath);
         if (dir is not null && Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
@@ -43,6 +44,28 @@ public class AppSettingsServiceTests : IDisposable
     {
         sut.Save(new AppSettings());
         Assert.True(File.Exists(tempPath));
+    }
+
+    [Fact]
+    public void Dispose_FlushesPendingBackgroundSave()
+    {
+        sut.SaveSearchHistory(["alpha", "beta"]);
+
+        sut.Dispose();
+
+        using var reload = new AppSettingsService(tempPath);
+        var loaded = reload.Load();
+        Assert.Equal(["alpha", "beta"], loaded.SearchHistory);
+    }
+
+    [Fact]
+    public void Save_Throws_WhenSettingsPathCannotBeReplaced()
+    {
+        var directoryPath = Path.Combine(Path.GetDirectoryName(tempPath)!, "is-a-directory");
+        Directory.CreateDirectory(directoryPath);
+        using var service = new AppSettingsService(directoryPath);
+
+        Assert.ThrowsAny<Exception>(() => service.Save(new AppSettings()));
     }
 
     [Fact]

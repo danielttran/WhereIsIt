@@ -36,10 +36,10 @@ void RecordPool::Reserve(size_t count) {
         Chunk c;
         size_t allocSize = kRecordsPerChunk * sizeof(FileRecord);
         if (m_shared) {
-            wchar_t mapName[64];
+            wchar_t mapName[128];
 
             // Try Global\ first
-            swprintf_s(mapName, L"Global\\WhereIsIt_RecordChunk_%zu", m_chunks.size());
+            swprintf_s(mapName, L"Global\\WhereIsIt_v10_%lu_RecordChunk_%zu", GetCurrentProcessId(), m_chunks.size());
             c.hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, GetSharedMemoryReadOnlySA(), PAGE_READWRITE, 0, (DWORD)allocSize, mapName);
             if (c.hMap) {
                 c.data = (FileRecord*)MapViewOfFile(c.hMap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
@@ -51,7 +51,7 @@ void RecordPool::Reserve(size_t count) {
 
             // Try Local\ if Global failed or its view wasn't writable
             if (!c.data) {
-                swprintf_s(mapName, L"Local\\WhereIsIt_RecordChunk_%zu", m_chunks.size());
+                swprintf_s(mapName, L"Local\\WhereIsIt_v10_%lu_RecordChunk_%zu", GetCurrentProcessId(), m_chunks.size());
                 c.hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, (DWORD)allocSize, mapName);
                 if (c.hMap) {
                     c.data = (FileRecord*)MapViewOfFile(c.hMap, FILE_MAP_ALL_ACCESS, 0, 0, 0);

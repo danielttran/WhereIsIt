@@ -11,6 +11,7 @@ public static class AppBootstrap
     {
         var settingsService = new AppSettingsService();
         var settings = settingsService.Load();
+        StartupRegistration.Apply(settings.StartWithWindows);
 
         // Apply persisted column-visibility BEFORE any view model loads — the
         // DataTemplate ColumnDefinition.Width binds OneTime to these statics.
@@ -54,6 +55,10 @@ public static class AppBootstrap
         services.AddTransient<ResultRowViewModel>();
         services.AddTransient<StatusBarViewModel>();
         services.AddSingleton<SettingsViewModel>();
-        return services.BuildServiceProvider();
+        var provider = services.BuildServiceProvider();
+        // Singleton factories are lazy. Resolve the optional server eagerly or
+        // merely registering it leaves the configured endpoint permanently off.
+        if (settings.EnableHttpServer) provider.GetRequiredService<HttpSearchServer>();
+        return provider;
     }
 }

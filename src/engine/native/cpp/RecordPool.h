@@ -9,7 +9,7 @@
 
 class RecordPool {
 public:
-    static constexpr size_t kRecordsPerChunk = 512 * 1024;  // 524,288 records (16 MB)
+    static constexpr size_t kRecordsPerChunk = 512 * 1024;  // 524,288 records (20 MB with schema v10)
 
     RecordPool(bool isShared = false);
     ~RecordPool();
