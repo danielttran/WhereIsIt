@@ -19,6 +19,8 @@ public class HttpSearchServerTests
         public readonly Subject<IReadOnlyList<uint>> ResultsSubject = new();
         public readonly Dictionary<uint, ResultRowModel> Rows = new();
         public string? LastQuery { get; private set; }
+        public bool EmitResults { get; set; } = true;
+        public bool HasResultObservers => ResultsSubject.HasObservers;
 
         public IObservable<string> StatusChanges => new Subject<string>();
         public IObservable<int> MetricsChanges => new Subject<int>();
@@ -28,11 +30,14 @@ public class HttpSearchServerTests
         {
             LastQuery = query;
             // Emit canned IDs on a background thread to mimic the real engine.
-            Task.Run(() =>
+            if (EmitResults)
             {
-                Thread.Sleep(10);
-                ResultsSubject.OnNext(new uint[] { 1, 2 });
-            });
+                Task.Run(() =>
+                {
+                    Thread.Sleep(10);
+                    ResultsSubject.OnNext(new uint[] { 1, 2 });
+                });
+            }
             return Task.CompletedTask;
         }
         public Task SortAsync(string key, bool descending, CancellationToken ct) => Task.CompletedTask;
@@ -87,4 +92,32 @@ public class HttpSearchServerTests
         var resp = await http.GetAsync($"http://127.0.0.1:{port}/something-else");
         resp.StatusCode.Should().Be(System.Net.HttpStatusCode.NotFound);
     }
+
+    [Fact]
+    public async Task SearchPrefixThatIsNotEndpoint_Returns404()
+    {
+        var engine = new FakeEngine();
+        using var server = new HttpSearchServer(engine, port: 0);
+        var port = server.Start();
+        using var http = new HttpClient();
+
+        var resp = await http.GetAsync($"http://127.0.0.1:{port}/searchanything?q=x");
+
+        resp.StatusCode.Should().Be(System.Net.HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task TimedOutSearch_ReleasesResultSubscription()
+    {
+        var engine = new FakeEngine { EmitResults = false };
+        using var server = new HttpSearchServer(engine, port: 0, searchTimeout: TimeSpan.FromMilliseconds(25));
+        var port = server.Start();
+        using var http = new HttpClient();
+
+        var resp = await http.GetAsync($"http://127.0.0.1:{port}/search?q=never-completes");
+
+        resp.StatusCode.Should().Be(System.Net.HttpStatusCode.InternalServerError);
+        engine.HasResultObservers.Should().BeFalse();
+    }
+
 }

@@ -90,10 +90,9 @@ Closed 2026-05-17 (Everything-parity bridge):
 
 Remaining Everything-parity gaps:
 
-- **Native created/accessed sort** — the 32-byte `FileRecord` has no created/accessed field; native sort on those keys falls back to name. The in-proc fallback sorts them correctly. Closing this needs an index-schema bump.
 - **ETP / FTP server** — proprietary Everything protocol. Skipped; HTTP server covers the cross-device search use case.
 - **Everything IPC/SDK & `es.exe` CLI** — third-party-tool integration surface; not started.
-- **UI tier** — system tray / run-on-startup, match-term highlighting, file-ops context menu (delete/rename/properties). Not started.
+- **UI tier** — system tray and match-term highlighting. Not started.
 
 Closed this session:
 
@@ -102,6 +101,12 @@ Closed this session:
 - ✅ Run-count column + persisted `RunCountService`
 - ✅ HTTP server — `HttpSearchServer`, `127.0.0.1`-only, JSON `/search?q=` endpoint
 - ✅ Column-visibility toggle — Columns flyout button + persisted settings (Created/Accessed/Runs)
+- ✅ File operations — result menu entries for rename, Recycle Bin deletion, and Windows properties
+- ✅ Reachable sort/export polish — Created/Accessed/Type/Attributes headers call engine sorting; File menu exports Everything `.efu` lists; row exports retain optional timestamps
+- ✅ Settings polish — index scope, hotkey, run-on-startup, and localhost HTTP server options are editable with validation
+- ✅ Native Created/Accessed parity — index schema v10 stores all three timestamps, safely rebuilds v9 indexes, preserves the v1 row ABI while adding version-probed `engine_get_row_v2`, isolates v10 shared-memory mappings from older processes, marshals Created/Accessed rows to C#, and sorts both columns natively
+- ✅ Production-readiness follow-up — eagerly starts the opt-in HTTP server, fixes native `sort:desc` / `sort:asc`, makes settings flush retries durable, explicitly uses the Recycle Bin, rejects unsafe Windows rename targets, and isolates concurrent native app processes
+- ✅ Production-readiness audit round 2 — retries failed native incremental saves, validates persisted string/drive/giant-index data before commit, guarantees the latest settings snapshot is flushed on shutdown, releases timed-out HTTP subscriptions, tightens HTTP route matching, and applies startup registration immediately after save
 
 The aspirational `src/core/`, `src/adapters/win32/`, `src/engine/winrt/`, `service/` scaffolds are still present as empty/partial vcxprojs. They are NOT on the active build path; the only C++ project that's built is `src/engine/native/WhereIsIt.Engine.Native.vcxproj`. Decide later whether to refactor the engine into the layered architecture or remove those folders.
 
@@ -111,7 +116,7 @@ The aspirational `src/core/`, `src/adapters/win32/`, `src/engine/winrt/`, `servi
 
 - **Indexer:** native C++. Legacy code moved verbatim from `src/legacy/` into `src/engine/native/cpp/` (2026-05-13). Consumed via P/Invoke + a `FilteringEngineClient` decorator on the C# side that handles every Everything-style query modifier the native engine doesn't understand.
 - **Service:** named-pipe service deferred. `PipeEngineClient` is a stub. Native engine runs in-process; elevation prompt is acceptable.
-- **UI:** Everything-grade — multi-column results, sort, context menu, Mica, settings, quick-filter bar, modifier toggle buttons, search history with up/down recall, bookmarks, CSV/TSV export, global hotkey, command-line args, drag-and-drop, optional Created/Accessed columns.
+- **UI:** Everything-grade — multi-column results, sort, Explorer-style file operations, Mica, settings, quick-filter bar, modifier toggle buttons, search history with up/down recall, bookmarks, CSV/TSV/EFU export, global hotkey, command-line args, drag-and-drop, optional Created/Accessed columns.
 
 ---
 

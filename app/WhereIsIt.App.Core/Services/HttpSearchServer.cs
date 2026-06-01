@@ -22,13 +22,15 @@ public sealed class HttpSearchServer : IDisposable
     private readonly HttpListener listener = new();
     private readonly int requestedPort;
     private readonly SemaphoreSlim searchLock = new(1, 1);
+    private readonly TimeSpan searchTimeout;
     private CancellationTokenSource? cts;
     private Task? loopTask;
 
-    public HttpSearchServer(IEngineClient engine, int port = 0)
+    public HttpSearchServer(IEngineClient engine, int port = 0, TimeSpan? searchTimeout = null)
     {
         this.engine = engine;
         this.requestedPort = port;
+        this.searchTimeout = searchTimeout ?? TimeSpan.FromSeconds(10);
     }
 
     /// <summary>Starts listening; returns the actual TCP port (resolves 0 → OS pick).</summary>
@@ -69,7 +71,9 @@ public sealed class HttpSearchServer : IDisposable
     {
         try
         {
-            if (!ctx.Request.Url!.AbsolutePath.StartsWith("/search", StringComparison.OrdinalIgnoreCase))
+            var path = ctx.Request.Url!.AbsolutePath;
+            if (!path.Equals("/search", StringComparison.OrdinalIgnoreCase) &&
+                !path.Equals("/search/", StringComparison.OrdinalIgnoreCase))
             {
                 ctx.Response.StatusCode = (int)HttpStatusCode.NotFound;
                 ctx.Response.Close();
@@ -101,18 +105,14 @@ public sealed class HttpSearchServer : IDisposable
             return new SearchResponse { query = query, count = 0, results = new() };
         try
         {
-            var tcs = new TaskCompletionSource<IReadOnlyList<uint>>();
-            IDisposable? sub = null;
-            sub = engine.ObserveResults.Take(1).Subscribe(ids =>
-            {
-                tcs.TrySetResult(ids);
-                sub?.Dispose();
-            });
+            var tcs = new TaskCompletionSource<IReadOnlyList<uint>>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            using var sub = engine.ObserveResults.Take(1).Subscribe(ids => tcs.TrySetResult(ids));
 
             await engine.SearchAsync(query, ct);
             using (ct.Register(() => tcs.TrySetCanceled(ct)))
             {
-                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                using var timeout = new CancellationTokenSource(searchTimeout);
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
                 using (linked.Token.Register(() => tcs.TrySetCanceled(linked.Token)))
                 {

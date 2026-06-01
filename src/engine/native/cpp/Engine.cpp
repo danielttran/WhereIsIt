@@ -18,17 +18,30 @@
 #include "DriveEnumeratorWin32.h"
 
 // --- IndexingEngine Implementation ---
+// Shared object names carry the persisted-record schema version and process ID.
+// A v10 process must never map a live v9 RecordChunk: the expanded FileRecord
+// layout would otherwise overrun the smaller legacy mapping during a rolling
+// upgrade. Process scoping also prevents separately launched app instances from
+// mutating the same writable in-process engine mappings.
 
 IndexingEngine::IndexingEngine() : m_running(false), m_ready(false), m_pool(true), m_isSearchRequested(false), m_isSortOnlyRequested(false), m_driveEnumerator(std::make_unique<DriveEnumeratorWin32>()) {
-    m_hDataMutex = CreateMutexW(GetSharedMemoryReadOnlySA(), FALSE, L"Global\\WhereIsIt_DataMutex");
-    if (!m_hDataMutex) m_hDataMutex = CreateMutexW(NULL, FALSE, L"Local\\WhereIsIt_DataMutex");
+    const DWORD pid = GetCurrentProcessId();
+    wchar_t objectName[96];
 
+    swprintf_s(objectName, L"Global\\WhereIsIt_v10_%lu_DataMutex", pid);
+    m_hDataMutex = CreateMutexW(GetSharedMemoryReadOnlySA(), FALSE, objectName);
+    if (!m_hDataMutex) {
+        swprintf_s(objectName, L"Local\\WhereIsIt_v10_%lu_DataMutex", pid);
+        m_hDataMutex = CreateMutexW(NULL, FALSE, objectName);
+    }
 
+    swprintf_s(objectName, L"Global\\WhereIsIt_v10_%lu_RecordsCount", pid);
     m_hRecordsCountMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, GetSharedMemoryReadOnlySA(), PAGE_READWRITE, 0,
-        sizeof(LONG), L"Global\\WhereIsIt_RecordsCount");
+        sizeof(LONG), objectName);
     if (!m_hRecordsCountMapping) {
+        swprintf_s(objectName, L"Local\\WhereIsIt_v10_%lu_RecordsCount", pid);
         m_hRecordsCountMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0,
-            sizeof(LONG), L"Local\\WhereIsIt_RecordsCount");
+            sizeof(LONG), objectName);
     }
 
     if (m_hRecordsCountMapping) {
@@ -42,11 +55,13 @@ IndexingEngine::IndexingEngine() : m_running(false), m_ready(false), m_pool(true
         }
     }
 
+    swprintf_s(objectName, L"Global\\WhereIsIt_v10_%lu_Drives", pid);
     m_hDrivesMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, GetSharedMemoryReadOnlySA(), PAGE_READWRITE,
-        0, 64 * 4 * sizeof(wchar_t), L"Global\\WhereIsIt_Drives");
+        0, 64 * 4 * sizeof(wchar_t), objectName);
     if (!m_hDrivesMapping) {
+        swprintf_s(objectName, L"Local\\WhereIsIt_v10_%lu_Drives", pid);
         m_hDrivesMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
-            0, 64 * 4 * sizeof(wchar_t), L"Local\\WhereIsIt_Drives");
+            0, 64 * 4 * sizeof(wchar_t), objectName);
     }
     if (m_hDrivesMapping) {
         m_driveLettersShared = (wchar_t(*)[4])MapViewOfFile(m_hDrivesMapping, FILE_MAP_WRITE, 0, 0, 64 * 4 * sizeof(wchar_t));
@@ -55,8 +70,12 @@ IndexingEngine::IndexingEngine() : m_running(false), m_ready(false), m_pool(true
         }
     }
 
-    m_hDataChangedEvent = CreateEventW(GetSharedMemoryReadOnlySA(), FALSE, FALSE, L"Global\\WhereIsIt_DataChanged");
-    if (!m_hDataChangedEvent) m_hDataChangedEvent = CreateEventW(NULL, FALSE, FALSE, L"Local\\WhereIsIt_DataChanged");
+    swprintf_s(objectName, L"Global\\WhereIsIt_v10_%lu_DataChanged", pid);
+    m_hDataChangedEvent = CreateEventW(GetSharedMemoryReadOnlySA(), FALSE, FALSE, objectName);
+    if (!m_hDataChangedEvent) {
+        swprintf_s(objectName, L"Local\\WhereIsIt_v10_%lu_DataChanged", pid);
+        m_hDataChangedEvent = CreateEventW(NULL, FALSE, FALSE, objectName);
+    }
 
     m_currentResults = std::make_shared<std::vector<uint32_t>>();
 }
@@ -197,14 +216,21 @@ std::wstring IndexingEngine::ResolveIndexSavePath() {
 }
 
 void IndexingEngine::MarkIndexSaved() {
-    SaveIndex(ResolveIndexSavePath());
-    m_recordsAppliedSinceSave.store(0, std::memory_order_relaxed);
-    m_lastSaveTime = std::chrono::steady_clock::now();
+    if (SaveIndex(ResolveIndexSavePath())) {
+        m_recordsAppliedSinceSave.store(0, std::memory_order_relaxed);
+        m_indexSaveRetryNeeded.store(false, std::memory_order_release);
+        m_lastSaveTime = std::chrono::steady_clock::now();
+    } else {
+        m_indexSaveRetryNeeded.store(true, std::memory_order_release);
+        Logger::Log(L"[WhereIsIt] SaveIndex failed; retaining dirty counters for retry.");
+    }
 }
 
 bool IndexingEngine::SaveIndex(const std::wstring& filePath) {
     std::shared_lock<std::shared_mutex> lock(m_dataMutex);
-    std::wstring tmpPath = filePath + L".tmp";
+    // A per-process temp file keeps concurrent app instances from truncating
+    // each other's in-progress save before the final atomic replace.
+    std::wstring tmpPath = filePath + L"." + std::to_wstring(GetCurrentProcessId()) + L".tmp";
 
     struct IndexHeader  { uint32_t Magic, Version, DriveCount, RecordCount, PoolSize, GiantCount; };
     struct DriveInfoBin { wchar_t Letter[4]; uint32_t Serial; uint64_t LastUsn; };
@@ -246,7 +272,7 @@ bool IndexingEngine::SaveIndex(const std::wstring& filePath) {
 
     uint8_t* p = base;
 
-    IndexHeader hdr = { 0x54494957, 9, driveCount, recordCount, poolSize, giantCount };
+    IndexHeader hdr = { 0x54494957, 10, driveCount, recordCount, poolSize, giantCount };
     memcpy(p, &hdr, sizeof(hdr)); p += sizeof(hdr);
 
     for (const auto& d : m_drives) {
@@ -323,7 +349,7 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
     if (p + sizeof(IndexHeader) > end) { Logger::Log(L"[WhereIsIt] Index too small for header."); return false; }
     const IndexHeader& h = *(const IndexHeader*)p; p += sizeof(IndexHeader);
 
-    if (h.Magic != 0x54494957 || h.Version != 9) {
+    if (h.Magic != 0x54494957 || h.Version != 10) {
         Logger::Log(L"[WhereIsIt] Index magic/version mismatch.");
         return false;
     }
@@ -340,14 +366,18 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
     }
 
     // --- Drive table ---
+    // Parse into temporary state. A truncated or corrupt index must never advance
+    // live USN cursors before the complete file has passed validation.
     if (p + (size_t)h.DriveCount * sizeof(DriveInfoBin) > end) { clearState(); return false; }
+    std::vector<uint64_t> tempLastUsns(h.DriveCount);
     for (uint32_t i = 0; i < h.DriveCount; ++i) {
         const DriveInfoBin& di = *(const DriveInfoBin*)p; p += sizeof(DriveInfoBin);
-        if (m_drives[i].SerialNumber != di.Serial || wcscmp(m_drives[i].Letter.c_str(), di.Letter) != 0) {
-            Logger::Log(L"[WhereIsIt] Drive configuration changed. Need full scan.");
+        if (di.Letter[3] != L'\0' || m_drives[i].SerialNumber != di.Serial ||
+            wcscmp(m_drives[i].Letter.c_str(), di.Letter) != 0) {
+            Logger::Log(L"[WhereIsIt] Drive configuration changed or corrupt. Need full scan.");
             clearState(); return false;
         }
-        m_drives[i].LastProcessedUsn = di.LastUsn;
+        tempLastUsns[i] = di.LastUsn;
     }
 
     // --- File records — single memcpy from mapped view ---
@@ -369,6 +399,7 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
     for (uint32_t gi = 0; gi < h.GiantCount; ++gi) {
         uint32_t idx;  memcpy(&idx,  p, sizeof(uint32_t)); p += sizeof(uint32_t);
         uint64_t sz;   memcpy(&sz,   p, sizeof(uint64_t)); p += sizeof(uint64_t);
+        if (idx >= h.RecordCount) { clearState(); return false; }
         tempGiant[idx] = sz;
     }
 
@@ -376,7 +407,7 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
     std::vector<std::vector<uint32_t>> tempLookup(h.DriveCount);
     std::vector<uint32_t> maxMft(h.DriveCount, 0);
     for (const auto& rec : tempRecords) {
-        if (rec.DriveIndex >= h.DriveCount || rec.NamePoolOffset >= h.PoolSize) { clearState(); return false; }
+        if (rec.DriveIndex >= h.DriveCount || !m_pool.IsValidStringOffset(rec.NamePoolOffset)) { clearState(); return false; }
         if (rec.MftIndex != kInvalidIndex && rec.MftIndex > maxMft[rec.DriveIndex])
             maxMft[rec.DriveIndex] = rec.MftIndex;
     }
@@ -397,6 +428,7 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
     if (m_recordsCount) InterlockedExchange(m_recordsCount, (LONG)tempRecords.size());
     m_mftLookupTables = std::move(tempLookup);
     m_giantFileSizes  = std::move(tempGiant);
+    for (uint32_t i = 0; i < h.DriveCount; ++i) m_drives[i].LastProcessedUsn = tempLastUsns[i];
     return true;
 }
 
@@ -495,7 +527,9 @@ uint32_t IndexingEngine::FileTimeToEpoch(uint64_t fileTime) const {
 }
 
 uint64_t IndexingEngine::EpochToFileTime(uint32_t epoch) const {
-    return UnixEpochSecondsToFileTime(epoch);
+    // Epoch zero is our persisted "unknown" sentinel. Do not marshal it as
+    // 1970-01-01, which makes optional Created/Accessed columns look real.
+    return epoch == 0 ? 0 : UnixEpochSecondsToFileTime(epoch);
 }
 
 uint64_t IndexingEngine::GetRecordFileSize(uint32_t recordIdx) const {
@@ -524,7 +558,7 @@ std::pair<FileRecord, std::wstring> IndexingEngine::GetRecordAndName(uint32_t re
     return { rec, GetWideNameFromPoolOffset(rec.NamePoolOffset) };
 }
 
-// Atomic fetch of all four detail-view display columns under one shared_lock.
+// Atomic fetch of all detail-view display columns under one shared_lock.
 // Calling GetRecord / GetRecordFileSize / GetParentPath separately means each
 // acquires its own lock; a USN delta arriving between two calls can change the
 // record, producing a size that belongs to the old record but attributes that
@@ -537,8 +571,10 @@ IIndexEngine::RowDisplayData IndexingEngine::GetRowDisplayData(uint32_t recordId
     d.Attributes = rec.FileAttributes;
     d.Name       = GetWideNameFromPoolOffset(rec.NamePoolOffset);
     d.FileSize   = ResolveFileSize(rec, recordIdx);   // giant-map aware, uses same lock scope
-    d.FileTime   = EpochToFileTime(rec.LastModifiedEpoch);
-    d.ParentPath = GetParentPathInternal(recordIdx);  // also lock-safe (no re-lock needed)
+    d.ModifiedFileTime = EpochToFileTime(rec.LastModifiedEpoch);
+    d.CreatedFileTime  = EpochToFileTime(rec.CreatedEpoch);
+    d.AccessedFileTime = EpochToFileTime(rec.AccessedEpoch);
+    d.ParentPath       = GetParentPathInternal(recordIdx);  // also lock-safe (no re-lock needed)
     return d;
 }
 
@@ -1292,6 +1328,10 @@ void IndexingEngine::SearchThread() {
                         if (sa < sb) primary = -1; else if (sa > sb) primary = 1;
                     } else if (sortKey == QuerySortKey::Date) {
                         if (ra.LastModifiedEpoch < rb.LastModifiedEpoch) primary = -1; else if (ra.LastModifiedEpoch > rb.LastModifiedEpoch) primary = 1;
+                    } else if (sortKey == QuerySortKey::Created) {
+                        if (ra.CreatedEpoch < rb.CreatedEpoch) primary = -1; else if (ra.CreatedEpoch > rb.CreatedEpoch) primary = 1;
+                    } else if (sortKey == QuerySortKey::Accessed) {
+                        if (ra.AccessedEpoch < rb.AccessedEpoch) primary = -1; else if (ra.AccessedEpoch > rb.AccessedEpoch) primary = 1;
                     } else if (sortKey == QuerySortKey::Extension) {
                         const char* na = m_pool.GetString(ra.NamePoolOffset);
                         const char* nb = m_pool.GetString(rb.NamePoolOffset);
@@ -1455,6 +1495,8 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
         rec.ParentMftIndex = d.ParentMftIndex;
         rec.MftIndex = d.MftIndex;
         rec.LastModifiedEpoch = FileTimeToEpoch(d.LastModified);
+        rec.CreatedEpoch = FileTimeToEpoch(d.Created);
+        rec.AccessedEpoch = FileTimeToEpoch(d.Accessed);
         rec.FileSize = (d.FileSize >= (uint64_t)kGiantFileMarker) ? kGiantFileMarker : static_cast<uint32_t>(d.FileSize);
         rec.MftSequence = d.MftSequence;
         rec.ParentSequence = d.ParentSequence;
@@ -1479,6 +1521,14 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
         }
         if (existing != kInvalidIndex && existing < GetRecordCount()) {
             if (m_recordPool.GetRecord(existing).MftSequence <= d.MftSequence) {
+                if (!d.HasFileMetadata && m_recordPool.GetRecord(existing).MftSequence == d.MftSequence) {
+                    const FileRecord& prior = m_recordPool.GetRecord(existing);
+                    rec.LastModifiedEpoch = prior.LastModifiedEpoch;
+                    rec.CreatedEpoch = prior.CreatedEpoch;
+                    rec.AccessedEpoch = prior.AccessedEpoch;
+                    rec.FileSize = prior.FileSize;
+                    rec.IsGiantFile = prior.IsGiantFile;
+                }
                 bool nameChanged = (m_recordPool.GetRecord(existing).NamePoolOffset != rec.NamePoolOffset);
                 if (nameChanged && !m_preSortedByName.empty()) {
                     auto it = std::lower_bound(m_preSortedByName.begin(), m_preSortedByName.end(), existing, [this](uint32_t a, uint32_t b) {
@@ -1506,8 +1556,10 @@ void IndexingEngine::ApplyPendingUsnDeltas() {
                     m_preSortedByName.insert(it, existing);
                 }
 
-                if (rec.IsGiantFile) m_giantFileSizes[existing] = d.FileSize;
-                else m_giantFileSizes.erase(existing);
+                if (d.HasFileMetadata) {
+                    if (rec.IsGiantFile) m_giantFileSizes[existing] = d.FileSize;
+                    else m_giantFileSizes.erase(existing);
+                }
             }
         } else {
             try {
@@ -1568,7 +1620,7 @@ void IndexingEngine::HandleUsnJournalRecord(USN_RECORD_V2* r, uint8_t di) {
 
     if (r->Reason & (USN_REASON_FILE_CREATE | USN_REASON_RENAME_NEW_NAME | USN_REASON_DATA_EXTEND | USN_REASON_DATA_TRUNCATION | USN_REASON_CLOSE)) {
         std::wstring name((LPCWSTR)((uint8_t*)r + r->FileNameOffset), r->FileNameLength/2);
-        uint64_t fileSize = 0, lastMod = 0;
+        uint64_t fileSize = 0, lastMod = 0, created = 0, accessed = 0;
 
         // #4: Build fullPath under short shared lock, then do filesystem I/O OUTSIDE the lock.
         // Previously GetFileAttributesExW was called while holding shared_lock — any slow disk
@@ -1589,6 +1641,8 @@ void IndexingEngine::HandleUsnJournalRecord(USN_RECORD_V2* r, uint8_t di) {
         if (GetFileAttributesExW(fullPath.c_str(), GetFileExInfoStandard, &att)) {
             fileSize = ((uint64_t)att.nFileSizeHigh << 32) | att.nFileSizeLow;
             lastMod  = ((uint64_t)att.ftLastWriteTime.dwHighDateTime << 32) | att.ftLastWriteTime.dwLowDateTime;
+            created  = ((uint64_t)att.ftCreationTime.dwHighDateTime << 32) | att.ftCreationTime.dwLowDateTime;
+            accessed = ((uint64_t)att.ftLastAccessTime.dwHighDateTime << 32) | att.ftLastAccessTime.dwLowDateTime;
         }
 
         PendingUsnDelta d;
@@ -1601,6 +1655,9 @@ void IndexingEngine::HandleUsnJournalRecord(USN_RECORD_V2* r, uint8_t di) {
         d.Name = std::move(name);
         d.FileSize = fileSize;
         d.LastModified = lastMod;
+        d.Created = created;
+        d.Accessed = accessed;
+        d.HasFileMetadata = lastMod != 0;
         d.FileAttributes = (uint16_t)r->FileAttributes;
         EnqueueUsnDelta(std::move(d));
     }
@@ -1706,13 +1763,18 @@ void IndexingEngine::MonitorChanges() {
         // Fully event-driven: block until one of:
         //   [0] m_stopEvent   — Stop() was called
         //   [1..N] change notifications — filesystem changed
-        // No polling, no busy loops, no CPU usage while idle, zero debounce delay.
-        DWORD waitMs = INFINITE;  // block forever until a real event fires
+        // Stay event-driven while healthy. After a persistence failure, wake
+        // periodically until index.dat has been durably replaced.
+        DWORD waitMs = m_indexSaveRetryNeeded.load(std::memory_order_acquire) ? 5000 : INFINITE;
         DWORD waitRes = WaitForMultipleObjects(
             (DWORD)waitHandles.size(), waitHandles.data(), FALSE, waitMs);
 
         if (!m_running || waitRes == WAIT_OBJECT_0) break;  // stop event
         if (waitRes == WAIT_FAILED) break;
+        if (waitRes == WAIT_TIMEOUT) {
+            MarkIndexSaved();
+            continue;
+        }
 
         // Drain the USN journal on each NTFS drive so we absorb every record
         // since the last scan, not just one 64 KB window.
@@ -2196,11 +2258,15 @@ void IndexingEngine::ScanGenericDrive(DriveScanContext& ctx, const std::wstring&
             uint32_t myLocalIdx = (uint32_t)ctx.Records.size();
             uint64_t fullSize = ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
             uint64_t fullTime = ((uint64_t)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime;
+            uint64_t createdTime = ((uint64_t)fd.ftCreationTime.dwHighDateTime << 32) | fd.ftCreationTime.dwLowDateTime;
+            uint64_t accessedTime = ((uint64_t)fd.ftLastAccessTime.dwHighDateTime << 32) | fd.ftLastAccessTime.dwLowDateTime;
             FileRecord rec = {};
             rec.NamePoolOffset = ctx.Pool.AddString(fd.cFileName);
             rec.ParentMftIndex = current.pIdx;
             rec.MftIndex = myLocalIdx;
             rec.LastModifiedEpoch = FileTimeToUnixEpochSeconds(fullTime);
+            rec.CreatedEpoch = FileTimeToUnixEpochSeconds(createdTime);
+            rec.AccessedEpoch = FileTimeToUnixEpochSeconds(accessedTime);
             rec.FileSize = fullSize >= 0xFFFFFFFFULL ? 0xFFFFFFFFu : (uint32_t)fullSize;
             rec.MftSequence = 0;
             rec.ParentSequence = current.pSeq;
@@ -2306,6 +2372,8 @@ void IndexingEngine::ScanMftForDrive(DriveScanContext& ctx) {
                 entry.ParentMftIndex   = (uint32_t)(fn->ParentDirectory & 0xFFFFFFFFFFFFLL);
                 entry.MftIndex         = effectiveMftIdx;
                 entry.LastModifiedEpoch = FileTimeToUnixEpochSeconds(fn->LastWriteTime);
+                entry.CreatedEpoch      = FileTimeToUnixEpochSeconds(fn->CreationTime);
+                entry.AccessedEpoch     = FileTimeToUnixEpochSeconds(fn->LastAccessTime);
                 entry.FileSize         = sizeToUse >= 0xFFFFFFFFULL ? 0xFFFFFFFFu : (uint32_t)sizeToUse;
                 entry.MftSequence      = seq;
                 entry.ParentSequence   = (uint16_t)(fn->ParentDirectory >> 48);

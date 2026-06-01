@@ -8,10 +8,10 @@ char* StringPool::Reserve(size_t needed) {
     if (m_chunks.empty() || m_chunkUsed + needed > kChunkSize) {
         size_t allocSize = (needed > kChunkSize) ? needed : kChunkSize;
         size_t chunkIdx = m_chunks.size();
-        wchar_t mapName[64];
+        wchar_t mapName[128];
         const wchar_t* pMapName = nullptr;
         if (m_shared) {
-            swprintf_s(mapName, L"Global\\WhereIsIt_PoolChunk_%zu", chunkIdx);
+            swprintf_s(mapName, L"Global\\WhereIsIt_v10_%lu_PoolChunk_%zu", GetCurrentProcessId(), chunkIdx);
             pMapName = mapName;
         }
 
@@ -88,6 +88,18 @@ const char* StringPool::GetString(uint32_t offset) const {
     size_t pos   = offset % kChunkSize;
     if (chunk >= m_chunks.size()) return "";
     return m_chunks[chunk].data + pos;
+}
+
+bool StringPool::IsValidStringOffset(uint32_t offset) const {
+    if (offset >= m_totalSize || m_chunks.empty()) return false;
+    const size_t chunk = offset / kChunkSize;
+    const size_t pos = offset % kChunkSize;
+    if (chunk >= m_chunks.size()) return false;
+
+    const bool isLast = chunk == m_chunks.size() - 1;
+    const size_t used = isLast ? m_chunkUsed : kChunkSize;
+    if (pos >= used) return false;
+    return memchr(m_chunks[chunk].data + pos, '\0', used - pos) != nullptr;
 }
 
 void StringPool::LoadRawData(const char* data, size_t size) {

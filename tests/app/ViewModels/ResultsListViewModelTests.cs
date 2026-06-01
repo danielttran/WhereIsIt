@@ -55,6 +55,10 @@ public class ResultsListViewModelTests
     [InlineData("name", false, "path", "")]
     [InlineData("name", false, "size", "")]
     [InlineData("path", false, "name", "")]
+    [InlineData("created", false, "created", " ▲")]
+    [InlineData("accessed", true, "accessed", " ▼")]
+    [InlineData("extension", false, "extension", " ▲")]
+    [InlineData("attributes", true, "attributes", " ▼")]
     public void SortIndicators_ReflectCurrentSortState(
         string sortKey, bool descending, string indicatorColumn, string expectedIndicator)
     {
@@ -67,6 +71,10 @@ public class ResultsListViewModelTests
             "path" => vm.PathSortIndicator,
             "size" => vm.SizeSortIndicator,
             "modified" => vm.ModifiedSortIndicator,
+            "created" => vm.CreatedSortIndicator,
+            "accessed" => vm.AccessedSortIndicator,
+            "extension" => vm.ExtensionSortIndicator,
+            "attributes" => vm.AttributesSortIndicator,
             _ => throw new InvalidOperationException()
         };
 

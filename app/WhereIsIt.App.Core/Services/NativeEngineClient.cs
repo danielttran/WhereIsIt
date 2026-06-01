@@ -26,6 +26,9 @@ public sealed class NativeEngineClient : IEngineClient, IDisposable
     private static class Native
     {
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int engine_api_version();
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr engine_create();
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
@@ -60,11 +63,13 @@ public sealed class NativeEngineClient : IEngineClient, IDisposable
 
         // Returns 0 on success, -1 on not found
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
-        public static extern int engine_get_row(IntPtr h, uint recordId,
+        public static extern int engine_get_row_v2(IntPtr h, uint recordId,
             StringBuilder name,       int nameMax,
             StringBuilder parentPath, int parentMax,
             out ulong sizeBytes,
             out ulong modifiedFileTime,
+            out ulong createdFileTime,
+            out ulong accessedFileTime,
             out ushort attributes);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
@@ -102,6 +107,9 @@ public sealed class NativeEngineClient : IEngineClient, IDisposable
     /// Pass before the engine starts so the initial scan respects the scope.</param>
     public NativeEngineClient(string[]? scopeRoots = null)
     {
+        if (!IsAvailable())
+            throw new DllNotFoundException("A schema-v10-capable WhereIsIt.Engine.Native.dll was not found.");
+
         _handle = Native.engine_create();
         if (_handle == IntPtr.Zero)
             throw new InvalidOperationException("engine_create() returned null.");
@@ -130,9 +138,6 @@ public sealed class NativeEngineClient : IEngineClient, IDisposable
     public Task SortAsync(string key, bool descending, CancellationToken cancellationToken)
     {
         if (_handle == IntPtr.Zero) return Task.CompletedTask;
-        // created/accessed are not in the native 32-byte FileRecord, so they
-        // fall through to Name (0) on the native engine; the InProc fallback
-        // sorts them correctly.
         int sortKey = key switch
         {
             "path"                      => 1,
@@ -140,6 +145,8 @@ public sealed class NativeEngineClient : IEngineClient, IDisposable
             "modified"                  => 3,
             "extension" or "type" or "ext" => 4,
             "attributes" or "attrib"    => 5,
+            "created"                    => 6,
+            "accessed"                   => 7,
             _                           => 0,
         };
         Native.engine_sort(_handle, sortKey, descending ? 1 : 0);
@@ -153,26 +160,30 @@ public sealed class NativeEngineClient : IEngineClient, IDisposable
 
         var name       = new StringBuilder(512);
         var parentPath = new StringBuilder(4096);
-        int rc = Native.engine_get_row(
+        int rc = Native.engine_get_row_v2(
             _handle, recordId,
             name, 512, parentPath, 4096,
             out ulong sizeBytes,
             out ulong modifiedFileTime,
+            out ulong createdFileTime,
+            out ulong accessedFileTime,
             out ushort attributes);
 
         if (rc != 0)
             return Task.FromResult(new ResultRowModel("?", "?", 0, DateTimeOffset.UtcNow, ""));
 
-        var modified = modifiedFileTime > 0
-            ? DateTimeOffset.FromFileTime((long)modifiedFileTime)
-            : DateTimeOffset.UtcNow;
+        var modified = FromOptionalFileTime(modifiedFileTime, DateTimeOffset.UtcNow);
 
         return Task.FromResult(new ResultRowModel(
             name.ToString(),
             parentPath.ToString(),
             sizeBytes,
             modified,
-            FormatAttributes((System.IO.FileAttributes)attributes)));
+            FormatAttributes((System.IO.FileAttributes)attributes))
+        {
+            CreatedUtc = FromOptionalFileTime(createdFileTime),
+            AccessedUtc = FromOptionalFileTime(accessedFileTime),
+        });
     }
 
     // ------------------------------------------------------------------ //
@@ -243,6 +254,13 @@ public sealed class NativeEngineClient : IEngineClient, IDisposable
     // Helpers                                                              //
     // ------------------------------------------------------------------ //
 
+    private static DateTimeOffset FromOptionalFileTime(ulong fileTime, DateTimeOffset fallback = default)
+    {
+        if (fileTime == 0 || fileTime > long.MaxValue) return fallback;
+        try { return DateTimeOffset.FromFileTime((long)fileTime); }
+        catch (ArgumentOutOfRangeException) { return fallback; }
+    }
+
     private static string FormatAttributes(System.IO.FileAttributes attr)
     {
         return string.Concat(
@@ -264,13 +282,13 @@ public sealed class NativeEngineClient : IEngineClient, IDisposable
         return Native.engine_get_status(_handle, buf, 1024) == 0 ? buf.ToString() : "";
     }
 
-    /// <summary>Returns true if WhereIsIt.Engine.Native.dll is present.</summary>
+    /// <summary>Returns true if a schema-v10-capable native DLL is present.</summary>
     public static bool IsAvailable()
     {
         try
         {
             var path = Path.Combine(AppContext.BaseDirectory, DllName);
-            return File.Exists(path);
+            return File.Exists(path) && Native.engine_api_version() >= 10;
         }
         catch { return false; }
     }

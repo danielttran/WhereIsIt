@@ -13,6 +13,7 @@ public:
     uint32_t AddString(const std::wstring& text);
     uint32_t AddString(const wchar_t* text, size_t length);
     const char* GetString(uint32_t offset) const;
+    bool IsValidStringOffset(uint32_t offset) const;
     size_t GetSize() const { return m_totalSize; }
     void Clear();
     void LoadRawData(const char* data, size_t size);

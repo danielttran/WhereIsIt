@@ -33,9 +33,11 @@ bool CompareByKey(const SortRecord& a, const SortRecord& b, QuerySortKey key, bo
         else if (a.size > b.size) cmp = 1;
         if (cmp == 0) cmp = CompareNoCase(a.name, b.name);
     }
-    else if (key == QuerySortKey::Date) {
-        if (a.date < b.date) cmp = -1;
-        else if (a.date > b.date) cmp = 1;
+    else if (key == QuerySortKey::Date || key == QuerySortKey::Created || key == QuerySortKey::Accessed) {
+        const uint64_t av = key == QuerySortKey::Date ? a.date : (key == QuerySortKey::Created ? a.created : a.accessed);
+        const uint64_t bv = key == QuerySortKey::Date ? b.date : (key == QuerySortKey::Created ? b.created : b.accessed);
+        if (av < bv) cmp = -1;
+        else if (av > bv) cmp = 1;
         if (cmp == 0) cmp = CompareNoCase(a.name, b.name);
     }
     else {

@@ -20,6 +20,9 @@ typedef void* EngineHandle;
 /* Lifecycle                                                            */
 /* ------------------------------------------------------------------ */
 
+/* Native ABI version. Increment when adding a versioned API surface. */
+ENGINE_API int engine_api_version(void);
+
 /* Create engine state. Returns NULL on allocation failure. */
 ENGINE_API EngineHandle engine_create(void);
 
@@ -43,7 +46,8 @@ ENGINE_API void engine_stop(EngineHandle h);
 ENGINE_API void engine_search(EngineHandle h, const wchar_t* query);
 
 /* Re-sort the current result set.
-   sortKey: 0=name, 1=path, 2=size, 3=modified-date.
+   sortKey: 0=name, 1=path, 2=size, 3=modified-date, 4=extension,
+            5=attributes, 6=created-date, 7=accessed-date.
    descending: 0=ascending, 1=descending. */
 ENGINE_API void engine_sort(EngineHandle h, int sortKey, int descending);
 
@@ -75,7 +79,7 @@ ENGINE_API void engine_get_result_ids(EngineHandle h, uint32_t* buf, int count);
    Returns the number of IDs written. */
 ENGINE_API int engine_get_results(EngineHandle h, uint32_t* buf, int capacity, int* outTotal);
 
-/* Fetch display data for one record.
+/* Fetch v1 display data for one record.
    Returns 0 on success, -1 if recordId is out of range.
    modifiedFileTime: Windows FILETIME ticks (100-ns intervals since 1601-01-01). */
 ENGINE_API int engine_get_row(EngineHandle h, uint32_t recordId,
@@ -83,6 +87,17 @@ ENGINE_API int engine_get_row(EngineHandle h, uint32_t recordId,
     wchar_t*  parentPath, int parentMax,
     uint64_t* sizeBytes,
     uint64_t* modifiedFileTime,
+    uint16_t* attributes);
+
+/* v2 adds optional Created/Accessed timestamps while retaining the v1 export
+   for existing native consumers. */
+ENGINE_API int engine_get_row_v2(EngineHandle h, uint32_t recordId,
+    wchar_t*  name,       int nameMax,
+    wchar_t*  parentPath, int parentMax,
+    uint64_t* sizeBytes,
+    uint64_t* modifiedFileTime,
+    uint64_t* createdFileTime,
+    uint64_t* accessedFileTime,
     uint16_t* attributes);
 
 /* ------------------------------------------------------------------ */

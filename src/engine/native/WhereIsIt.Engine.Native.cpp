@@ -67,6 +67,10 @@ static void copy_wide(wchar_t* dst, int dstMax, const std::wstring& src) noexcep
 
 extern "C" {
 
+int engine_api_version() {
+    return 10;
+}
+
 EngineHandle engine_create() {
     try { return new EngineState(); }
     catch (...) { return nullptr; }
@@ -132,6 +136,8 @@ void engine_sort(EngineHandle h, int sortKey, int descending) {
         case 3:  key = QuerySortKey::Date; break;
         case 4:  key = QuerySortKey::Extension; break;
         case 5:  key = QuerySortKey::Attributes; break;
+        case 6:  key = QuerySortKey::Created; break;
+        case 7:  key = QuerySortKey::Accessed; break;
         default: key = QuerySortKey::Name; break;
     }
     static_cast<EngineState*>(h)->engine.Sort(key, descending != 0);
@@ -216,6 +222,19 @@ int engine_get_row(EngineHandle h, uint32_t recordId,
     uint64_t* modifiedFileTime,
     uint16_t* attributes)
 {
+    return engine_get_row_v2(h, recordId, name, nameMax, parentPath, parentMax,
+        sizeBytes, modifiedFileTime, nullptr, nullptr, attributes);
+}
+
+int engine_get_row_v2(EngineHandle h, uint32_t recordId,
+    wchar_t* name,       int nameMax,
+    wchar_t* parentPath, int parentMax,
+    uint64_t* sizeBytes,
+    uint64_t* modifiedFileTime,
+    uint64_t* createdFileTime,
+    uint64_t* accessedFileTime,
+    uint16_t* attributes)
+{
     if (!h) return -1;
     auto* s = static_cast<EngineState*>(h);
 
@@ -225,7 +244,9 @@ int engine_get_row(EngineHandle h, uint32_t recordId,
     copy_wide(name, nameMax, row.Name);
     copy_wide(parentPath, parentMax, row.ParentPath);
     if (sizeBytes)        *sizeBytes        = row.FileSize;
-    if (modifiedFileTime) *modifiedFileTime = row.FileTime;
+    if (modifiedFileTime) *modifiedFileTime = row.ModifiedFileTime;
+    if (createdFileTime)  *createdFileTime  = row.CreatedFileTime;
+    if (accessedFileTime) *accessedFileTime = row.AccessedFileTime;
     if (attributes)       *attributes       = row.Attributes;
     return 0;
 }
