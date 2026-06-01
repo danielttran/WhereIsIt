@@ -8,6 +8,7 @@ namespace WhereIsIt.App.ViewModels;
 public partial class SettingsViewModel : ObservableObject
 {
     private readonly AppSettingsService settingsService;
+    private readonly System.Action<bool>? applyStartupRegistration;
 
     [ObservableProperty] private string indexScopeConfig = string.Empty;
     [ObservableProperty] private string globalHotkey = "Ctrl+Alt+W";
@@ -19,9 +20,10 @@ public partial class SettingsViewModel : ObservableObject
     private string? validationMessage;
     [ObservableProperty] private bool saved;
 
-    public SettingsViewModel(AppSettingsService settingsService)
+    public SettingsViewModel(AppSettingsService settingsService, System.Action<bool>? applyStartupRegistration = null)
     {
         this.settingsService = settingsService;
+        this.applyStartupRegistration = applyStartupRegistration;
         var settings = settingsService.Load();
         IndexScopeConfig = string.Join(", ", settings.ScopeRoots);
         GlobalHotkey = settings.GlobalHotkey;
@@ -72,6 +74,7 @@ public partial class SettingsViewModel : ObservableObject
         current.EnableHttpServer = EnableHttpServer;
         current.HttpServerPort = httpServerPort;
         settingsService.Save(current);
+        applyStartupRegistration?.Invoke(current.StartWithWindows);
         ValidationMessage = null;
         Saved = true;
     }

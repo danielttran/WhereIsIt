@@ -41,6 +41,21 @@ public class SettingsViewModelTests : IDisposable
         Assert.Equal(43210, saved.HttpServerPort);
     }
 
+    [Fact]
+    public void Save_AppliesStartupRegistrationImmediately()
+    {
+        using var service = new AppSettingsService(tempPath);
+        bool? applied = null;
+        var vm = new SettingsViewModel(service, enabled => applied = enabled)
+        {
+            StartWithWindows = true,
+        };
+
+        vm.SaveCommand.Execute(null);
+
+        Assert.True(applied);
+    }
+
     [Theory]
     [InlineData("Ctrl+NoSuchKey", "12321")]
     [InlineData("Ctrl+Alt+W", "70000")]

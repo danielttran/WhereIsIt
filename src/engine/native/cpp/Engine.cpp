@@ -216,9 +216,14 @@ std::wstring IndexingEngine::ResolveIndexSavePath() {
 }
 
 void IndexingEngine::MarkIndexSaved() {
-    SaveIndex(ResolveIndexSavePath());
-    m_recordsAppliedSinceSave.store(0, std::memory_order_relaxed);
-    m_lastSaveTime = std::chrono::steady_clock::now();
+    if (SaveIndex(ResolveIndexSavePath())) {
+        m_recordsAppliedSinceSave.store(0, std::memory_order_relaxed);
+        m_indexSaveRetryNeeded.store(false, std::memory_order_release);
+        m_lastSaveTime = std::chrono::steady_clock::now();
+    } else {
+        m_indexSaveRetryNeeded.store(true, std::memory_order_release);
+        Logger::Log(L"[WhereIsIt] SaveIndex failed; retaining dirty counters for retry.");
+    }
 }
 
 bool IndexingEngine::SaveIndex(const std::wstring& filePath) {
@@ -361,14 +366,18 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
     }
 
     // --- Drive table ---
+    // Parse into temporary state. A truncated or corrupt index must never advance
+    // live USN cursors before the complete file has passed validation.
     if (p + (size_t)h.DriveCount * sizeof(DriveInfoBin) > end) { clearState(); return false; }
+    std::vector<uint64_t> tempLastUsns(h.DriveCount);
     for (uint32_t i = 0; i < h.DriveCount; ++i) {
         const DriveInfoBin& di = *(const DriveInfoBin*)p; p += sizeof(DriveInfoBin);
-        if (m_drives[i].SerialNumber != di.Serial || wcscmp(m_drives[i].Letter.c_str(), di.Letter) != 0) {
-            Logger::Log(L"[WhereIsIt] Drive configuration changed. Need full scan.");
+        if (di.Letter[3] != L'\0' || m_drives[i].SerialNumber != di.Serial ||
+            wcscmp(m_drives[i].Letter.c_str(), di.Letter) != 0) {
+            Logger::Log(L"[WhereIsIt] Drive configuration changed or corrupt. Need full scan.");
             clearState(); return false;
         }
-        m_drives[i].LastProcessedUsn = di.LastUsn;
+        tempLastUsns[i] = di.LastUsn;
     }
 
     // --- File records — single memcpy from mapped view ---
@@ -390,6 +399,7 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
     for (uint32_t gi = 0; gi < h.GiantCount; ++gi) {
         uint32_t idx;  memcpy(&idx,  p, sizeof(uint32_t)); p += sizeof(uint32_t);
         uint64_t sz;   memcpy(&sz,   p, sizeof(uint64_t)); p += sizeof(uint64_t);
+        if (idx >= h.RecordCount) { clearState(); return false; }
         tempGiant[idx] = sz;
     }
 
@@ -397,7 +407,7 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
     std::vector<std::vector<uint32_t>> tempLookup(h.DriveCount);
     std::vector<uint32_t> maxMft(h.DriveCount, 0);
     for (const auto& rec : tempRecords) {
-        if (rec.DriveIndex >= h.DriveCount || rec.NamePoolOffset >= h.PoolSize) { clearState(); return false; }
+        if (rec.DriveIndex >= h.DriveCount || !m_pool.IsValidStringOffset(rec.NamePoolOffset)) { clearState(); return false; }
         if (rec.MftIndex != kInvalidIndex && rec.MftIndex > maxMft[rec.DriveIndex])
             maxMft[rec.DriveIndex] = rec.MftIndex;
     }
@@ -418,6 +428,7 @@ bool IndexingEngine::LoadIndex(const std::wstring& filePath) {
     if (m_recordsCount) InterlockedExchange(m_recordsCount, (LONG)tempRecords.size());
     m_mftLookupTables = std::move(tempLookup);
     m_giantFileSizes  = std::move(tempGiant);
+    for (uint32_t i = 0; i < h.DriveCount; ++i) m_drives[i].LastProcessedUsn = tempLastUsns[i];
     return true;
 }
 
@@ -1752,13 +1763,18 @@ void IndexingEngine::MonitorChanges() {
         // Fully event-driven: block until one of:
         //   [0] m_stopEvent   — Stop() was called
         //   [1..N] change notifications — filesystem changed
-        // No polling, no busy loops, no CPU usage while idle, zero debounce delay.
-        DWORD waitMs = INFINITE;  // block forever until a real event fires
+        // Stay event-driven while healthy. After a persistence failure, wake
+        // periodically until index.dat has been durably replaced.
+        DWORD waitMs = m_indexSaveRetryNeeded.load(std::memory_order_acquire) ? 5000 : INFINITE;
         DWORD waitRes = WaitForMultipleObjects(
             (DWORD)waitHandles.size(), waitHandles.data(), FALSE, waitMs);
 
         if (!m_running || waitRes == WAIT_OBJECT_0) break;  // stop event
         if (waitRes == WAIT_FAILED) break;
+        if (waitRes == WAIT_TIMEOUT) {
+            MarkIndexSaved();
+            continue;
+        }
 
         // Drain the USN journal on each NTFS drive so we absorb every record
         // since the last scan, not just one 64 KB window.

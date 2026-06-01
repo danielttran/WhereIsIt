@@ -90,6 +90,18 @@ const char* StringPool::GetString(uint32_t offset) const {
     return m_chunks[chunk].data + pos;
 }
 
+bool StringPool::IsValidStringOffset(uint32_t offset) const {
+    if (offset >= m_totalSize || m_chunks.empty()) return false;
+    const size_t chunk = offset / kChunkSize;
+    const size_t pos = offset % kChunkSize;
+    if (chunk >= m_chunks.size()) return false;
+
+    const bool isLast = chunk == m_chunks.size() - 1;
+    const size_t used = isLast ? m_chunkUsed : kChunkSize;
+    if (pos >= used) return false;
+    return memchr(m_chunks[chunk].data + pos, '\0', used - pos) != nullptr;
+}
+
 void StringPool::LoadRawData(const char* data, size_t size) {
     for (auto& chunk : m_chunks) {
         if (chunk.hMap) {

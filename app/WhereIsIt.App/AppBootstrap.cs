@@ -54,7 +54,7 @@ public static class AppBootstrap
         services.AddTransient<ResultsListViewModel>();
         services.AddTransient<ResultRowViewModel>();
         services.AddTransient<StatusBarViewModel>();
-        services.AddSingleton<SettingsViewModel>();
+        services.AddSingleton(_ => new SettingsViewModel(settingsService, StartupRegistration.Apply));
         var provider = services.BuildServiceProvider();
         // Singleton factories are lazy. Resolve the optional server eagerly or
         // merely registering it leaves the configured endpoint permanently off.

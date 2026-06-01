@@ -69,6 +69,20 @@ public class AppSettingsServiceTests : IDisposable
     }
 
     [Fact]
+    public void Load_DoesNotQuarantineValidSettings_WhenReadIsTemporarilyBlocked()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        Directory.CreateDirectory(Path.GetDirectoryName(tempPath)!);
+        File.WriteAllText(tempPath, "{}");
+        using var exclusive = new FileStream(tempPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        using var service = new AppSettingsService(tempPath);
+
+        Assert.ThrowsAny<IOException>(() => service.Load());
+        Assert.True(File.Exists(tempPath));
+        Assert.Empty(Directory.GetFiles(Path.GetDirectoryName(tempPath)!, "settings.json.bak.*"));
+    }
+
+    [Fact]
     public void Load_ReturnsDefaults_WhenFileIsCorrupt()
     {
         Directory.CreateDirectory(Path.GetDirectoryName(tempPath)!);

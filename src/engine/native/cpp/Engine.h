@@ -238,6 +238,7 @@ private:
     // never trigger a write storm but a busy session still persists progress.
     std::chrono::steady_clock::time_point m_lastSaveTime{};
     std::atomic<uint32_t>                 m_recordsAppliedSinceSave{ 0 };
+    std::atomic<bool>                     m_indexSaveRetryNeeded{ false };
     static constexpr uint32_t             kSaveAfterRecords = 50'000;
     static constexpr auto                 kSaveAfterDuration = std::chrono::seconds(60);
     mutable std::mutex m_statusMutex;

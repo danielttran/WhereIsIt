@@ -62,11 +62,13 @@ public sealed class AppSettingsService : IDisposable
             var json = File.ReadAllText(settingsPath);
             return JsonSerializer.Deserialize<AppSettings>(json, JsonOpts) ?? new AppSettings();
         }
-        catch
+        catch (JsonException)
         {
-            // Corrupt JSON would silently wipe bookmarks/history/run-counts/
+            // Malformed JSON would silently wipe bookmarks/history/run-counts/
             // scope-roots if we just returned defaults — move the bad file
             // aside so the user (or a later schema-migrating Load) can recover.
+            // I/O failures intentionally escape: treating an access or sharing
+            // failure as corruption could later overwrite a valid settings file.
             TryBackupCorruptSettings();
             return new AppSettings();
         }
@@ -264,15 +266,16 @@ public sealed class AppSettingsService : IDisposable
             flushTimer?.Dispose();
             flushTimer = null;
         }
-        // Final synchronous flush so a debounced write in flight isn't lost on
-        // shutdown. Blocking here is acceptable — the app is exiting.
+        // Always write the latest cached snapshot synchronously. A timer callback
+        // may already have claimed `dirty` and be blocked in WriteToDisk, so checking
+        // only the flag can let Dispose return before the newest state is durable.
+        // Blocking here is acceptable — the app is exiting.
         AppSettings? snapshot = null;
         long snapshotRevision = 0;
         lock (gate)
         {
-            bool needWrite;
-            lock (flushGate) { needWrite = dirty; dirty = false; }
-            if (needWrite && cached is not null)
+            lock (flushGate) dirty = false;
+            if (cached is not null)
             {
                 snapshot = Clone(cached);
                 snapshotRevision = revision;

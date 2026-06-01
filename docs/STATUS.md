@@ -106,6 +106,7 @@ Closed this session:
 - ✅ Settings polish — index scope, hotkey, run-on-startup, and localhost HTTP server options are editable with validation
 - ✅ Native Created/Accessed parity — index schema v10 stores all three timestamps, safely rebuilds v9 indexes, preserves the v1 row ABI while adding version-probed `engine_get_row_v2`, isolates v10 shared-memory mappings from older processes, marshals Created/Accessed rows to C#, and sorts both columns natively
 - ✅ Production-readiness follow-up — eagerly starts the opt-in HTTP server, fixes native `sort:desc` / `sort:asc`, makes settings flush retries durable, explicitly uses the Recycle Bin, rejects unsafe Windows rename targets, and isolates concurrent native app processes
+- ✅ Production-readiness audit round 2 — retries failed native incremental saves, validates persisted string/drive/giant-index data before commit, guarantees the latest settings snapshot is flushed on shutdown, releases timed-out HTTP subscriptions, tightens HTTP route matching, and applies startup registration immediately after save
 
 The aspirational `src/core/`, `src/adapters/win32/`, `src/engine/winrt/`, `service/` scaffolds are still present as empty/partial vcxprojs. They are NOT on the active build path; the only C++ project that's built is `src/engine/native/WhereIsIt.Engine.Native.vcxproj`. Decide later whether to refactor the engine into the layered architecture or remove those folders.
 
