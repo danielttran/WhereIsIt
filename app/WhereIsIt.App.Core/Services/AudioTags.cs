@@ -28,6 +28,13 @@ public sealed class AudioTags
     public string? Track { get; private set; }
     public string? Comment { get; private set; }
 
+    /// <summary>Audio sample rate in Hz (0 when unknown).</summary>
+    public int SampleRate { get; private set; }
+    /// <summary>Channel count (0 when unknown).</summary>
+    public int Channels { get; private set; }
+    /// <summary>Playback duration in whole seconds (0 when unknown).</summary>
+    public long DurationSeconds { get; private set; }
+
     public string? Get(MediaField f) => f switch
     {
         MediaField.Title => Title,
@@ -60,6 +67,18 @@ public sealed class AudioTags
             var needle = matchDiacritics ? mf.Value : QueryParser.RemoveDiacritics(mf.Value);
             if (!hay.Contains(needle, cmp)) return false;
         }
+        return true;
+    }
+
+    /// <summary>True when the file's audio stream properties satisfy the given
+    /// duration (seconds) / sample-rate (Hz) / channel filters. Files whose
+    /// stream info can't be read don't match.</summary>
+    public static bool MatchStream(string path, SizeRange? duration, SizeRange? sampleRate, SizeRange? channels)
+    {
+        if (!TryRead(path, out var t)) return false;
+        if (duration is not null && !duration.Matches((ulong)(t.DurationSeconds < 0 ? 0 : t.DurationSeconds))) return false;
+        if (sampleRate is not null && !sampleRate.Matches((ulong)t.SampleRate)) return false;
+        if (channels is not null && !channels.Matches((ulong)t.Channels)) return false;
         return true;
     }
 
@@ -107,7 +126,7 @@ public sealed class AudioTags
             int len = (bh[1] << 16) | (bh[2] << 8) | bh[3];
             if (len < 0 || len > 8 * 1024 * 1024) break;
 
-            if (type == 4) // VORBIS_COMMENT
+            if (type == 0 || type == 4) // STREAMINFO or VORBIS_COMMENT
             {
                 var block = new byte[len];
                 int read = 0;
@@ -117,12 +136,15 @@ public sealed class AudioTags
                     if (n <= 0) break;
                     read += n;
                 }
-                any |= ParseVorbisComment(block, 0, read);
-                break; // comments found; no need to scan further
+                if (type == 0) any |= ParseStreamInfo(block, read);
+                else any |= ParseVorbisComment(block, 0, read);
+            }
+            else
+            {
+                fs.Seek(len, SeekOrigin.Current); // skip other block types
             }
 
             if (last) break;
-            fs.Seek(len, SeekOrigin.Current); // skip non-comment block
         }
         return any;
     }
@@ -162,6 +184,18 @@ public sealed class AudioTags
         _ => null,
     };
 
+    private bool ParseStreamInfo(byte[] b, int len)
+    {
+        // STREAMINFO: ... [10..] packed sampleRate(20) channels(3) bps(5) totalSamples(36).
+        if (len < 18) return false;
+        SampleRate = (b[10] << 12) | (b[11] << 4) | (b[12] >> 4);
+        Channels = ((b[12] >> 1) & 0x07) + 1;
+        long totalSamples = ((long)(b[13] & 0x0F) << 32) | ((long)b[14] << 24)
+                          | ((long)b[15] << 16) | ((long)b[16] << 8) | b[17];
+        if (SampleRate > 0 && totalSamples > 0) DurationSeconds = totalSamples / SampleRate;
+        return SampleRate > 0;
+    }
+
     private static int Le32(byte[] b, int i) => b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | (b[i + 3] << 24);
 
     // ── OGG (Vorbis comment header packet) ───────────────────────────────
@@ -198,11 +232,44 @@ public sealed class AudioTags
     {
         long end = fs.Length;
         if (!FindAtom(fs, 0, end, "moov", out long ms, out long me)) return false;
-        if (!FindAtom(fs, ms, me, "udta", out long us, out long ue)) return false;
-        if (!FindAtom(fs, us, ue, "meta", out long mes, out long mee)) return false;
-        // The meta atom carries a 4-byte version/flags before its children.
-        if (!FindAtom(fs, mes + 4, mee, "ilst", out long ls, out long le)) return false;
-        return ParseIlst(fs, ls, le);
+
+        bool any = false;
+        // mvhd carries timescale + duration → playback length.
+        if (FindAtom(fs, ms, me, "mvhd", out long vs, out long ve))
+            any |= ParseMvhd(fs, vs, ve);
+
+        if (FindAtom(fs, ms, me, "udta", out long us, out long ue)
+            && FindAtom(fs, us, ue, "meta", out long mes, out long mee)
+            // The meta atom carries a 4-byte version/flags before its children.
+            && FindAtom(fs, mes + 4, mee, "ilst", out long ls, out long le))
+            any |= ParseIlst(fs, ls, le);
+
+        return any;
+    }
+
+    private bool ParseMvhd(FileStream fs, long start, long end)
+    {
+        int len = (int)Math.Min(end - start, 32);
+        if (len < 20) return false;
+        var b = new byte[len];
+        fs.Seek(start, SeekOrigin.Begin);
+        if (fs.Read(b, 0, len) != len) return false;
+        int version = b[0];
+        long timescale, duration;
+        if (version == 1)
+        {
+            if (len < 32) return false;
+            timescale = ((long)b[20] << 24) | ((long)b[21] << 16) | ((long)b[22] << 8) | b[23];
+            duration = ((long)b[24] << 56) | ((long)b[25] << 48) | ((long)b[26] << 40) | ((long)b[27] << 32)
+                     | ((long)b[28] << 24) | ((long)b[29] << 16) | ((long)b[30] << 8) | b[31];
+        }
+        else
+        {
+            timescale = ((long)b[12] << 24) | ((long)b[13] << 16) | ((long)b[14] << 8) | b[15];
+            duration = ((long)b[16] << 24) | ((long)b[17] << 16) | ((long)b[18] << 8) | b[19];
+        }
+        if (timescale > 0 && duration > 0) DurationSeconds = duration / timescale;
+        return timescale > 0;
     }
 
     private bool ParseIlst(FileStream fs, long start, long end)

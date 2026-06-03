@@ -142,6 +142,50 @@ public class AudioTagsTests
         finally { File.Delete(path); }
     }
 
+    private static byte[] FlacBlock(int type, bool last, byte[] content)
+    {
+        var b = new byte[4 + content.Length];
+        b[0] = (byte)((last ? 0x80 : 0) | (type & 0x7F));
+        b[1] = (byte)((content.Length >> 16) & 0xFF);
+        b[2] = (byte)((content.Length >> 8) & 0xFF);
+        b[3] = (byte)(content.Length & 0xFF);
+        content.CopyTo(b, 4);
+        return b;
+    }
+
+    private static byte[] StreamInfo(int sampleRate, int channels, long totalSamples)
+    {
+        var c = new byte[34];
+        c[10] = (byte)((sampleRate >> 12) & 0xFF);
+        c[11] = (byte)((sampleRate >> 4) & 0xFF);
+        c[12] = (byte)(((sampleRate & 0x0F) << 4) | (((channels - 1) & 0x07) << 1) | (((16 - 1) >> 4) & 0x01));
+        c[13] = (byte)((((16 - 1) & 0x0F) << 4) | (int)((totalSamples >> 32) & 0x0F));
+        c[14] = (byte)((totalSamples >> 24) & 0xFF);
+        c[15] = (byte)((totalSamples >> 16) & 0xFF);
+        c[16] = (byte)((totalSamples >> 8) & 0xFF);
+        c[17] = (byte)(totalSamples & 0xFF);
+        return c;
+    }
+
+    [Fact]
+    public void TryRead_Flac_ReadsStreamInfo()
+    {
+        // 44.1 kHz, stereo, 441000 samples → 10 seconds.
+        var file = Cat(
+            Encoding.ASCII.GetBytes("fLaC"),
+            FlacBlock(0, false, StreamInfo(44100, 2, 441000)),
+            FlacBlock(4, true, VorbisComments("ARTIST=Test")));
+        var path = WriteTemp(file);
+        try
+        {
+            AudioTags.TryRead(path, out var tags).Should().BeTrue();
+            tags.SampleRate.Should().Be(44100);
+            tags.Channels.Should().Be(2);
+            tags.DurationSeconds.Should().Be(10);
+        }
+        finally { File.Delete(path); }
+    }
+
     // ── M4A / MP4 atom builders ──────────────────────────────────────────
 
     private static byte[] Atom(string type, byte[] content) => AtomRaw(Encoding.ASCII.GetBytes(type), content);

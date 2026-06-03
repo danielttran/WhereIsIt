@@ -280,6 +280,12 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
             if (!AudioTags.Match(q.MediaFilters, fullPath, q.CaseSensitive, q.MatchDiacritics)) return false;
         }
 
+        if (q.Duration is not null || q.SampleRate is not null || q.Channels is not null)
+        {
+            if (isDir) return false;
+            if (!AudioTags.MatchStream(fullPath, q.Duration, q.SampleRate, q.Channels)) return false;
+        }
+
         if (q.TermExpr is null && q.Clauses.Count == 0) return true;
 
         var cmp = q.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;

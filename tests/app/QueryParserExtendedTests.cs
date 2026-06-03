@@ -232,6 +232,38 @@ public class QueryParserExtendedTests
         QueryParser.Parse("artist:Pink Floyd").MediaFilters[0].Value.Should().Be("Pink");
     }
 
+    // ── audio stream properties (duration:/samplerate:/channels:) ─────────
+
+    [Fact]
+    public void Parse_Duration_Seconds_ParsesComparison()
+    {
+        var q = QueryParser.Parse("duration:>180");
+        q.Duration.Should().NotBeNull();
+        q.Duration!.Op.Should().Be(SizeOp.GreaterThan);
+        q.Duration.Low.Should().Be(180UL);
+    }
+
+    [Fact]
+    public void Parse_Duration_ClockForm_ConvertsToSeconds()
+    {
+        var q = QueryParser.Parse("duration:3:30");
+        q.Duration!.Op.Should().Be(SizeOp.Equal);
+        q.Duration.Low.Should().Be(210UL); // 3*60 + 30
+    }
+
+    [Fact]
+    public void Parse_SampleRateAndChannels()
+    {
+        QueryParser.Parse("samplerate:44100").SampleRate!.Low.Should().Be(44100UL);
+        QueryParser.Parse("channels:2").Channels!.Low.Should().Be(2UL);
+    }
+
+    [Fact]
+    public void Parse_Duration_MakesQueryNonEmpty()
+    {
+        QueryParser.Parse("duration:>60").IsEmpty.Should().BeFalse();
+    }
+
     // ── infolder: (alias for child:) ──────────────────────────────────────
 
     [Fact]

@@ -81,6 +81,12 @@ public sealed record ParsedQuery
     /// <c>year:</c>/<c>genre:</c>/<c>track:</c>/<c>comment:</c>), matched as
     /// case-insensitive substrings against ID3 tags.</summary>
     public IReadOnlyList<MediaFilter> MediaFilters { get; init; } = [];
+    /// <summary><c>duration:</c> — playback length in seconds (also accepts H:M:S).</summary>
+    public SizeRange? Duration { get; init; }
+    /// <summary><c>samplerate:</c> — audio sample rate in Hz.</summary>
+    public SizeRange? SampleRate { get; init; }
+    /// <summary><c>channels:</c> — audio channel count.</summary>
+    public SizeRange? Channels { get; init; }
 
     public string? ContentSearch { get; init; }
     public IReadOnlyList<SearchClause> Clauses { get; init; } = [];
@@ -100,7 +106,8 @@ public sealed record ParsedQuery
         && !RootOnly && NameLength == null && !EmptyOnly && MaxResults == null
         && ChildCount == null && ChildFileCount == null && ChildFolderCount == null
         && DateRun == null && RunCount == null && TermExpr == null && Depth == null
-        && Width == null && Height == null && MediaFilters.Count == 0;
+        && Width == null && Height == null && MediaFilters.Count == 0
+        && Duration == null && SampleRate == null && Channels == null;
 }
 
 /// <summary>Everything-compatible duplicate-grouping keys.</summary>
@@ -260,6 +267,9 @@ public static class QueryParser
         SizeRange? widthRange = null;
         SizeRange? heightRange = null;
         var mediaFilters = new List<MediaFilter>();
+        SizeRange? durationRange = null;
+        SizeRange? sampleRateRange = null;
+        SizeRange? channelsRange = null;
         DateRange? drRange = null;
         SizeRange? runCount = null;
         var clauses = new List<SearchClause>();
@@ -554,6 +564,23 @@ public static class QueryParser
             // ── audio tags (artist:/album:/title:/year:/genre:/track:/comment:) ──
             if (TryMediaFilter(lower, token, mediaFilters)) continue;
 
+            // ── audio stream properties (duration:/samplerate:/channels:) ──
+            if (lower.StartsWith("duration:") && lower.Length > 9)
+            {
+                durationRange = ParseDuration(lower[9..]);
+                continue;
+            }
+            if (lower.StartsWith("samplerate:") && lower.Length > 11)
+            {
+                sampleRateRange = ParseIntExpression(lower[11..]);
+                continue;
+            }
+            if (lower.StartsWith("channels:") && lower.Length > 9)
+            {
+                channelsRange = ParseIntExpression(lower[9..]);
+                continue;
+            }
+
             // ── content: family (file-contents post-filter) ──────────────
             // Everything exposes encoding-specific aliases; WhereIsIt's reader
             // auto-detects encoding, so they all map to the same content search.
@@ -616,6 +643,9 @@ public static class QueryParser
             Width            = widthRange,
             Height           = heightRange,
             MediaFilters     = mediaFilters.Count > 0 ? mediaFilters.ToArray() : [],
+            Duration         = durationRange,
+            SampleRate       = sampleRateRange,
+            Channels         = channelsRange,
             DateRun          = drRange,
             RunCount         = runCount,
             TermExpr         = termExpr,
@@ -719,6 +749,25 @@ public static class QueryParser
         var both = ParseIntExpression(spec);
         width = both;
         height = both;
+    }
+
+    /// <summary>Parses a <c>duration:</c> value: an <c>H:M:S</c>/<c>M:S</c> clock
+    /// form (exact match) or a plain seconds count / comparison via
+    /// <see cref="ParseIntExpression"/>.</summary>
+    private static SizeRange? ParseDuration(string spec)
+    {
+        spec = spec.Trim();
+        if (spec.Contains(':'))
+        {
+            long secs = 0;
+            foreach (var part in spec.Split(':'))
+            {
+                if (!long.TryParse(part, out var v) || v < 0) return null;
+                secs = secs * 60 + v;
+            }
+            return new SizeRange(SizeOp.Equal, (ulong)secs);
+        }
+        return ParseIntExpression(spec);
     }
 
     private static readonly (string Prefix, MediaField Field)[] MediaPrefixes =
