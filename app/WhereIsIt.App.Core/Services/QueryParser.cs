@@ -70,6 +70,9 @@ public sealed record ParsedQuery
     public SizeRange? ChildFileCount { get; init; }
     /// <summary><c>childfoldercount:</c> — folders whose immediate sub-folder count matches.</summary>
     public SizeRange? ChildFolderCount { get; init; }
+    /// <summary><c>depth:</c>/<c>parents:</c> — folder depth, defined as the number
+    /// of path separators in the full path (a volume-root entry is depth 1).</summary>
+    public SizeRange? Depth { get; init; }
 
     public string? ContentSearch { get; init; }
     public IReadOnlyList<SearchClause> Clauses { get; init; } = [];
@@ -88,7 +91,7 @@ public sealed record ParsedQuery
         && StartsWith == null && EndsWith == null && WholeFilename == null
         && !RootOnly && NameLength == null && !EmptyOnly && MaxResults == null
         && ChildCount == null && ChildFileCount == null && ChildFolderCount == null
-        && DateRun == null && RunCount == null && TermExpr == null;
+        && DateRun == null && RunCount == null && TermExpr == null && Depth == null;
 }
 
 /// <summary>Everything-compatible duplicate-grouping keys.</summary>
@@ -244,6 +247,7 @@ public static class QueryParser
         SizeRange? childCount = null;
         SizeRange? childFileCount = null;
         SizeRange? childFolderCount = null;
+        SizeRange? depth = null;
         DateRange? drRange = null;
         SizeRange? runCount = null;
         var clauses = new List<SearchClause>();
@@ -506,6 +510,18 @@ public static class QueryParser
                 continue;
             }
 
+            // ── depth: / parents: (folder-depth post-filter) ─────────────
+            if (lower.StartsWith("depth:") && lower.Length > 6)
+            {
+                depth = ParseIntExpression(lower[6..]);
+                continue;
+            }
+            if (lower.StartsWith("parents:") && lower.Length > 8)
+            {
+                depth = ParseIntExpression(lower[8..]);
+                continue;
+            }
+
             // ── content: family (file-contents post-filter) ──────────────
             // Everything exposes encoding-specific aliases; WhereIsIt's reader
             // auto-detects encoding, so they all map to the same content search.
@@ -564,6 +580,7 @@ public static class QueryParser
             ChildCount       = childCount,
             ChildFileCount   = childFileCount,
             ChildFolderCount = childFolderCount,
+            Depth            = depth,
             DateRun          = drRange,
             RunCount         = runCount,
             TermExpr         = termExpr,
@@ -649,6 +666,18 @@ public static class QueryParser
     }
 
     // ── helpers ───────────────────────────────────────────────────────────
+
+    /// <summary>Folder depth = number of path separators in the full path, so a
+    /// volume-root entry (<c>C:\file.txt</c>) is depth 1. Used by <c>depth:</c>/
+    /// <c>parents:</c>.</summary>
+    public static int FolderDepth(string fullPath)
+    {
+        if (string.IsNullOrEmpty(fullPath)) return 0;
+        int n = 0;
+        foreach (var ch in fullPath)
+            if (ch == '\\' || ch == '/') n++;
+        return n;
+    }
 
     /// <summary>
     /// Strips combining diacritical marks so accented characters fold to their

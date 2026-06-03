@@ -123,6 +123,7 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             || parsed.ChildCount is not null
             || parsed.ChildFileCount is not null
             || parsed.ChildFolderCount is not null
+            || parsed.Depth is not null
             || parsed.RunCount is not null
             || parsed.DateRun is not null
             || parsed.TermExpr is not null
@@ -293,6 +294,7 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
         if (q.RootOnly || q.EmptyOnly || q.NameLength is not null) return true;
         if (q.ChildCount is not null || q.ChildFileCount is not null
             || q.ChildFolderCount is not null) return true;
+        if (q.Depth is not null) return true;
         if (q.RunCount is not null || q.DateRun is not null) return true;
         if (q.TermExpr is not null) return true;
         if (q.MaxResults is not null) return true;
@@ -435,6 +437,9 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             if (!isDir) return false;
             if (!ChildCountsMatch(q, fullPath)) return false;
         }
+
+        if (q.Depth is not null && !q.Depth.Matches((ulong)QueryParser.FolderDepth(fullPath)))
+            return false;
 
         // Run-metadata filters degrade to no-ops when no lookup is wired, so a
         // missing RunCountService never silently empties the result set.

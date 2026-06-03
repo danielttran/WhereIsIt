@@ -263,6 +263,9 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
             if (!ChildCountsMatch(q, fullPath)) return false;
         }
 
+        if (q.Depth is not null && !q.Depth.Matches((ulong)QueryParser.FolderDepth(fullPath)))
+            return false;
+
         if (q.TermExpr is null && q.Clauses.Count == 0) return true;
 
         var cmp = q.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;

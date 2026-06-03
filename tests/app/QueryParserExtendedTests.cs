@@ -113,6 +113,48 @@ public class QueryParserExtendedTests
         QueryParser.Parse("childcount:0").IsEmpty.Should().BeFalse();
     }
 
+    // ── depth: / parents: ─────────────────────────────────────────────────
+
+    [Fact]
+    public void Parse_Depth_ParsesComparison()
+    {
+        var q = QueryParser.Parse("depth:>3");
+        q.Depth.Should().NotBeNull();
+        q.Depth!.Op.Should().Be(SizeOp.GreaterThan);
+        q.Depth.Low.Should().Be(3UL);
+    }
+
+    [Fact]
+    public void Parse_Parents_IsDepthAlias()
+    {
+        QueryParser.Parse("parents:2").Depth!.Op.Should().Be(SizeOp.Equal);
+        QueryParser.Parse("parents:2").Depth!.Low.Should().Be(2UL);
+    }
+
+    [Fact]
+    public void Parse_Parents_DoesNotCollideWithParent()
+    {
+        // parent:<path> sets Child/ParentIsPath, parents:<n> sets Depth.
+        QueryParser.Parse(@"parent:C:\x").ParentIsPath.Should().Be(@"C:\x");
+        QueryParser.Parse("parents:2").Depth.Should().NotBeNull();
+        QueryParser.Parse("parents:2").ParentIsPath.Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData(@"C:\file.txt", 1)]
+    [InlineData(@"C:\a\file.txt", 2)]
+    [InlineData(@"C:\a\b\file.txt", 3)]
+    public void FolderDepth_CountsSeparators(string path, int expected)
+    {
+        QueryParser.FolderDepth(path).Should().Be(expected);
+    }
+
+    [Fact]
+    public void Parse_Depth_MakesQueryNonEmpty()
+    {
+        QueryParser.Parse("depth:1").IsEmpty.Should().BeFalse();
+    }
+
     // ── infolder: (alias for child:) ──────────────────────────────────────
 
     [Fact]

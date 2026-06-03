@@ -129,6 +129,29 @@ public class InProcEngineClientExtendedFilterTests : IAsyncLifetime
         names.Should().Contain("mixed2");
     }
 
+    // ── depth: ────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Search_Depth_FiltersByFolderDepth()
+    {
+        // _root itself sits at some absolute depth D; a file directly in _root is
+        // at D+1, and a file one folder deeper is at D+2. Assert the deeper file
+        // has strictly greater depth via a relative comparison.
+        await File.WriteAllTextAsync(Path.Combine(_root.FullName, "shallow.txt"), "");
+        var sub = Directory.CreateDirectory(Path.Combine(_root.FullName, "sub"));
+        await File.WriteAllTextAsync(Path.Combine(sub.FullName, "deep.txt"), "");
+
+        int rootDepth = QueryParser.FolderDepth(_root.FullName);
+        // Files directly under _root are at rootDepth+1.
+        var atRootPlusOne = await GetNamesAsync($"depth:{rootDepth + 1} file:");
+        atRootPlusOne.Should().Contain("shallow.txt");
+        atRootPlusOne.Should().NotContain("deep.txt");
+
+        var deeper = await GetNamesAsync($"depth:{rootDepth + 2} file:");
+        deeper.Should().Contain("deep.txt");
+        deeper.Should().NotContain("shallow.txt");
+    }
+
     // ── < > boolean grouping ──────────────────────────────────────────────
 
     [Fact]

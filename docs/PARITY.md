@@ -63,7 +63,7 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | `file:` / `folder:` | ✅ | |
 | type macros `audio:`/`video:`/`doc:`/`pic:`/`exe:`/`zip:` | ✅ | plus `code:`/`source:` ⭐ |
 | `type:<regtype>` (registry file type) | ⛔ | needs the Windows registry file-type DB |
-| `depth:` / `parents:<n>` (folder depth) | ⛔ | semantics ambiguous across roots; deferred |
+| `depth:` / `parents:<n>` (folder depth) | ➕ | depth = number of path separators in the full path (volume-root entry = depth 1); `parents:` is an alias |
 | `frn:` file reference number | ⛔ | niche NTFS internal id |
 | `infolder:` | ✅ | ➕ explicit alias for `child:` (recursive "anywhere under this folder") |
 | property functions: `album:`,`artist:`,`title:`,`track:`,`year:`,`comment:`,`genre:`,`bitrate:`,`width:`,`height:`,`dimensions:`,`orientation:`,`duration:`,… | ⛔ | require a file-property / metadata index (large feature; see §9) |
