@@ -147,8 +147,8 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | HTTP server (web UI) | 🟡 | localhost-only JSON `/search?q=` endpoint; no full HTML UI or LAN binding (security choice ⭐) |
 | ETP / FTP server | ⛔ | proprietary protocol; HTTP covers cross-device search |
 | Everything service | ⛔ | see §6 non-admin |
-| `es.exe` CLI | ⛔ | third-party integration surface |
-| IPC / SDK (DLL + messages) | ⛔ | third-party integration surface |
+| `es.exe` CLI | 🟡 | ➕ `tools/WhereIsIt.Es` builds `es.exe` — same engine + query syntax, output/sort/export/modifier flags. Searches in-proc (one-shot) rather than over Everything's live-index IPC |
+| IPC / SDK (DLL + messages) | ⛔ | needs Everything's undocumented WM_COPYDATA/IPC binary protocol for third-party interop |
 | URL protocol / "Search Everything" shell verb | ⛔ | shell integration |
 
 ## 9. Remaining gaps
@@ -167,7 +167,7 @@ infrastructure plus one marginal convenience:
 |---|---|
 | **Preview pane** | WinUI control hosting — no .NET/WinUI toolchain in this Linux session to build or verify it |
 | **Custom property columns** | UI + relies on the same metadata readers; needs a build |
-| **`es.exe` CLI + IPC SDK** | Byte-compatible reimplementation of Everything's **undocumented WM_COPYDATA/IPC protocol** for third-party interop |
+| **Everything-compatible IPC SDK** | Byte-compatible reimplementation of Everything's **undocumented WM_COPYDATA/IPC protocol** so third-party tools interop (a native `es.exe` CLI ships in `tools/WhereIsIt.Es`) |
 | **ETP / FTP server** | **Undocumented proprietary protocol** |
 | **Shell context-menu extension** | A separate registered **Windows COM** component |
 | **Background (non-admin) service** | A **Windows service** hosting the native engine |

@@ -3,5 +3,6 @@
   <Project Path="app\WhereIsIt.App\WhereIsIt.App.csproj" />
   <Project Path="src\engine\native\WhereIsIt.Engine.Native.vcxproj" Id="a2b3c4d5-e6f7-4a8b-9c0d-e1f2a3b4c5d6" />
   <Project Path="src\pipe\WhereIsIt.Pipe.Client\WhereIsIt.Pipe.Client.csproj" />
+  <Project Path="tools\WhereIsIt.Es\WhereIsIt.Es.csproj" />
   <Project Path="tests\app\WhereIsIt.App.Tests.csproj" />
 </Solution>
