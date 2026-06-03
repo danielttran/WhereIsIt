@@ -108,6 +108,56 @@ public class AudioTagsTests
         finally { File.Delete(path); }
     }
 
+    // ── M4A / MP4 atom builders ──────────────────────────────────────────
+
+    private static byte[] Atom(string type, byte[] content) => AtomRaw(Encoding.ASCII.GetBytes(type), content);
+
+    private static byte[] AtomRaw(byte[] type4, byte[] content)
+    {
+        int size = 8 + content.Length;
+        var b = new byte[size];
+        b[0] = (byte)(size >> 24); b[1] = (byte)(size >> 16); b[2] = (byte)(size >> 8); b[3] = (byte)size;
+        type4.CopyTo(b, 4);
+        content.CopyTo(b, 8);
+        return b;
+    }
+
+    private static byte[] DataAtom(string value)
+    {
+        var v = Encoding.UTF8.GetBytes(value);
+        var content = new byte[8 + v.Length];
+        content[3] = 1; // well-known type = UTF-8 text
+        v.CopyTo(content, 8);
+        return Atom("data", content);
+    }
+
+    private static byte[] Cat(params byte[][] parts)
+    {
+        using var ms = new MemoryStream();
+        foreach (var p in parts) ms.Write(p);
+        return ms.ToArray();
+    }
+
+    [Fact]
+    public void TryRead_M4a_ReadsItunesAtoms()
+    {
+        var art = AtomRaw([0xA9, (byte)'A', (byte)'R', (byte)'T'], DataAtom("Radiohead"));
+        var alb = AtomRaw([0xA9, (byte)'a', (byte)'l', (byte)'b'], DataAtom("OK Computer"));
+        var ilst = Atom("ilst", Cat(art, alb));
+        var meta = Atom("meta", Cat(new byte[4], ilst)); // 4-byte version/flags prefix
+        var udta = Atom("udta", meta);
+        var moov = Atom("moov", udta);
+        var ftyp = Atom("ftyp", new byte[8]);
+        var path = WriteTemp(Cat(ftyp, moov));
+        try
+        {
+            AudioTags.TryRead(path, out var tags).Should().BeTrue();
+            tags.Artist.Should().Be("Radiohead");
+            tags.Album.Should().Be("OK Computer");
+        }
+        finally { File.Delete(path); }
+    }
+
     [Fact]
     public void Match_NonAudioFile_ReturnsFalse()
     {

@@ -69,13 +69,20 @@ public sealed class AudioTags
         try
         {
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            // FLAC carries Vorbis comments, not ID3.
-            var magic = new byte[4];
-            if (fs.Read(magic, 0, 4) == 4 && magic[0] == (byte)'f' && magic[1] == (byte)'L'
-                && magic[2] == (byte)'a' && magic[3] == (byte)'C')
+            var head = new byte[12];
+            int hn = fs.Read(head, 0, head.Length);
+            // FLAC carries Vorbis comments; M4A/MP4 carries iTunes-style atoms.
+            if (hn >= 4 && head[0] == (byte)'f' && head[1] == (byte)'L'
+                && head[2] == (byte)'a' && head[3] == (byte)'C')
+            {
+                fs.Seek(4, SeekOrigin.Begin);
                 return tags.ReadFlac(fs);
+            }
+            if (hn >= 8 && head[4] == (byte)'f' && head[5] == (byte)'t'
+                && head[6] == (byte)'y' && head[7] == (byte)'p')
+                return tags.ReadM4a(fs);
 
-            bool any = tags.ReadId3v2(fs);
+            bool any = tags.ReadId3v2(fs); // re-seeks to 0 itself
             if (!tags.Complete) any |= tags.ReadId3v1(fs);
             return any;
         }
@@ -153,6 +160,106 @@ public sealed class AudioTags
     };
 
     private static int Le32(byte[] b, int i) => b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | (b[i + 3] << 24);
+
+    // ── M4A / MP4 (iTunes-style metadata atoms) ──────────────────────────
+
+    private bool ReadM4a(FileStream fs)
+    {
+        long end = fs.Length;
+        if (!FindAtom(fs, 0, end, "moov", out long ms, out long me)) return false;
+        if (!FindAtom(fs, ms, me, "udta", out long us, out long ue)) return false;
+        if (!FindAtom(fs, us, ue, "meta", out long mes, out long mee)) return false;
+        // The meta atom carries a 4-byte version/flags before its children.
+        if (!FindAtom(fs, mes + 4, mee, "ilst", out long ls, out long le)) return false;
+        return ParseIlst(fs, ls, le);
+    }
+
+    private bool ParseIlst(FileStream fs, long start, long end)
+    {
+        bool any = false;
+        long pos = start;
+        var hdr = new byte[8];
+        while (pos + 8 <= end)
+        {
+            fs.Seek(pos, SeekOrigin.Begin);
+            if (fs.Read(hdr, 0, 8) != 8) break;
+            long size = ReadAtomSize(hdr);
+            if (size < 8 || pos + size > end) break;
+
+            var field = MapM4a(hdr[4], hdr[5], hdr[6], hdr[7]);
+            if (field is not null && FindAtom(fs, pos + 8, pos + size, "data", out long ds, out long de))
+            {
+                // data payload = 4-byte type + 4-byte locale, then the value.
+                long vstart = ds + 8;
+                int vlen = (int)(de - vstart);
+                if (vlen > 0 && vlen < 1024 * 1024)
+                {
+                    var vb = new byte[vlen];
+                    fs.Seek(vstart, SeekOrigin.Begin);
+                    int r = 0; while (r < vlen) { int n = fs.Read(vb, r, vlen - r); if (n <= 0) break; r += n; }
+                    string val = field == MediaField.Track && r >= 4
+                        ? ((vb[2] << 8) | vb[3]).ToString()
+                        : Encoding.UTF8.GetString(vb, 0, r).Trim('\0').Trim();
+                    if (val.Length > 0) { Assign(field.Value, val); any = true; }
+                }
+            }
+            pos += size;
+        }
+        return any;
+    }
+
+    private static MediaField? MapM4a(byte a, byte b, byte c, byte d)
+    {
+        const byte C = 0xA9; // the © marker prefixing iTunes text atoms
+        if (a == C && b == (byte)'A' && c == (byte)'R' && d == (byte)'T') return MediaField.Artist;
+        if (a == (byte)'a' && b == (byte)'A' && c == (byte)'R' && d == (byte)'T') return MediaField.Artist; // album artist
+        if (a == C && b == (byte)'a' && c == (byte)'l' && d == (byte)'b') return MediaField.Album;
+        if (a == C && b == (byte)'n' && c == (byte)'a' && d == (byte)'m') return MediaField.Title;
+        if (a == C && b == (byte)'d' && c == (byte)'a' && d == (byte)'y') return MediaField.Year;
+        if (a == C && b == (byte)'g' && c == (byte)'e' && d == (byte)'n') return MediaField.Genre;
+        if (a == C && b == (byte)'c' && c == (byte)'m' && d == (byte)'t') return MediaField.Comment;
+        if (a == (byte)'t' && b == (byte)'r' && c == (byte)'k' && d == (byte)'n') return MediaField.Track;
+        return null;
+    }
+
+    /// <summary>Finds a direct child atom of the given 4-char type within
+    /// [start,end); returns its content range (excluding the atom header).</summary>
+    private static bool FindAtom(FileStream fs, long start, long end, string type,
+        out long contentStart, out long contentEnd)
+    {
+        contentStart = contentEnd = 0;
+        long pos = start;
+        var hdr = new byte[8];
+        while (pos + 8 <= end)
+        {
+            fs.Seek(pos, SeekOrigin.Begin);
+            if (fs.Read(hdr, 0, 8) != 8) break;
+            long size = (uint)((hdr[0] << 24) | (hdr[1] << 16) | (hdr[2] << 8) | hdr[3]);
+            int headerLen = 8;
+            if (size == 1)
+            {
+                var ext = new byte[8];
+                if (fs.Read(ext, 0, 8) != 8) break;
+                size = 0;
+                for (int i = 0; i < 8; i++) size = (size << 8) | ext[i];
+                headerLen = 16;
+            }
+            else if (size == 0) size = end - pos;
+            if (size < headerLen || pos + size > end) break;
+
+            if (hdr[4] == type[0] && hdr[5] == type[1] && hdr[6] == type[2] && hdr[7] == type[3])
+            {
+                contentStart = pos + headerLen;
+                contentEnd = pos + size;
+                return true;
+            }
+            pos += size;
+        }
+        return false;
+    }
+
+    private static long ReadAtomSize(byte[] hdr)
+        => (uint)((hdr[0] << 24) | (hdr[1] << 16) | (hdr[2] << 8) | hdr[3]);
 
     // ── ID3v2 (header at start of file) ──────────────────────────────────
 
