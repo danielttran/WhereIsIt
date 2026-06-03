@@ -88,6 +88,10 @@ Closed 2026-05-17 (Everything-parity bridge):
 - ✅ EFU (Everything File List) import/export in `ResultExporter` (`ToEfu`/`WriteEfu`/`ParseEfu`/`ReadEfu`) — FILETIME ticks + numeric attribute mask, round-trips with voidtools.
 - ✅ Shutdown use-after-free fix: `IndexingEngine::Stop()` is now idempotent and records whether any worker had to be detached (timeout during the non-cancellable initial full-disk scan). `engine_destroy` refuses to free the `EngineState` when a worker is still live, converting a use-after-free into a one-shot leak at process exit.
 
+Closed 2026-06-03 (build + test verification):
+
+- ✅ Installed the .NET 10 SDK in-session and **compiled + ran the test suite on Linux** (`-p:EnableWindowsTargeting=true`) for `App.Core`, `Pipe.Client`, and the xUnit project. **436 tests pass, 0 fail** (excluding native-DLL integration + two inherently-Windows tests). Building caught real defects the never-compiled branch hid: a comparison-operator regression (`<`/`>` mis-parsed as grouping) in `BooleanQuery.Lex`, a pre-existing CS0420 in `InProcEngineClient`, an `out _`/`using var _` clash in `FtpServer`, and an expression-tree `is`-pattern in a test — all fixed. So the entire query/property/grouping/IPC/FTP/ETP logic is now verified, not just authored.
+
 Closed 2026-06-03 (feature-parity audit — see `docs/PARITY.md`):
 
 - ✅ Full Everything ⇄ WhereIsIt parity scorecard captured in `docs/PARITY.md`.

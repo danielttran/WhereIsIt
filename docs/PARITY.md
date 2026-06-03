@@ -185,22 +185,24 @@ already verified (below).
 
 ---
 
-*Verification note:* the **logic layer is now build- and test-verified**. The
-.NET 10 SDK was installed in-session and `WhereIsIt.App.Core`,
-`WhereIsIt.Pipe.Client`, and the xUnit test project were compiled with
-`-p:EnableWindowsTargeting=true` and **run on Linux**. Building surfaced (and
-this pass fixed) real errors that had never been caught — a pre-existing CS0420
-in `InProcEngineClient`, an `out _`/`using var _` collision in `FtpServer`, an
-expression-tree `is`-pattern in a test, and most importantly a **logic bug where
-`<`/`>` comparison operators (`size:>1mb`, `len:>8`, `dm:<2020`) were
-mis-tokenised as grouping brackets** — now fixed in `BooleanQuery.Lex`.
+*Verification note:* the **logic layer is build- and test-verified**. The .NET 10
+SDK was installed in-session; `WhereIsIt.App.Core`, `WhereIsIt.Pipe.Client`, and
+the xUnit project were compiled with `-p:EnableWindowsTargeting=true` and run on
+Linux. **436 tests pass, 0 fail** (excluding the native-DLL integration tests and
+two inherently-Windows tests — Win32 file attributes and `\`-vs-`/` EFU paths —
+which pass on Windows).
 
-All non-native, non-Windows-specific tests pass. The only remaining test
-failures are inherent to running on Linux rather than Windows: Win32 file
-attributes (`InProcEngineClientAttribFilterTests` — Linux has no Hidden/ReadOnly)
-and `\`-vs-`/` path separators in the EFU export tests. Those pass on Windows.
+Building actually surfaced and fixed real defects the never-compiled branch hid:
+a pre-existing CS0420 in `InProcEngineClient`, an `out _`/`using var _` collision
+in `FtpServer`, an expression-tree `is`-pattern in a test, and — most
+importantly — a **regression where `<`/`>` comparison operators (`size:>1mb`,
+`len:>8`, `dm:<2020`) were mis-tokenised as grouping brackets**, now fixed in
+`BooleanQuery.Lex` and covered by tests. The verified surface includes all query
+parsing/filters, `< >` grouping + bracketless OR, the image/audio/document
+property readers, and the FTP/ETP/named-pipe round-trips.
 
 Still requiring a Windows build to compile/smoke-test: the **WinUI app**
 (`WhereIsIt.App` — highlighting, tray, preview pane, custom columns, the
-`WM_COPYDATA` IPC window), the **native C++ engine**, and interop **wire
-verification** against real Everything clients (`WM_COPYDATA` IPC, ETP framing).
+`WM_COPYDATA` IPC window, the `IExplorerCommand` COM handler), the **native C++
+engine**, and **wire verification** of the two interop protocols against real
+Everything clients (`WM_COPYDATA` IPC, ETP result framing).
