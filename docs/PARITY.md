@@ -144,7 +144,7 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 
 | Everything | WhereIsIt | Notes |
 |---|---|---|
-| HTTP server (web UI) | 🟡 | localhost-only JSON `/search?q=` endpoint; no full HTML UI or LAN binding (security choice ⭐) |
+| HTTP server (web UI) | ✅ | ➕ serves an HTML search page at `/` plus the JSON `/search?q=` endpoint; localhost-only by design (no LAN binding — security choice ⭐) |
 | ETP / FTP server | ⛔ | proprietary protocol; HTTP covers cross-device search |
 | Everything service | ⛔ | see §6 non-admin |
 | `es.exe` CLI | 🟡 | ➕ `tools/WhereIsIt.Es` builds `es.exe` — same engine + query syntax, output/sort/export/modifier flags. Searches in-proc (one-shot) rather than over Everything's live-index IPC |

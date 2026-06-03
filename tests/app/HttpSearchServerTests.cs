@@ -45,6 +45,22 @@ public class HttpSearchServerTests
     }
 
     [Fact]
+    public async Task Root_ServesHtmlSearchPage()
+    {
+        var engine = new FakeEngine();
+        using var server = new HttpSearchServer(engine, port: 0);
+        var port = server.Start();
+
+        using var http = new HttpClient();
+        var resp = await http.GetAsync($"http://127.0.0.1:{port}/");
+        resp.IsSuccessStatusCode.Should().BeTrue();
+        resp.Content.Headers.ContentType!.MediaType.Should().Be("text/html");
+        var body = await resp.Content.ReadAsStringAsync();
+        body.Should().Contain("<!DOCTYPE html>");
+        body.Should().Contain("/search?q=");
+    }
+
+    [Fact]
     public async Task Search_ReturnsJsonWithMatchingRows()
     {
         var engine = new FakeEngine();
