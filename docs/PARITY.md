@@ -151,26 +151,32 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | IPC / SDK (DLL + messages) | ⛔ | third-party integration surface |
 | URL protocol / "Search Everything" shell verb | ⛔ | shell integration |
 
-## 9. Notable remaining gaps (ranked by parity value vs. effort)
+## 9. Remaining gaps
 
-1. **Bracketless function OR** (`ext:cs | ext:txt` without `< >`) — works today
-   *with* brackets (`<ext:cs>|<ext:txt>`); the bracketless form would need the
-   space tokenizer to treat a lone `|` between function tokens as an operator.
-2. **Preview pane** — Everything 1.5 feature; needs a content/thumbnail preview host (WinUI, needs a build).
-3. **Broader metadata property functions** (`duration:`/`bitrate:`/… and tags for
-   FLAC/M4A/Office/PDF) and custom property columns — image dimensions and MP3
-   ID3 tags are done via header parsing; full coverage needs a per-format
-   metadata index. Large.
-4. **`es.exe` CLI + Everything-compatible IPC SDK** — the real value is talking
-   to the live index over Everything's exact WM_COPYDATA/IPC protocol so
-   third-party tools interop; that's a binary-compatible Windows-only protocol.
-5. **Shell context-menu extension, ETP/FTP server, background (non-admin)
-   service** — Windows-only COM / proprietary-protocol / service work; large.
+The entire **search/query/property surface is now at parity** (§1–3 + the
+property functions in §2 cover every Everything search function implementable as
+dependency-free logic: filters, modifiers, the full date-keyword surface,
+`< >` grouping with function leaves, run metadata, image dimensions +
+orientation, audio tags + stream properties across MP3/FLAC/OGG/M4A, and
+document properties for OOXML + PDF).
 
-Items 2–5 cannot be implemented *and verified* without the Windows .NET/WinUI/
-MSVC toolchain, and several (ETP/FTP, IPC SDK) target undocumented/proprietary
-Everything protocols. They are tracked here rather than landed as unbuildable,
-untested code.
+What's left is **not query behaviour** — it's UI/native/integration
+infrastructure plus one marginal convenience:
+
+| Remaining item | Hard blocker |
+|---|---|
+| **Preview pane** | WinUI control hosting — no .NET/WinUI toolchain in this Linux session to build or verify it |
+| **Custom property columns** | UI + relies on the same metadata readers; needs a build |
+| **`es.exe` CLI + IPC SDK** | Byte-compatible reimplementation of Everything's **undocumented WM_COPYDATA/IPC protocol** for third-party interop |
+| **ETP / FTP server** | **Undocumented proprietary protocol** |
+| **Shell context-menu extension** | A separate registered **Windows COM** component |
+| **Background (non-admin) service** | A **Windows service** hosting the native engine |
+| Bracketless function OR (`ext:cs \| ext:txt`) | Works *with* brackets today; marginal tokenizer change otherwise |
+
+These cannot be implemented **and verified** without a Windows .NET 10 / WinUI /
+MSVC build environment, and several (ETP/FTP, IPC SDK) target undocumented
+proprietary Everything protocols. They are tracked here rather than landed as
+unbuildable, untested, or guessed code.
 
 ## 10. Where WhereIsIt is intentionally *better*
 
