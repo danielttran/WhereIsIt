@@ -805,19 +805,45 @@ public static class QueryParser
     private static DateRange? TryKeyword(string spec, DateTime now)
     {
         var today = now.Date;
-        return spec switch
+        var kw = spec switch
         {
             "today"     => new DateRange(today, today.AddDays(1).AddTicks(-1)),
             "yesterday" => new DateRange(today.AddDays(-1), today.AddTicks(-1)),
+            "tomorrow"  => new DateRange(today.AddDays(1), today.AddDays(2).AddTicks(-1)),
             "thisweek"  => WeekRange(today, 0),
             "lastweek"  => WeekRange(today, -1),
             "thismonth" => MonthRange(today.Year, today.Month),
             "lastmonth" => MonthOffsetRange(today, -1),
             "thisyear"  => YearRange(today.Year),
             "lastyear"  => YearRange(today.Year - 1),
-            _ => null
+            _ => (DateRange?)null
         };
+        if (kw is not null) return kw;
+
+        // Month names (january…december and the jan…dec abbreviations) resolve
+        // to that month of the current year, matching Everything's <month>
+        // date function.
+        if (MonthNames.TryGetValue(spec, out var month))
+            return MonthRange(today.Year, month);
+
+        return null;
     }
+
+    private static readonly Dictionary<string, int> MonthNames = new(StringComparer.Ordinal)
+    {
+        ["january"] = 1, ["jan"] = 1,
+        ["february"] = 2, ["feb"] = 2,
+        ["march"] = 3, ["mar"] = 3,
+        ["april"] = 4, ["apr"] = 4,
+        ["may"] = 5,
+        ["june"] = 6, ["jun"] = 6,
+        ["july"] = 7, ["jul"] = 7,
+        ["august"] = 8, ["aug"] = 8,
+        ["september"] = 9, ["sep"] = 9, ["sept"] = 9,
+        ["october"] = 10, ["oct"] = 10,
+        ["november"] = 11, ["nov"] = 11,
+        ["december"] = 12, ["dec"] = 12,
+    };
 
     private static DateRange WeekRange(DateTime today, int weekOffset)
     {

@@ -44,7 +44,7 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | `dc:` date created | ✅ | |
 | `da:` date accessed | ✅ | |
 | `dr:` date run | ⛔ | run metadata lives in `RunCountService`, not on the engine row; see §9 |
-| date keywords (today/yesterday/this-,last-week/month/year) | 🟡 | weekday names, month names, and `last N <unit>` forms not parsed |
+| date keywords (today/yesterday/tomorrow/this-,last-week/month/year, month names) | 🟡 | ➕ `tomorrow` and month names (january…december / jan…dec) added; weekday names and `last N <unit>` forms still not parsed |
 | date ranges `a..b`, comparisons | ✅ | |
 | `attrib:` / `attributes:` (rhsad) | ✅ | |
 | `child:<path>` | ✅ | |
@@ -155,8 +155,8 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 3. **`dr:` / `runcount:` query filters** — wire `RunCountService` data onto the
    row model (or a side-table) so the post-filter can see it. Column already
    exists; only the filter + sort are missing.
-4. **Richer date keywords** — weekday/month names and `last N <unit>` forms in
-   `ParseDateSpec`.
+4. **Richer date keywords** — weekday names and `last N <unit>` forms in
+   `ParseDateSpec` (month names + `tomorrow` already added this audit).
 5. **Explicit `< >` grouping** — parser change to a small expression tree;
    moderate effort, niche usage.
 6. **Property/metadata index** — unlocks `album:`/`width:`/… and custom

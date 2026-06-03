@@ -113,6 +113,41 @@ public class QueryParserExtendedTests
         QueryParser.Parse("childcount:0").IsEmpty.Should().BeFalse();
     }
 
+    // ── date keywords (month names, tomorrow) ─────────────────────────────
+
+    [Fact]
+    public void ParseDateSpec_Tomorrow_IsTheNextDay()
+    {
+        var now = new System.DateTime(2026, 6, 3, 14, 0, 0);
+        var r = QueryParser.ParseDateSpec("tomorrow", now);
+        r.Should().NotBeNull();
+        r!.Min.Should().Be(new System.DateTime(2026, 6, 4));
+        r.Max.Should().Be(new System.DateTime(2026, 6, 5).AddTicks(-1));
+    }
+
+    [Theory]
+    [InlineData("july", 7)]
+    [InlineData("jul", 7)]
+    [InlineData("december", 12)]
+    [InlineData("dec", 12)]
+    [InlineData("january", 1)]
+    [InlineData("sept", 9)]
+    public void ParseDateSpec_MonthName_IsThatMonthOfCurrentYear(string spec, int month)
+    {
+        var now = new System.DateTime(2026, 6, 3);
+        var r = QueryParser.ParseDateSpec(spec, now);
+        r.Should().NotBeNull();
+        r!.Min.Should().Be(new System.DateTime(2026, month, 1));
+        r.Max.Should().Be(new System.DateTime(2026, month, 1).AddMonths(1).AddTicks(-1));
+    }
+
+    [Fact]
+    public void ParseDateSpec_MonthName_IsCaseInsensitive()
+    {
+        var now = new System.DateTime(2026, 6, 3);
+        QueryParser.ParseDateSpec("JULY", now).Should().NotBeNull();
+    }
+
     // ── RemoveDiacritics helper ───────────────────────────────────────────
 
     [Theory]
