@@ -43,7 +43,8 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | `dm:` date modified | ✅ | |
 | `dc:` date created | ✅ | |
 | `da:` date accessed | ✅ | |
-| `dr:` date run | ⛔ | run metadata lives in `RunCountService`, not on the engine row; see §9 |
+| `dr:` date run | ➕ | backed by `RunCountService` last-run timestamps (persisted in settings) via the decorator's path-keyed lookup |
+| `rc:` / `runcount:` | ➕ | backed by `RunCountService` open counts via the decorator's path-keyed lookup |
 | date keywords (today/yesterday/tomorrow/this-,last-week/month/year, month names) | 🟡 | ➕ `tomorrow` and month names (january…december / jan…dec) added; weekday names and `last N <unit>` forms still not parsed |
 | date ranges `a..b`, comparisons | ✅ | |
 | `attrib:` / `attributes:` (rhsad) | ✅ | |
@@ -148,17 +149,14 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 
 ## 9. Notable remaining gaps (ranked by parity value vs. effort)
 
-1. **`dr:` / `runcount:` query filters** — wire `RunCountService` data onto the
-   row model (or a side-table) so the post-filter can see it. Column already
-   exists; only the filter + sort are missing.
-2. **Richer date keywords** — weekday names and `last N <unit>` forms in
+1. **Richer date keywords** — weekday names and `last N <unit>` forms in
    `ParseDateSpec` (month names + `tomorrow` already added this audit).
-3. **Explicit `< >` grouping** — parser change to a small expression tree;
+2. **Explicit `< >` grouping** — parser change to a small expression tree;
    moderate effort, niche usage.
-4. **Preview pane** — Everything 1.5 feature; needs a content/thumbnail preview host.
-5. **Property/metadata index** — unlocks `album:`/`width:`/… and custom
+3. **Preview pane** — Everything 1.5 feature; needs a content/thumbnail preview host.
+4. **Property/metadata index** — unlocks `album:`/`width:`/… and custom
    property columns. Large; depends on Windows Property System.
-6. **Shell context-menu extension, `es.exe`, IPC SDK, ETP/FTP, background
+5. **Shell context-menu extension, `es.exe`, IPC SDK, ETP/FTP, background
    service** — Windows-only, larger, and several were deliberately scoped out.
 
 ## 10. Where WhereIsIt is intentionally *better*

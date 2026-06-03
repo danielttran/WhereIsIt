@@ -10,15 +10,22 @@ public static class EngineClientFactory
 {
     private const string PipeName = "WhereIsIt.Engine";
 
-    public static IEngineClient Create(string[]? scopeRoots = null, bool? forceElevated = null)
+    public static IEngineClient Create(
+        string[]? scopeRoots = null,
+        bool? forceElevated = null,
+        RunCountService? runCounts = null)
     {
         var inner = CreateInner(scopeRoots, forceElevated);
         // Wrap with the filtering decorator so the C# QueryParser features
         // (ext:/size:/dm:/attrib:/child:/parent:/!/|/...) work against engines
         // that don't speak those modifiers natively. InProcEngineClient already
         // applies them internally, so wrapping is a no-op for it but still
-        // keeps a single code path.
-        return new FilteringEngineClient(inner);
+        // keeps a single code path. The run-count service (when present) backs
+        // the rc:/runcount:/dr: filters via path-keyed lookups.
+        return new FilteringEngineClient(
+            inner,
+            runCounts is null ? null : runCounts.Get,
+            runCounts is null ? null : runCounts.GetLastRun);
     }
 
     private static IEngineClient CreateInner(string[]? scopeRoots, bool? forceElevated)

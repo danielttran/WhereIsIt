@@ -615,6 +615,7 @@ public sealed partial class MainWindow : Window
             runCountService.Increment(path);
             row.RunCount = runCountService.Get(path);
             settingsService?.SaveRunCounts(runCountService.Snapshot());
+            settingsService?.SaveRunDates(runCountService.SnapshotRunDates());
         }
     }
 

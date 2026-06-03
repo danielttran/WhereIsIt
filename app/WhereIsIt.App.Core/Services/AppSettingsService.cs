@@ -197,6 +197,17 @@ public sealed class AppSettingsService : IDisposable
         ScheduleFlush();
     }
 
+    public void SaveRunDates(System.Collections.Generic.Dictionary<string, long> dates)
+    {
+        lock (gate)
+        {
+            cached ??= LoadFromDisk();
+            cached.RunDates = dates;
+            revision++;
+        }
+        ScheduleFlush();
+    }
+
     /// <summary>Synchronous: called once on shutdown where durability matters.</summary>
     public void SaveLastSessionTabs(string[] tabs)
     {

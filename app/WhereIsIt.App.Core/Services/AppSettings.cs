@@ -11,6 +11,9 @@ public sealed class AppSettings
     public bool ShowAccessedColumn { get; set; } = false;
     public bool ShowRunCountColumn { get; set; } = false;
     public System.Collections.Generic.Dictionary<string, int> RunCounts { get; set; } = new();
+    /// <summary>Last-run timestamps (UTC ticks) per full path, for the <c>dr:</c>
+    /// run-date filter. Parallel to <see cref="RunCounts"/>.</summary>
+    public System.Collections.Generic.Dictionary<string, long> RunDates { get; set; } = new();
     public bool EnableHttpServer { get; set; } = false;
     public int  HttpServerPort   { get; set; } = 12321;
 

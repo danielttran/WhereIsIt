@@ -7,7 +7,8 @@ built as a daily-use replacement for voidtools' *Everything*.
 
 - **Native indexing** — USN journal + MFT scan via the C++ engine in
   `src/engine/native/`; results stay live as the file system changes.
-- **Everything-grade query syntax** — `ext:`, `size:`, `dm:`/`dc:`/`da:`,
+- **Everything-grade query syntax** — `ext:`, `size:`, `dm:`/`dc:`/`da:`/`dr:`,
+  `rc:`/`runcount:`,
   `attrib:`, `child:`/`parent:`, `dupe:`/`sizedupe:`/`namepartdupe:`/
   `attribdupe:`, `content:` (plus `ansicontent:`/`utf8content:`/`utf16content:`/
   `utf16becontent:` aliases), `childcount:`/`childfilecount:`/`childfoldercount:`,

@@ -98,9 +98,12 @@ Closed 2026-06-03 (UI parity follow-up):
 - ✅ **Match highlighting** — literal query terms (from `QueryParser.ExtractHighlightTerms`) are highlighted in the Name column via a `SearchHighlighter` attached property that drives WinUI `TextHighlighter` ranges. Terms flow MainViewModel → `ResultsListViewModel.BindResults` → row VM → XAML. Needs a Windows build to smoke-test.
 - ✅ **System tray + minimize to tray** — dependency-free `TrayIconHost` (`Shell_NotifyIcon` on a message-only window); minimizing hides to tray, tray left-click / "Open WhereIsIt" restores, "Exit" quits. Needs a Windows build to smoke-test.
 
+Closed 2026-06-03 (run-metadata filters):
+
+- ✅ **`rc:` / `runcount:` and `dr:` filters** — `RunCountService` now also tracks (and persists, via `AppSettings.RunDates`) last-run timestamps and is thread-safe. `EngineClientFactory` passes path-keyed `Get`/`GetLastRun` lookups into `FilteringEngineClient`, which evaluates `rc:`/`dr:` in its post-filter for every inner engine. Covered by `FilteringEngineClientTests`, `QueryParserExtendedTests`, `RunCountServiceTests`.
+
 Remaining Everything-parity gaps (full detail + ranking in `docs/PARITY.md` §9):
 
-- **`dr:` / `runcount:` filters** — wire `RunCountService` onto the row model.
 - **Richer date keywords**, **explicit `< >` grouping** — `QueryParser` work.
 - **Property/metadata index** — unlocks `album:`/`width:`/… + custom columns.
 - **ETP / FTP server** — proprietary Everything protocol. Skipped; HTTP server covers the cross-device search use case.

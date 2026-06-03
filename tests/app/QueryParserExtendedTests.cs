@@ -113,6 +113,37 @@ public class QueryParserExtendedTests
         QueryParser.Parse("childcount:0").IsEmpty.Should().BeFalse();
     }
 
+    // ── run-count / run-date filters ──────────────────────────────────────
+
+    [Fact]
+    public void Parse_RunCount_ParsesComparison()
+    {
+        var q = QueryParser.Parse("rc:>5");
+        q.RunCount.Should().NotBeNull();
+        q.RunCount!.Op.Should().Be(SizeOp.GreaterThan);
+        q.RunCount.Low.Should().Be(5UL);
+    }
+
+    [Fact]
+    public void Parse_RunCountLongForm_Parses()
+    {
+        QueryParser.Parse("runcount:0").RunCount!.Op.Should().Be(SizeOp.Equal);
+    }
+
+    [Fact]
+    public void Parse_DateRun_ParsesKeyword()
+    {
+        var q = QueryParser.Parse("dr:today");
+        q.DateRun.Should().NotBeNull();
+    }
+
+    [Fact]
+    public void Parse_RunCount_MakesQueryNonEmpty()
+    {
+        QueryParser.Parse("rc:>0").IsEmpty.Should().BeFalse();
+        QueryParser.Parse("dr:thisweek").IsEmpty.Should().BeFalse();
+    }
+
     // ── date keywords (month names, tomorrow) ─────────────────────────────
 
     [Fact]

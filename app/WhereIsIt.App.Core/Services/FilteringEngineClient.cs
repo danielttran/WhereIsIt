@@ -29,6 +29,12 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
     private readonly Subject<IReadOnlyList<uint>> filteredResults = new();
     private readonly IDisposable resultsSubscription;
 
+    // Optional run-metadata lookups (keyed by full path) backing the rc:/dr:
+    // filters. Null when no RunCountService is wired (e.g. the HTTP frontend or
+    // tests) — those filters then degrade to no-ops rather than excluding all.
+    private readonly Func<string, int>? runCountLookup;
+    private readonly Func<string, DateTimeOffset>? runDateLookup;
+
     // Per-parse derived state, computed once in SearchAsync and read on the
     // per-row hot path. Computing these inside Passes() would allocate one
     // lowercased path/prefix per row (DisplayCap = 2000) on every keystroke.
@@ -63,9 +69,14 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
     // wedge the result-watcher thread; a timeout abandons the current scan.
     private static readonly TimeSpan RegexTimeout = TimeSpan.FromSeconds(1);
 
-    public FilteringEngineClient(IEngineClient inner)
+    public FilteringEngineClient(
+        IEngineClient inner,
+        Func<string, int>? runCountLookup = null,
+        Func<string, DateTimeOffset>? runDateLookup = null)
     {
         this.inner = inner;
+        this.runCountLookup = runCountLookup;
+        this.runDateLookup = runDateLookup;
         resultsSubscription = inner.ObserveResults.Subscribe(
             ids => _ = OnIdsAsync(ids, Volatile.Read(ref currentSeq)));
     }
@@ -112,6 +123,8 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             || parsed.ChildCount is not null
             || parsed.ChildFileCount is not null
             || parsed.ChildFolderCount is not null
+            || parsed.RunCount is not null
+            || parsed.DateRun is not null
             || parsed.MatchPath;
 
         if (parsed.WholeFilename is { Length: > 0 })
@@ -279,6 +292,7 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
         if (q.RootOnly || q.EmptyOnly || q.NameLength is not null) return true;
         if (q.ChildCount is not null || q.ChildFileCount is not null
             || q.ChildFolderCount is not null) return true;
+        if (q.RunCount is not null || q.DateRun is not null) return true;
         if (q.MaxResults is not null) return true;
         // nodiacritics: changes how every clause matches, so the inner engine's
         // default (diacritic-sensitive) result set has to be re-filtered.
@@ -298,7 +312,7 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
         return false;
     }
 
-    private static bool Passes(ResultRowModel row, CompiledQuery compiled)
+    private bool Passes(ResultRowModel row, CompiledQuery compiled)
     {
         var q = compiled.Parsed;
         var attrLetters = row.Attributes ?? string.Empty;
@@ -418,6 +432,21 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
         {
             if (!isDir) return false;
             if (!ChildCountsMatch(q, fullPath)) return false;
+        }
+
+        // Run-metadata filters degrade to no-ops when no lookup is wired, so a
+        // missing RunCountService never silently empties the result set.
+        if (q.RunCount is not null && runCountLookup is not null)
+        {
+            int rc = runCountLookup(fullPath);
+            if (rc < 0) rc = 0;
+            if (!q.RunCount.Matches((ulong)rc)) return false;
+        }
+        if (q.DateRun is not null && runDateLookup is not null)
+        {
+            var dr = runDateLookup(fullPath);
+            if (dr == default) return false;            // never opened ⇒ no run date
+            if (!q.DateRun.Matches(dr.LocalDateTime)) return false;
         }
 
         if (q.Clauses.Count == 0) return true;

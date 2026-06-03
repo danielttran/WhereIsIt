@@ -62,4 +62,32 @@ public class RunCountServiceTests
         snap.Should().ContainKey(@"c:\a").WhoseValue.Should().Be(2);
         snap.Should().ContainKey(@"c:\b").WhoseValue.Should().Be(1);
     }
+
+    [Fact]
+    public void Increment_StampsLastRun()
+    {
+        var svc = new RunCountService();
+        var before = System.DateTimeOffset.UtcNow.AddSeconds(-1);
+        svc.Increment(@"C:\file.txt");
+        svc.GetLastRun(@"C:\file.txt").Should().BeAfter(before);
+    }
+
+    [Fact]
+    public void GetLastRun_UnknownPath_ReturnsDefault()
+    {
+        new RunCountService().GetLastRun(@"C:\nope").Should().Be(default);
+    }
+
+    [Fact]
+    public void RunDates_RoundTripThroughSnapshotAndLoad()
+    {
+        var svc = new RunCountService();
+        svc.Increment(@"C:\a");
+        var ticks = svc.SnapshotRunDates();
+        ticks.Should().ContainKey(@"c:\a");
+
+        var restored = new RunCountService();
+        restored.LoadRunDates(ticks);
+        restored.GetLastRun(@"C:\a").Should().Be(svc.GetLastRun(@"C:\a"));
+    }
 }

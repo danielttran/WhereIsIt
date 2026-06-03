@@ -28,6 +28,7 @@ public static class AppBootstrap
 
         var runCounts = new RunCountService();
         runCounts.Load(settings.RunCounts);
+        runCounts.LoadRunDates(settings.RunDates);
 
         services.AddSingleton<AppSettingsService>(_ => settingsService);
         services.AddSingleton<SearchHistory>(_ => history);
@@ -35,7 +36,8 @@ public static class AppBootstrap
         services.AddSingleton<RunCountService>(_ => runCounts);
         services.AddSingleton(_ => new ThumbnailService { CurrentSize = (ThumbnailSize)settings.ThumbnailSizePx });
         services.AddSingleton<IEngineClient>(_ => EngineClientFactory.Create(
-            scopeRoots: settings.ScopeRoots.Length > 0 ? settings.ScopeRoots : null));
+            scopeRoots: settings.ScopeRoots.Length > 0 ? settings.ScopeRoots : null,
+            runCounts: runCounts));
 
         // Optional HTTP frontend — bound to 127.0.0.1 only.
         if (settings.EnableHttpServer)

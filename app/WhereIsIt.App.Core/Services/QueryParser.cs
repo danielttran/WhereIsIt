@@ -31,6 +31,11 @@ public sealed record ParsedQuery
     public DateRange? Modified { get; init; }
     public DateRange? Created  { get; init; }
     public DateRange? Accessed { get; init; }
+    /// <summary><c>dr:</c> — date the file was last run/opened from WhereIsIt.</summary>
+    public DateRange? DateRun { get; init; }
+    /// <summary><c>rc:</c>/<c>runcount:</c> — how many times the file has been
+    /// opened from WhereIsIt.</summary>
+    public SizeRange? RunCount { get; init; }
     public AttributeFilter? Attribute { get; init; }
     public string? ChildOfPath  { get; init; }
     public string? ParentIsPath { get; init; }
@@ -76,7 +81,8 @@ public sealed record ParsedQuery
         && DupeMode == DupeKind.None && ContentSearch == null
         && StartsWith == null && EndsWith == null && WholeFilename == null
         && !RootOnly && NameLength == null && !EmptyOnly && MaxResults == null
-        && ChildCount == null && ChildFileCount == null && ChildFolderCount == null;
+        && ChildCount == null && ChildFileCount == null && ChildFolderCount == null
+        && DateRun == null && RunCount == null;
 }
 
 /// <summary>Everything-compatible duplicate-grouping keys.</summary>
@@ -232,6 +238,8 @@ public static class QueryParser
         SizeRange? childCount = null;
         SizeRange? childFileCount = null;
         SizeRange? childFolderCount = null;
+        DateRange? drRange = null;
+        SizeRange? runCount = null;
         var clauses = new List<SearchClause>();
 
         foreach (var token in tokens)
@@ -366,6 +374,23 @@ public static class QueryParser
             if (lower.StartsWith("da:") && lower.Length > 3)
             {
                 daRange = ParseDateSpec(lower[3..], DateTime.Now);
+                continue;
+            }
+            if (lower.StartsWith("dr:") && lower.Length > 3)
+            {
+                drRange = ParseDateSpec(lower[3..], DateTime.Now);
+                continue;
+            }
+
+            // ── run-count filter (rc: / runcount:) ───────────────────────
+            if (lower.StartsWith("runcount:") && lower.Length > 9)
+            {
+                runCount = ParseIntExpression(lower[9..]);
+                continue;
+            }
+            if (lower.StartsWith("rc:") && lower.Length > 3)
+            {
+                runCount = ParseIntExpression(lower[3..]);
                 continue;
             }
 
@@ -516,6 +541,8 @@ public static class QueryParser
             ChildCount       = childCount,
             ChildFileCount   = childFileCount,
             ChildFolderCount = childFolderCount,
+            DateRun          = drRange,
+            RunCount         = runCount,
             Clauses = clauses,
         };
     }
