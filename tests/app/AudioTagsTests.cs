@@ -94,6 +94,40 @@ public class AudioTagsTests
         s.WriteByte((byte)((v >> 24) & 0xFF));
     }
 
+    private static byte[] VorbisComments(params string[] comments)
+    {
+        using var ms = new MemoryStream();
+        WriteLe32(ms, 0);                 // vendor length
+        WriteLe32(ms, comments.Length);   // comment count
+        foreach (var c in comments)
+        {
+            var cb = Encoding.UTF8.GetBytes(c);
+            WriteLe32(ms, cb.Length);
+            ms.Write(cb);
+        }
+        return ms.ToArray();
+    }
+
+    [Fact]
+    public void TryRead_Ogg_ReadsVorbisComments()
+    {
+        // "OggS" magic, filler, then the 0x03"vorbis" comment-header packet.
+        var file = new MemoryStream();
+        file.Write(Encoding.ASCII.GetBytes("OggS"));
+        file.Write(new byte[20]);
+        file.WriteByte(0x03);
+        file.Write(Encoding.ASCII.GetBytes("vorbis"));
+        file.Write(VorbisComments("ARTIST=Beck", "TITLE=Loser"));
+        var path = WriteTemp(file.ToArray());
+        try
+        {
+            AudioTags.TryRead(path, out var tags).Should().BeTrue();
+            tags.Artist.Should().Be("Beck");
+            tags.Title.Should().Be("Loser");
+        }
+        finally { File.Delete(path); }
+    }
+
     [Fact]
     public void TryRead_Flac_ReadsVorbisComments()
     {

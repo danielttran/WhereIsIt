@@ -81,6 +81,9 @@ public sealed class AudioTags
             if (hn >= 8 && head[4] == (byte)'f' && head[5] == (byte)'t'
                 && head[6] == (byte)'y' && head[7] == (byte)'p')
                 return tags.ReadM4a(fs);
+            if (hn >= 4 && head[0] == (byte)'O' && head[1] == (byte)'g'
+                && head[2] == (byte)'g' && head[3] == (byte)'S')
+                return tags.ReadOgg(fs);
 
             bool any = tags.ReadId3v2(fs); // re-seeks to 0 itself
             if (!tags.Complete) any |= tags.ReadId3v1(fs);
@@ -114,7 +117,7 @@ public sealed class AudioTags
                     if (n <= 0) break;
                     read += n;
                 }
-                any |= ParseVorbisComment(block, read);
+                any |= ParseVorbisComment(block, 0, read);
                 break; // comments found; no need to scan further
             }
 
@@ -124,9 +127,9 @@ public sealed class AudioTags
         return any;
     }
 
-    private bool ParseVorbisComment(byte[] b, int len)
+    private bool ParseVorbisComment(byte[] b, int start, int len)
     {
-        int p = 0;
+        int p = start;
         if (p + 4 > len) return false;
         int vendorLen = Le32(b, p); p += 4;
         p += vendorLen;
@@ -160,6 +163,34 @@ public sealed class AudioTags
     };
 
     private static int Le32(byte[] b, int i) => b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | (b[i + 3] << 24);
+
+    // ── OGG (Vorbis comment header packet) ───────────────────────────────
+
+    private bool ReadOgg(FileStream fs)
+    {
+        fs.Seek(0, SeekOrigin.Begin);
+        int cap = (int)Math.Min(fs.Length, 256 * 1024);
+        if (cap < 16) return false;
+        var buf = new byte[cap];
+        int read = 0;
+        while (read < cap)
+        {
+            int n = fs.Read(buf, read, cap - read);
+            if (n <= 0) break;
+            read += n;
+        }
+        // The Vorbis comment header packet starts with 0x03 then "vorbis".
+        for (int i = 0; i + 7 <= read; i++)
+        {
+            if (buf[i] == 0x03 && buf[i + 1] == (byte)'v' && buf[i + 2] == (byte)'o'
+                && buf[i + 3] == (byte)'r' && buf[i + 4] == (byte)'b'
+                && buf[i + 5] == (byte)'i' && buf[i + 6] == (byte)'s')
+            {
+                return ParseVorbisComment(buf, i + 7, read);
+            }
+        }
+        return false;
+    }
 
     // ── M4A / MP4 (iTunes-style metadata atoms) ──────────────────────────
 
