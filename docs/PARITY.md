@@ -65,7 +65,7 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | `type:<regtype>` (registry file type) | ⛔ | needs the Windows registry file-type DB |
 | `depth:` / `parents:<n>` (folder depth) | ⛔ | semantics ambiguous across roots; deferred |
 | `frn:` file reference number | ⛔ | niche NTFS internal id |
-| `infolder:` | 🟡 | covered by `child:`/`parent:` |
+| `infolder:` | ✅ | ➕ explicit alias for `child:` (recursive "anywhere under this folder") |
 | property functions: `album:`,`artist:`,`title:`,`track:`,`year:`,`comment:`,`genre:`,`bitrate:`,`width:`,`height:`,`dimensions:`,`orientation:`,`duration:`,… | ⛔ | require a file-property / metadata index (large feature; see §9) |
 
 ## 3. Boolean / grouping

@@ -113,6 +113,21 @@ public class QueryParserExtendedTests
         QueryParser.Parse("childcount:0").IsEmpty.Should().BeFalse();
     }
 
+    // ── infolder: (alias for child:) ──────────────────────────────────────
+
+    [Fact]
+    public void Parse_InFolder_SetsChildOfPath()
+    {
+        var q = QueryParser.Parse(@"infolder:C:\Projects");
+        q.ChildOfPath.Should().Be(@"C:\Projects");
+    }
+
+    [Fact]
+    public void Parse_InFolder_PreservesValueCasing()
+    {
+        QueryParser.Parse(@"infolder:C:\MyDir").ChildOfPath.Should().Be(@"C:\MyDir");
+    }
+
     // ── run-count / run-date filters ──────────────────────────────────────
 
     [Fact]

@@ -407,6 +407,13 @@ public static class QueryParser
                 childOfPath = token[6..];
                 continue;
             }
+            // Everything's infolder:<path> is the recursive "anywhere under this
+            // folder" filter — the same semantics as child:.
+            if (lower.StartsWith("infolder:") && token.Length > 9)
+            {
+                childOfPath = token[9..];
+                continue;
+            }
             if (lower.StartsWith("parent:") && token.Length > 7)
             {
                 parentIsPath = token[7..];
