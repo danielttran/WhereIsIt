@@ -200,6 +200,20 @@ public sealed class AppSettingsService : IDisposable
         ScheduleFlush();
     }
 
+    public void SaveColumnWidths(double size, double modified, double type, double attr)
+    {
+        lock (gate)
+        {
+            cached ??= LoadFromDisk();
+            cached.SizeColumnPx = size;
+            cached.ModifiedColumnPx = modified;
+            cached.TypeColumnPx = type;
+            cached.AttrColumnPx = attr;
+            revision++;
+        }
+        ScheduleFlush();
+    }
+
     public void SavePreviewPane(bool show)
     {
         lock (gate)

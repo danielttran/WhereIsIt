@@ -16,6 +16,10 @@ public sealed class AppSettings
     public bool ShowArtistColumn { get; set; } = false;
     public bool ShowAlbumColumn { get; set; } = false;
     public bool ShowAuthorColumn { get; set; } = false;
+    public double SizeColumnPx { get; set; } = 120;
+    public double ModifiedColumnPx { get; set; } = 160;
+    public double TypeColumnPx { get; set; } = 100;
+    public double AttrColumnPx { get; set; } = 80;
     public System.Collections.Generic.Dictionary<string, int> RunCounts { get; set; } = new();
     /// <summary>Last-run timestamps (UTC ticks) per full path, for the <c>dr:</c>
     /// run-date filter. Parallel to <see cref="RunCounts"/>.</summary>

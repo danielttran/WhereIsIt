@@ -74,6 +74,32 @@ public partial class ColumnSettings : ObservableObject
 
     public double ThumbnailRenderSize => ThumbnailSizePx > 0 ? ThumbnailSizePx : 0d;
 
+    // ── user-resizable fixed columns (drag the header grippers) ──────────
+
+    [ObservableProperty][NotifyPropertyChangedFor(nameof(SizeColWidth))]     private double sizeColPx = 120;
+    [ObservableProperty][NotifyPropertyChangedFor(nameof(ModifiedColWidth))] private double modifiedColPx = 160;
+    [ObservableProperty][NotifyPropertyChangedFor(nameof(TypeColWidth))]     private double typeColPx = 100;
+    [ObservableProperty][NotifyPropertyChangedFor(nameof(AttrColWidth))]     private double attrColPx = 80;
+
+    public GridLength SizeColWidth     => new(SizeColPx);
+    public GridLength ModifiedColWidth => new(ModifiedColPx);
+    public GridLength TypeColWidth     => new(TypeColPx);
+    public GridLength AttrColWidth     => new(AttrColPx);
+
+    /// <summary>Applies a header-gripper drag delta to a column, clamped to a
+    /// sensible minimum.</summary>
+    public void ResizeColumn(string key, double delta)
+    {
+        static double Clamp(double v) => v < 48 ? 48 : v;
+        switch (key)
+        {
+            case "size": SizeColPx = Clamp(SizeColPx + delta); break;
+            case "modified": ModifiedColPx = Clamp(ModifiedColPx + delta); break;
+            case "type": TypeColPx = Clamp(TypeColPx + delta); break;
+            case "attr": AttrColPx = Clamp(AttrColPx + delta); break;
+        }
+    }
+
     public GridLength PreviewPaneWidth => ShowPreviewPane ? new GridLength(320) : new GridLength(0);
     public Visibility PreviewPaneVisibility => ShowPreviewPane ? Visibility.Visible : Visibility.Collapsed;
 

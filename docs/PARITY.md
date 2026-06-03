@@ -92,7 +92,8 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | sort by created/accessed | ✅ | native schema v10 stores all three timestamps |
 | sort by extension(type)/attributes | ✅ | |
 | run-count column | ✅ | persisted `RunCountService` ⭐ |
-| add/remove columns | ✅ | Created/Accessed/Runs + Dimensions/Artist/Album/Author toggles (View menu), thumbnail gutter; free drag-reorder/resize is the only column nicety still missing |
+| add/remove columns | ✅ | Created/Accessed/Runs + Dimensions/Artist/Album/Author toggles (View menu), thumbnail gutter |
+| resize columns | ➕ | drag the header grippers (Size/Modified/Type/Attr); widths persist. Free drag-*reorder* still needs a `DataGrid` (which would regress drag-to-Explorer) |
 | custom property columns | ➕ | Dimensions/Artist/Album/Author columns (View menu), lazily read per visible row via the image/audio/document property readers |
 | `sort:` in query | ✅ | native `sort:asc`/`sort:desc` |
 
@@ -166,10 +167,9 @@ infrastructure plus one marginal convenience:
 
 | Remaining item | Hard blocker |
 |---|---|
-| Free column drag-reorder / resize | A fixed-column toggle set ships (incl. property columns); arbitrary drag-reorder/resize needs a `DataGrid`-style control + a build |
+| Column drag-*reorder* | Resize ships (header grippers) + add/remove toggles; free drag-reorder needs a `DataGrid`, which in WinUI would **regress** WhereIsIt's drag-to-Explorer — a net loss, so deliberately not done |
 | Verify Everything-wire IPC | `EverythingIpcServer` implements the public SDK `WM_COPYDATA` layout; the exact window-class name + struct packing must be **confirmed against `Everything_IPC.h` with a real SDK client on Windows** (no toolchain here to test interop) |
 | **ETP server** | Everything's **undocumented proprietary** search-extension protocol over FTP — needs the spec; a standard read-only **FTP server** now ships, plus the HTTP search/web UI |
-| Modern (always-visible) Win11 context menu | The classic registry verb ships (`ShellMenuRegistration`); a Win11 *primary* context-menu entry additionally needs a packaged `IExplorerCommand` **COM** handler |
 | Bracketless function OR (`ext:cs \| ext:txt`) | Works *with* brackets today; marginal tokenizer change otherwise |
 
 These cannot be implemented **and verified** without a Windows .NET 10 / WinUI /

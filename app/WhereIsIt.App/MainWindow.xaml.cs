@@ -53,6 +53,16 @@ public sealed partial class MainWindow : Window
         Activated += OnFirstActivatedShowRestorePrompt;
     }
 
+    // ── Column resize (header grippers) ─────────────────────────────────
+
+    private void OnColumnResize(object sender, Microsoft.UI.Xaml.Controls.Primitives.DragDeltaEventArgs e)
+    {
+        if (sender is not FrameworkElement { Tag: string key }) return;
+        ColumnSettings.Current.ResizeColumn(key, e.HorizontalChange);
+        var c = ColumnSettings.Current;
+        settingsService?.SaveColumnWidths(c.SizeColPx, c.ModifiedColPx, c.TypeColPx, c.AttrColPx);
+    }
+
     // ── Custom property columns ─────────────────────────────────────────
 
     private void OnPropertyColumnToggleClick(object sender, RoutedEventArgs e)

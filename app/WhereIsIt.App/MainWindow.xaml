@@ -5,6 +5,7 @@
     xmlns:vm="using:WhereIsIt.App.ViewModels"
     xmlns:app="using:WhereIsIt.App"
     xmlns:muxc="using:Microsoft.UI.Xaml.Controls"
+    xmlns:prim="using:Microsoft.UI.Xaml.Controls.Primitives"
     Title="WhereIsIt">
 
     <Grid x:Name="RootGrid" RowDefinitions="Auto,Auto,Auto,*,Auto" Padding="0">
@@ -216,13 +217,13 @@
                     <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.ThumbnailColumnWidth, Mode=OneWay}"/>
                     <ColumnDefinition Width="2*"/>
                     <ColumnDefinition Width="3*"/>
-                    <ColumnDefinition Width="120"/>
-                    <ColumnDefinition Width="160"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.SizeColWidth, Mode=OneWay}"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.ModifiedColWidth, Mode=OneWay}"/>
                     <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.CreatedColumnWidth, Mode=OneWay}"/>
                     <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AccessedColumnWidth, Mode=OneWay}"/>
                     <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.RunCountColumnWidth, Mode=OneWay}"/>
-                    <ColumnDefinition Width="100"/>
-                    <ColumnDefinition Width="80"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.TypeColWidth, Mode=OneWay}"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AttrColWidth, Mode=OneWay}"/>
                     <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.DimensionsColumnWidth, Mode=OneWay}"/>
                     <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.ArtistColumnWidth, Mode=OneWay}"/>
                     <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AlbumColumnWidth, Mode=OneWay}"/>
@@ -243,7 +244,7 @@
                     </StackPanel>
                 </Button>
                 <Button Grid.Column="3" Style="{StaticResource ColumnHeaderButton}"
-                        Width="120" HorizontalContentAlignment="Right"
+                        HorizontalContentAlignment="Right"
                         Command="{x:Bind ViewModel.ResultsList.SortByCommand}" CommandParameter="size">
                     <StackPanel Orientation="Horizontal" Spacing="2">
                         <TextBlock Text="Size" FontWeight="SemiBold"/>
@@ -251,7 +252,6 @@
                     </StackPanel>
                 </Button>
                 <Button Grid.Column="4" Style="{StaticResource ColumnHeaderButton}"
-                        Width="160"
                         Command="{x:Bind ViewModel.ResultsList.SortByCommand}" CommandParameter="modified">
                     <StackPanel Orientation="Horizontal" Spacing="2">
                         <TextBlock Text="Modified" FontWeight="SemiBold"/>
@@ -295,6 +295,15 @@
                         Visibility="{x:Bind app:ColumnSettings.Current.AlbumColumnVisibility, Mode=OneWay}"/>
                 <Button Grid.Column="13" Style="{StaticResource ColumnHeaderButton}" Content="Author"
                         Visibility="{x:Bind app:ColumnSettings.Current.AuthorColumnVisibility, Mode=OneWay}"/>
+                <!-- Resize grippers on the right edge of the fixed columns. -->
+                <prim:Thumb Grid.Column="3" Tag="size" HorizontalAlignment="Right" Width="6"
+                            Background="Transparent" DragDelta="OnColumnResize"/>
+                <prim:Thumb Grid.Column="4" Tag="modified" HorizontalAlignment="Right" Width="6"
+                            Background="Transparent" DragDelta="OnColumnResize"/>
+                <prim:Thumb Grid.Column="8" Tag="type" HorizontalAlignment="Right" Width="6"
+                            Background="Transparent" DragDelta="OnColumnResize"/>
+                <prim:Thumb Grid.Column="9" Tag="attr" HorizontalAlignment="Right" Width="6"
+                            Background="Transparent" DragDelta="OnColumnResize"/>
             </Grid>
 
             <!-- Empty state overlay -->
@@ -357,13 +366,13 @@
                                 <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.ThumbnailColumnWidth, Mode=OneWay}"/>
                                 <ColumnDefinition Width="2*"/>
                                 <ColumnDefinition Width="3*"/>
-                                <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="160"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.SizeColWidth, Mode=OneWay}"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.ModifiedColWidth, Mode=OneWay}"/>
                                 <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.CreatedColumnWidth, Mode=OneWay}"/>
                                 <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AccessedColumnWidth, Mode=OneWay}"/>
                                 <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.RunCountColumnWidth, Mode=OneWay}"/>
-                                <ColumnDefinition Width="100"/>
-                                <ColumnDefinition Width="80"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.TypeColWidth, Mode=OneWay}"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AttrColWidth, Mode=OneWay}"/>
                                 <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.DimensionsColumnWidth, Mode=OneWay}"/>
                                 <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.ArtistColumnWidth, Mode=OneWay}"/>
                                 <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AlbumColumnWidth, Mode=OneWay}"/>
