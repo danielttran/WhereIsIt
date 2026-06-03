@@ -7,6 +7,7 @@ public sealed class AppSettings
     public Bookmark[] Bookmarks { get; set; } = [];
     public string GlobalHotkey { get; set; } = "Ctrl+Alt+W";
     public bool StartWithWindows { get; set; } = false;
+    public bool ShellContextMenu { get; set; } = false;
     public bool ShowCreatedColumn  { get; set; } = false;
     public bool ShowAccessedColumn { get; set; } = false;
     public bool ShowRunCountColumn { get; set; } = false;

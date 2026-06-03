@@ -103,7 +103,7 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | instant-as-you-type results | ✅ | 75 ms throttle, seq-fenced decorator ⭐ |
 | menu bar (File/Edit/Search/Bookmarks/View/Tools/Help) | ✅ | |
 | result context menu (open / open path / copy name / copy full path / rename / recycle / properties) | ✅ | |
-| Explorer shell context menu integration | ⛔ | needs a Windows shell extension |
+| Explorer shell context menu integration | ➕ | "Search with WhereIsIt" on folders/drives/background via the classic registry shell verb (`ShellMenuRegistration`, no COM); launches `-p <path>`. Toggle in Tools menu. Win11 shows it under "Show more options" |
 | drag & drop to Explorer/editors | ✅ | |
 | tabs | ✅ | TabView + restore-previous-tabs prompt ⭐ |
 | bookmarks | ✅ | |
@@ -149,7 +149,7 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | Everything service | ➕ | `tools/WhereIsIt.EngineService` — engine-over-named-pipe host (see §6) |
 | `es.exe` CLI | 🟡 | ➕ `tools/WhereIsIt.Es` builds `es.exe` — same engine + query syntax, output/sort/export/modifier flags. Searches in-proc (one-shot) rather than over Everything's live-index IPC |
 | IPC / SDK (DLL + messages) | ⛔ | needs Everything's undocumented WM_COPYDATA/IPC binary protocol for third-party interop |
-| URL protocol / "Search Everything" shell verb | ⛔ | shell integration |
+| "Search WhereIsIt" shell verb | ➕ | registry context-menu verb (see §5) |
 
 ## 9. Remaining gaps
 
@@ -168,7 +168,7 @@ infrastructure plus one marginal convenience:
 | **Custom property columns** | Dynamic WinUI `ListView` columns bound to the metadata readers; needs a build to do safely |
 | **Everything-compatible IPC SDK** | Byte-compatible reimplementation of Everything's **undocumented WM_COPYDATA/IPC protocol** so third-party tools interop (a native `es.exe` CLI ships in `tools/WhereIsIt.Es`) |
 | **ETP / FTP server** | **Undocumented proprietary protocol** |
-| **Shell context-menu extension** | A separate registered **Windows COM** component |
+| Modern (always-visible) Win11 context menu | The classic registry verb ships (`ShellMenuRegistration`); a Win11 *primary* context-menu entry additionally needs a packaged `IExplorerCommand` **COM** handler |
 | Windows-**service** auto-install | The engine-over-pipe host ships (`tools/WhereIsIt.EngineService`, runs now / `sc create`); a true auto-installing service needs `Microsoft.Extensions.Hosting.WindowsServices` + a build |
 | Bracketless function OR (`ext:cs \| ext:txt`) | Works *with* brackets today; marginal tokenizer change otherwise |
 

@@ -47,7 +47,18 @@ public sealed partial class MainWindow : Window
 
         RefreshBookmarksMenu();
         ViewModel.ResultsList.PropertyChanged += OnResultsListPropertyChanged;
+        try { ShellMenuToggle.IsChecked = settingsService?.Load().ShellContextMenu ?? false; } catch { }
         Activated += OnFirstActivatedShowRestorePrompt;
+    }
+
+    private void OnShellMenuToggleClick(object sender, RoutedEventArgs e)
+    {
+        bool on = (sender as ToggleMenuFlyoutItem)?.IsChecked ?? false;
+        ShellMenuRegistration.Apply(on);
+        if (settingsService is null) return;
+        var s = settingsService.Load();
+        s.ShellContextMenu = on;
+        settingsService.Save(s);
     }
 
     // ── Preview pane ────────────────────────────────────────────────────

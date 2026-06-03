@@ -12,6 +12,7 @@ public static class AppBootstrap
         var settingsService = new AppSettingsService();
         var settings = settingsService.Load();
         StartupRegistration.Apply(settings.StartWithWindows);
+        ShellMenuRegistration.Apply(settings.ShellContextMenu);
 
         // Apply persisted column-visibility BEFORE any view model loads — the
         // DataTemplate ColumnDefinition.Width binds OneTime to these statics.

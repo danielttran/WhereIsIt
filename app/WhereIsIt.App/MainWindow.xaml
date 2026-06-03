@@ -154,6 +154,9 @@
 
             <MenuBarItem Title="Tools">
                 <MenuFlyoutItem Text="Options…" Click="OnSettingsClick"/>
+                <MenuFlyoutSeparator/>
+                <ToggleMenuFlyoutItem x:Name="ShellMenuToggle"
+                    Text="Add to Explorer context menu" Click="OnShellMenuToggleClick"/>
             </MenuBarItem>
 
             <MenuBarItem Title="Help">
