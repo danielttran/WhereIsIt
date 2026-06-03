@@ -79,7 +79,7 @@ public sealed class FtpServer : IDisposable
 
     private async Task ServeAsync(TcpClient client, CancellationToken ct)
     {
-        using var _ = client;
+        using var clientScope = client;
         using var stream = client.GetStream();
         using var reader = new StreamReader(stream, Encoding.UTF8, false, 1024, leaveOpen: true);
         using var writer = new StreamWriter(stream, new UTF8Encoding(false), 1024, leaveOpen: true) { AutoFlush = true, NewLine = "\r\n" };

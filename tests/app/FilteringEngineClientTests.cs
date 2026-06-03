@@ -233,8 +233,8 @@ public class FilteringEngineClientTests
 
         var runs = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
         {
-            [@"C:\hot.txt"] = 7,
-            [@"C:\cold.txt"] = 1,
+            [Path.Combine(@"C:\", "hot.txt")] = 7,
+            [Path.Combine(@"C:\", "cold.txt")] = 1,
         };
         using var client = new FilteringEngineClient(
             inner, p => runs.TryGetValue(p, out var n) ? n : 0, null);
@@ -257,7 +257,7 @@ public class FilteringEngineClientTests
 
         var dates = new Dictionary<string, DateTimeOffset>(StringComparer.OrdinalIgnoreCase)
         {
-            [@"C:\opened.txt"] = DateTimeOffset.Now,
+            [Path.Combine(@"C:\", "opened.txt")] = DateTimeOffset.Now,
         };
         using var client = new FilteringEngineClient(
             inner, null, p => dates.TryGetValue(p, out var d) ? d : default);

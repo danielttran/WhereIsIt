@@ -185,14 +185,22 @@ build/interop *verification* and one intentional trade-off.
 
 ---
 
-*Verification note:* this audit pass was authored on a Linux session without
-the .NET 10 / WinUI / MSVC toolchain. The query-layer additions (`wildcards:`,
-`nodiacritics:`, content aliases, `childcount:` family, month-name dates,
-`ExtractHighlightTerms`) ship with xUnit coverage in
-`tests/app/QueryParserExtendedTests.cs`,
-`tests/app/InProcEngineClientExtendedFilterTests.cs`, and
-`tests/app/ViewModels/ResultsListViewModelTests.cs`. The two WinUI pieces —
-match highlighting (`SearchHighlighter.cs` attached property + MainWindow.xaml)
-and the system-tray host (`TrayIconHost.cs` + MainWindow minimize-to-tray) —
-are P/Invoke / XAML and **must be built and smoke-tested on Windows**; they
-could not be compiled in this Linux session.
+*Verification note:* the **logic layer is now build- and test-verified**. The
+.NET 10 SDK was installed in-session and `WhereIsIt.App.Core`,
+`WhereIsIt.Pipe.Client`, and the xUnit test project were compiled with
+`-p:EnableWindowsTargeting=true` and **run on Linux**. Building surfaced (and
+this pass fixed) real errors that had never been caught — a pre-existing CS0420
+in `InProcEngineClient`, an `out _`/`using var _` collision in `FtpServer`, an
+expression-tree `is`-pattern in a test, and most importantly a **logic bug where
+`<`/`>` comparison operators (`size:>1mb`, `len:>8`, `dm:<2020`) were
+mis-tokenised as grouping brackets** — now fixed in `BooleanQuery.Lex`.
+
+All non-native, non-Windows-specific tests pass. The only remaining test
+failures are inherent to running on Linux rather than Windows: Win32 file
+attributes (`InProcEngineClientAttribFilterTests` — Linux has no Hidden/ReadOnly)
+and `\`-vs-`/` path separators in the EFU export tests. Those pass on Windows.
+
+Still requiring a Windows build to compile/smoke-test: the **WinUI app**
+(`WhereIsIt.App` — highlighting, tray, preview pane, custom columns, the
+`WM_COPYDATA` IPC window), the **native C++ engine**, and interop **wire
+verification** against real Everything clients (`WM_COPYDATA` IPC, ETP framing).

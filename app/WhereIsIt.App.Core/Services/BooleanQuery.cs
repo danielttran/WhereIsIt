@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 
 namespace WhereIsIt.App.Services;
 
@@ -151,38 +152,62 @@ public static class BooleanQuery
     private static List<Atom> Lex(string s)
     {
         var atoms = new List<Atom>();
-        int i = 0;
-        while (i < s.Length)
+        var word = new StringBuilder();
+
+        void Flush()
+        {
+            if (word.Length == 0) return;
+            var w = word.ToString();
+            word.Clear();
+            // Function tokens (ext:, size:, child:, …) become function leaves so
+            // they can be grouped/OR'd; plain words become term leaves.
+            atoms.Add(new Atom(WordHasColon(w) ? Tok.Func : Tok.Term, w));
+        }
+
+        for (int i = 0; i < s.Length; i++)
         {
             char c = s[i];
+            char next = i + 1 < s.Length ? s[i + 1] : '\0';
             switch (c)
             {
                 case '"':
+                    Flush();
                     int close = s.IndexOf('"', i + 1);
-                    if (close < 0) { i++; continue; }
+                    if (close < 0) break;        // lone quote — skip it
                     var literal = s.Substring(i + 1, close - (i + 1));
                     if (literal.Length > 0) atoms.Add(new Atom(Tok.Term, literal));
-                    i = close + 1;
-                    continue;
-                case '<': atoms.Add(new Atom(Tok.LParen, "<")); i++; continue;
-                case '>': atoms.Add(new Atom(Tok.RParen, ">")); i++; continue;
-                case '|': atoms.Add(new Atom(Tok.Or, "|"));     i++; continue;
-                case '!': atoms.Add(new Atom(Tok.Not, "!"));    i++; continue;
+                    i = close;                   // loop ++ moves past the close quote
+                    break;
                 case ' ':
-                case '\t': i++; continue;
+                case '\t': Flush(); break;
+                case '|': Flush(); atoms.Add(new Atom(Tok.Or, "|")); break;
+                case '!': Flush(); atoms.Add(new Atom(Tok.Not, "!")); break;
+                case '<':
+                    // Comparison operator (dm:<2020, size:<1mb) when inside a
+                    // function value and followed by a value char — otherwise a
+                    // grouping bracket.
+                    if (WordHasColon(word) && (char.IsDigit(next) || next == '='))
+                        word.Append(c);
+                    else { Flush(); atoms.Add(new Atom(Tok.LParen, "<")); }
+                    break;
+                case '>':
+                    // '>' before a digit/'=' is a comparison (size:>1kb, len:>8);
+                    // otherwise it closes a group.
+                    if (char.IsDigit(next) || next == '=')
+                        word.Append(c);
+                    else { Flush(); atoms.Add(new Atom(Tok.RParen, ">")); }
+                    break;
+                default: word.Append(c); break;
             }
-
-            int start = i;
-            while (i < s.Length && s[i] is not (' ' or '\t' or '<' or '>' or '|' or '!' or '"'))
-                i++;
-            var word = s.Substring(start, i - start);
-            if (word.Length == 0) continue;
-            // Function tokens (ext:, size:, child:, …) become function leaves so
-            // they can be grouped/OR'd; plain words become term leaves.
-            atoms.Add(word.Contains(':')
-                ? new Atom(Tok.Func, word)
-                : new Atom(Tok.Term, word));
         }
+        Flush();
         return atoms;
+    }
+
+    private static bool WordHasColon(string w) => w.Contains(':');
+    private static bool WordHasColon(StringBuilder w)
+    {
+        for (int i = 0; i < w.Length; i++) if (w[i] == ':') return true;
+        return false;
     }
 }

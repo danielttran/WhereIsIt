@@ -61,7 +61,7 @@ public class BooleanQueryTests
         e.Should().BeOfType<BoolAnd>();
         var and = (BoolAnd)e!;
         and.Parts.Should().HaveCount(2);
-        and.Parts.Should().ContainSingle(p => p is BoolFunc f && f.Token == "ext:cs");
+        and.Parts.OfType<BoolFunc>().Should().ContainSingle(f => f.Token == "ext:cs");
     }
 
     [Fact]

@@ -8,6 +8,11 @@ using System.Threading;
 using System.Threading.Tasks;
 using WhereIsIt.App.Contracts;
 
+// Interlocked/Volatile operations on the volatile `state` field intentionally
+// pass it by ref; the CS0420 "ref to volatile" warning is a known false positive
+// for Interlocked, which already provides the required ordering.
+#pragma warning disable 0420
+
 namespace WhereIsIt.App.Services;
 
 public sealed class InProcEngineClient : IEngineClient, IDisposable
