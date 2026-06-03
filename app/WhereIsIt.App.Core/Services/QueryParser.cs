@@ -73,6 +73,10 @@ public sealed record ParsedQuery
     /// <summary><c>depth:</c>/<c>parents:</c> — folder depth, defined as the number
     /// of path separators in the full path (a volume-root entry is depth 1).</summary>
     public SizeRange? Depth { get; init; }
+    /// <summary><c>width:</c> / <c>dimensions:</c> — image pixel width.</summary>
+    public SizeRange? Width { get; init; }
+    /// <summary><c>height:</c> / <c>dimensions:</c> — image pixel height.</summary>
+    public SizeRange? Height { get; init; }
 
     public string? ContentSearch { get; init; }
     public IReadOnlyList<SearchClause> Clauses { get; init; } = [];
@@ -91,7 +95,8 @@ public sealed record ParsedQuery
         && StartsWith == null && EndsWith == null && WholeFilename == null
         && !RootOnly && NameLength == null && !EmptyOnly && MaxResults == null
         && ChildCount == null && ChildFileCount == null && ChildFolderCount == null
-        && DateRun == null && RunCount == null && TermExpr == null && Depth == null;
+        && DateRun == null && RunCount == null && TermExpr == null && Depth == null
+        && Width == null && Height == null;
 }
 
 /// <summary>Everything-compatible duplicate-grouping keys.</summary>
@@ -248,6 +253,8 @@ public static class QueryParser
         SizeRange? childFileCount = null;
         SizeRange? childFolderCount = null;
         SizeRange? depth = null;
+        SizeRange? widthRange = null;
+        SizeRange? heightRange = null;
         DateRange? drRange = null;
         SizeRange? runCount = null;
         var clauses = new List<SearchClause>();
@@ -522,6 +529,23 @@ public static class QueryParser
                 continue;
             }
 
+            // ── image dimensions (width: / height: / dimensions:) ────────
+            if (lower.StartsWith("width:") && lower.Length > 6)
+            {
+                widthRange = ParseIntExpression(lower[6..]);
+                continue;
+            }
+            if (lower.StartsWith("height:") && lower.Length > 7)
+            {
+                heightRange = ParseIntExpression(lower[7..]);
+                continue;
+            }
+            if (lower.StartsWith("dimensions:") && lower.Length > 11)
+            {
+                ParseDimensions(lower[11..], ref widthRange, ref heightRange);
+                continue;
+            }
+
             // ── content: family (file-contents post-filter) ──────────────
             // Everything exposes encoding-specific aliases; WhereIsIt's reader
             // auto-detects encoding, so they all map to the same content search.
@@ -581,6 +605,8 @@ public static class QueryParser
             ChildFileCount   = childFileCount,
             ChildFolderCount = childFolderCount,
             Depth            = depth,
+            Width            = widthRange,
+            Height           = heightRange,
             DateRun          = drRange,
             RunCount         = runCount,
             TermExpr         = termExpr,
@@ -663,6 +689,27 @@ public static class QueryParser
             }
         }
         return terms;
+    }
+
+    /// <summary>
+    /// Parses an Everything <c>dimensions:</c> value. <c>WxH</c> sets both to an
+    /// exact match; a bare <c>N</c> or comparison applies to both width and
+    /// height (so <c>dimensions:&gt;1000</c> means wide-and-tall).
+    /// </summary>
+    private static void ParseDimensions(string spec, ref SizeRange? width, ref SizeRange? height)
+    {
+        spec = spec.Trim();
+        int x = spec.IndexOf('x');
+        if (x < 0) x = spec.IndexOf('X');
+        if (x > 0 && x < spec.Length - 1)
+        {
+            width = ParseIntExpression(spec[..x]);
+            height = ParseIntExpression(spec[(x + 1)..]);
+            return;
+        }
+        var both = ParseIntExpression(spec);
+        width = both;
+        height = both;
     }
 
     // ── helpers ───────────────────────────────────────────────────────────

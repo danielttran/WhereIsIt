@@ -152,6 +152,27 @@ public class InProcEngineClientExtendedFilterTests : IAsyncLifetime
         deeper.Should().NotContain("shallow.txt");
     }
 
+    // ── image dimensions (width:/height:) ─────────────────────────────────
+
+    [Fact]
+    public async Task Search_Width_MatchesImageDimensions()
+    {
+        // Minimal PNG header describing a 2x3 image (enough for the reader).
+        byte[] png =
+        {
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+            0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03,
+        };
+        await File.WriteAllBytesAsync(Path.Combine(_root.FullName, "img.png"), png);
+        await File.WriteAllTextAsync(Path.Combine(_root.FullName, "notes.txt"), "not an image");
+
+        (await GetNamesAsync("width:2")).Should().Contain("img.png");
+        (await GetNamesAsync("width:2")).Should().NotContain("notes.txt");
+        (await GetNamesAsync("height:3")).Should().Contain("img.png");
+        (await GetNamesAsync("width:99")).Should().NotContain("img.png");
+    }
+
     // ── < > boolean grouping ──────────────────────────────────────────────
 
     [Fact]

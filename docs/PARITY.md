@@ -66,7 +66,8 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | `depth:` / `parents:<n>` (folder depth) | ➕ | depth = number of path separators in the full path (volume-root entry = depth 1); `parents:` is an alias |
 | `frn:` file reference number | ⛔ | niche NTFS internal id |
 | `infolder:` | ✅ | ➕ explicit alias for `child:` (recursive "anywhere under this folder") |
-| property functions: `album:`,`artist:`,`title:`,`track:`,`year:`,`comment:`,`genre:`,`bitrate:`,`width:`,`height:`,`dimensions:`,`orientation:`,`duration:`,… | ⛔ | require a file-property / metadata index (large feature; see §9) |
+| image dimensions `width:` / `height:` / `dimensions:` | ➕ | dependency-free header reader (`ImageDimensions`) for PNG/JPEG/GIF/BMP/WEBP; post-filtered per row |
+| other property functions: `album:`,`artist:`,`title:`,`track:`,`year:`,`comment:`,`genre:`,`bitrate:`,`orientation:`,`duration:`,… | ⛔ | require a tag/metadata index (large feature; see §9) |
 
 ## 3. Boolean / grouping
 
@@ -153,8 +154,9 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
    *with* brackets (`<ext:cs>|<ext:txt>`); the bracketless form would need the
    space tokenizer to treat a lone `|` between function tokens as an operator.
 2. **Preview pane** — Everything 1.5 feature; needs a content/thumbnail preview host (WinUI, needs a build).
-3. **Property/metadata index** — unlocks `album:`/`width:`/… and custom
-   property columns. Large native engine + Windows Property System work.
+3. **Tag/metadata property functions** (`album:`/`artist:`/`year:`/`duration:`/…)
+   and custom property columns — image `width:`/`height:`/`dimensions:` are done
+   via header parsing; audio/document tags need a metadata index. Large.
 4. **`es.exe` CLI + Everything-compatible IPC SDK** — the real value is talking
    to the live index over Everything's exact WM_COPYDATA/IPC protocol so
    third-party tools interop; that's a binary-compatible Windows-only protocol.

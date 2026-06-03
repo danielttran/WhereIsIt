@@ -155,6 +155,41 @@ public class QueryParserExtendedTests
         QueryParser.Parse("depth:1").IsEmpty.Should().BeFalse();
     }
 
+    // ── image dimensions (width:/height:/dimensions:) ─────────────────────
+
+    [Fact]
+    public void Parse_Width_ParsesComparison()
+    {
+        var q = QueryParser.Parse("width:>=1920");
+        q.Width.Should().NotBeNull();
+        q.Width!.Op.Should().Be(SizeOp.GreaterOrEqual);
+        q.Width.Low.Should().Be(1920UL);
+    }
+
+    [Fact]
+    public void Parse_Height_Parses()
+    {
+        QueryParser.Parse("height:1080").Height!.Low.Should().Be(1080UL);
+    }
+
+    [Fact]
+    public void Parse_Dimensions_WxH_SetsBothExact()
+    {
+        var q = QueryParser.Parse("dimensions:1920x1080");
+        q.Width.Should().NotBeNull();
+        q.Height.Should().NotBeNull();
+        q.Width!.Op.Should().Be(SizeOp.Equal);
+        q.Width.Low.Should().Be(1920UL);
+        q.Height!.Op.Should().Be(SizeOp.Equal);
+        q.Height.Low.Should().Be(1080UL);
+    }
+
+    [Fact]
+    public void Parse_Width_MakesQueryNonEmpty()
+    {
+        QueryParser.Parse("width:>100").IsEmpty.Should().BeFalse();
+    }
+
     // ── infolder: (alias for child:) ──────────────────────────────────────
 
     [Fact]

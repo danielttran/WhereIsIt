@@ -266,6 +266,14 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         if (q.Depth is not null && !q.Depth.Matches((ulong)QueryParser.FolderDepth(fullPath)))
             return false;
 
+        if (q.Width is not null || q.Height is not null)
+        {
+            if (isDir) return false;
+            if (!ImageDimensions.TryRead(fullPath, out int w, out int h)) return false;
+            if (q.Width is not null && !q.Width.Matches((ulong)w)) return false;
+            if (q.Height is not null && !q.Height.Matches((ulong)h)) return false;
+        }
+
         if (q.TermExpr is null && q.Clauses.Count == 0) return true;
 
         var cmp = q.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;

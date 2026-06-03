@@ -127,6 +127,8 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             || parsed.ChildFileCount is not null
             || parsed.ChildFolderCount is not null
             || parsed.Depth is not null
+            || parsed.Width is not null
+            || parsed.Height is not null
             || parsed.RunCount is not null
             || parsed.DateRun is not null
             || parsed.TermExpr is not null
@@ -317,6 +319,7 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
         if (q.ChildCount is not null || q.ChildFileCount is not null
             || q.ChildFolderCount is not null) return true;
         if (q.Depth is not null) return true;
+        if (q.Width is not null || q.Height is not null) return true;
         if (q.RunCount is not null || q.DateRun is not null) return true;
         if (q.TermExpr is not null) return true;
         if (q.MaxResults is not null) return true;
@@ -462,6 +465,14 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
 
         if (q.Depth is not null && !q.Depth.Matches((ulong)QueryParser.FolderDepth(fullPath)))
             return false;
+
+        if (q.Width is not null || q.Height is not null)
+        {
+            if (isDir) return false;
+            if (!ImageDimensions.TryRead(fullPath, out int w, out int h)) return false;
+            if (q.Width is not null && !q.Width.Matches((ulong)w)) return false;
+            if (q.Height is not null && !q.Height.Matches((ulong)h)) return false;
+        }
 
         // Run-metadata filters degrade to no-ops when no lookup is wired, so a
         // missing RunCountService never silently empties the result set.
