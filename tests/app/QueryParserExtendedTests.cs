@@ -190,6 +190,48 @@ public class QueryParserExtendedTests
         QueryParser.Parse("width:>100").IsEmpty.Should().BeFalse();
     }
 
+    // ── audio tags (artist:/album:/...) ───────────────────────────────────
+
+    [Fact]
+    public void Parse_Artist_AddsMediaFilter()
+    {
+        var q = QueryParser.Parse("artist:Beatles");
+        q.MediaFilters.Should().ContainSingle();
+        q.MediaFilters[0].Field.Should().Be(MediaField.Artist);
+        q.MediaFilters[0].Value.Should().Be("Beatles");
+    }
+
+    [Fact]
+    public void Parse_MultipleMediaFilters()
+    {
+        var q = QueryParser.Parse("artist:Beatles album:Abbey");
+        q.MediaFilters.Should().HaveCount(2);
+    }
+
+    [Theory]
+    [InlineData("album:x", MediaField.Album)]
+    [InlineData("title:x", MediaField.Title)]
+    [InlineData("year:x", MediaField.Year)]
+    [InlineData("genre:x", MediaField.Genre)]
+    [InlineData("track:x", MediaField.Track)]
+    [InlineData("comment:x", MediaField.Comment)]
+    public void Parse_MediaPrefixes_MapToFields(string query, MediaField field)
+    {
+        QueryParser.Parse(query).MediaFilters[0].Field.Should().Be(field);
+    }
+
+    [Fact]
+    public void Parse_Artist_MakesQueryNonEmpty()
+    {
+        QueryParser.Parse("artist:x").IsEmpty.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Parse_Artist_PreservesValueCasing()
+    {
+        QueryParser.Parse("artist:Pink Floyd").MediaFilters[0].Value.Should().Be("Pink");
+    }
+
     // ── infolder: (alias for child:) ──────────────────────────────────────
 
     [Fact]

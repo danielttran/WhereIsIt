@@ -67,7 +67,8 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | `frn:` file reference number | ⛔ | niche NTFS internal id |
 | `infolder:` | ✅ | ➕ explicit alias for `child:` (recursive "anywhere under this folder") |
 | image dimensions `width:` / `height:` / `dimensions:` | ➕ | dependency-free header reader (`ImageDimensions`) for PNG/JPEG/GIF/BMP/WEBP; post-filtered per row |
-| other property functions: `album:`,`artist:`,`title:`,`track:`,`year:`,`comment:`,`genre:`,`bitrate:`,`orientation:`,`duration:`,… | ⛔ | require a tag/metadata index (large feature; see §9) |
+| audio tags `artist:`,`album:`,`title:`,`year:`,`genre:`,`track:`,`comment:` | ➕ | dependency-free ID3 reader (`AudioTags`, ID3v2.3/2.4 + ID3v1) — MP3 coverage; matched as case-insensitive substrings |
+| other property functions: `bitrate:`,`orientation:`,`duration:`,`channels:`,`samplerate:`,… (and tags for FLAC/M4A/Office/PDF) | ⛔ | need a broader per-format metadata index (large; see §9) |
 
 ## 3. Boolean / grouping
 
@@ -154,9 +155,10 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
    *with* brackets (`<ext:cs>|<ext:txt>`); the bracketless form would need the
    space tokenizer to treat a lone `|` between function tokens as an operator.
 2. **Preview pane** — Everything 1.5 feature; needs a content/thumbnail preview host (WinUI, needs a build).
-3. **Tag/metadata property functions** (`album:`/`artist:`/`year:`/`duration:`/…)
-   and custom property columns — image `width:`/`height:`/`dimensions:` are done
-   via header parsing; audio/document tags need a metadata index. Large.
+3. **Broader metadata property functions** (`duration:`/`bitrate:`/… and tags for
+   FLAC/M4A/Office/PDF) and custom property columns — image dimensions and MP3
+   ID3 tags are done via header parsing; full coverage needs a per-format
+   metadata index. Large.
 4. **`es.exe` CLI + Everything-compatible IPC SDK** — the real value is talking
    to the live index over Everything's exact WM_COPYDATA/IPC protocol so
    third-party tools interop; that's a binary-compatible Windows-only protocol.

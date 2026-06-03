@@ -274,6 +274,12 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
             if (q.Height is not null && !q.Height.Matches((ulong)h)) return false;
         }
 
+        if (q.MediaFilters.Count > 0)
+        {
+            if (isDir) return false;
+            if (!AudioTags.Match(q.MediaFilters, fullPath, q.CaseSensitive, q.MatchDiacritics)) return false;
+        }
+
         if (q.TermExpr is null && q.Clauses.Count == 0) return true;
 
         var cmp = q.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;

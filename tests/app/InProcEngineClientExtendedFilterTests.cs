@@ -173,6 +173,23 @@ public class InProcEngineClientExtendedFilterTests : IAsyncLifetime
         (await GetNamesAsync("width:99")).Should().NotContain("img.png");
     }
 
+    // ── audio tags (artist:/album:) ───────────────────────────────────────
+
+    [Fact]
+    public async Task Search_Artist_MatchesId3Tag()
+    {
+        // 128-byte ID3v1 trailer with artist "Pink Floyd".
+        var id3 = new byte[128];
+        System.Text.Encoding.ASCII.GetBytes("TAG").CopyTo(id3, 0);
+        System.Text.Encoding.ASCII.GetBytes("Pink Floyd").CopyTo(id3, 33); // artist @33
+        await File.WriteAllBytesAsync(Path.Combine(_root.FullName, "song.mp3"), id3);
+        await File.WriteAllTextAsync(Path.Combine(_root.FullName, "notes.txt"), "no tags here");
+
+        (await GetNamesAsync("artist:floyd")).Should().Contain("song.mp3");
+        (await GetNamesAsync("artist:floyd")).Should().NotContain("notes.txt");
+        (await GetNamesAsync("artist:zeppelin")).Should().NotContain("song.mp3");
+    }
+
     // ── < > boolean grouping ──────────────────────────────────────────────
 
     [Fact]

@@ -129,6 +129,7 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             || parsed.Depth is not null
             || parsed.Width is not null
             || parsed.Height is not null
+            || parsed.MediaFilters.Count > 0
             || parsed.RunCount is not null
             || parsed.DateRun is not null
             || parsed.TermExpr is not null
@@ -320,6 +321,7 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             || q.ChildFolderCount is not null) return true;
         if (q.Depth is not null) return true;
         if (q.Width is not null || q.Height is not null) return true;
+        if (q.MediaFilters.Count > 0) return true;
         if (q.RunCount is not null || q.DateRun is not null) return true;
         if (q.TermExpr is not null) return true;
         if (q.MaxResults is not null) return true;
@@ -472,6 +474,12 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             if (!ImageDimensions.TryRead(fullPath, out int w, out int h)) return false;
             if (q.Width is not null && !q.Width.Matches((ulong)w)) return false;
             if (q.Height is not null && !q.Height.Matches((ulong)h)) return false;
+        }
+
+        if (q.MediaFilters.Count > 0)
+        {
+            if (isDir) return false;
+            if (!AudioTags.Match(q.MediaFilters, fullPath, q.CaseSensitive, q.MatchDiacritics)) return false;
         }
 
         // Run-metadata filters degrade to no-ops when no lookup is wired, so a

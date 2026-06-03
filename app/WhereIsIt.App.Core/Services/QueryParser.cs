@@ -77,6 +77,10 @@ public sealed record ParsedQuery
     public SizeRange? Width { get; init; }
     /// <summary><c>height:</c> / <c>dimensions:</c> — image pixel height.</summary>
     public SizeRange? Height { get; init; }
+    /// <summary>Audio tag filters (<c>artist:</c>/<c>album:</c>/<c>title:</c>/
+    /// <c>year:</c>/<c>genre:</c>/<c>track:</c>/<c>comment:</c>), matched as
+    /// case-insensitive substrings against ID3 tags.</summary>
+    public IReadOnlyList<MediaFilter> MediaFilters { get; init; } = [];
 
     public string? ContentSearch { get; init; }
     public IReadOnlyList<SearchClause> Clauses { get; init; } = [];
@@ -96,7 +100,7 @@ public sealed record ParsedQuery
         && !RootOnly && NameLength == null && !EmptyOnly && MaxResults == null
         && ChildCount == null && ChildFileCount == null && ChildFolderCount == null
         && DateRun == null && RunCount == null && TermExpr == null && Depth == null
-        && Width == null && Height == null;
+        && Width == null && Height == null && MediaFilters.Count == 0;
 }
 
 /// <summary>Everything-compatible duplicate-grouping keys.</summary>
@@ -255,6 +259,7 @@ public static class QueryParser
         SizeRange? depth = null;
         SizeRange? widthRange = null;
         SizeRange? heightRange = null;
+        var mediaFilters = new List<MediaFilter>();
         DateRange? drRange = null;
         SizeRange? runCount = null;
         var clauses = new List<SearchClause>();
@@ -546,6 +551,9 @@ public static class QueryParser
                 continue;
             }
 
+            // ── audio tags (artist:/album:/title:/year:/genre:/track:/comment:) ──
+            if (TryMediaFilter(lower, token, mediaFilters)) continue;
+
             // ── content: family (file-contents post-filter) ──────────────
             // Everything exposes encoding-specific aliases; WhereIsIt's reader
             // auto-detects encoding, so they all map to the same content search.
@@ -607,6 +615,7 @@ public static class QueryParser
             Depth            = depth,
             Width            = widthRange,
             Height           = heightRange,
+            MediaFilters     = mediaFilters.Count > 0 ? mediaFilters.ToArray() : [],
             DateRun          = drRange,
             RunCount         = runCount,
             TermExpr         = termExpr,
@@ -710,6 +719,26 @@ public static class QueryParser
         var both = ParseIntExpression(spec);
         width = both;
         height = both;
+    }
+
+    private static readonly (string Prefix, MediaField Field)[] MediaPrefixes =
+    [
+        ("artist:", MediaField.Artist), ("album:", MediaField.Album), ("title:", MediaField.Title),
+        ("genre:", MediaField.Genre), ("track:", MediaField.Track), ("comment:", MediaField.Comment),
+        ("year:", MediaField.Year),
+    ];
+
+    private static bool TryMediaFilter(string lower, string token, List<MediaFilter> into)
+    {
+        foreach (var (prefix, field) in MediaPrefixes)
+        {
+            if (lower.StartsWith(prefix, StringComparison.Ordinal) && token.Length > prefix.Length)
+            {
+                into.Add(new MediaFilter(field, token[prefix.Length..]));
+                return true;
+            }
+        }
+        return false;
     }
 
     // ── helpers ───────────────────────────────────────────────────────────
