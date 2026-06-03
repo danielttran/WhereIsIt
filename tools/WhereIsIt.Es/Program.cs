@@ -34,7 +34,7 @@ try
 }
 catch { /* settings are optional; fall back to default roots */ }
 
-using IEngineClient inner = scope is null
+using var inner = scope is null
     ? new InProcEngineClient()
     : new InProcEngineClient(() => scope);
 using var engine = new FilteringEngineClient(inner);
