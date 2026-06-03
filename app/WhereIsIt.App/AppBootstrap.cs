@@ -56,6 +56,19 @@ public static class AppBootstrap
                 return srv;
             });
         }
+        // Optional FTP frontend — bound to 127.0.0.1 only, read-only, opt-in.
+        if (settings.EnableFtpServer)
+        {
+            services.AddSingleton(_ =>
+            {
+                var rootDir = settings.ScopeRoots.Length > 0
+                    ? settings.ScopeRoots[0]
+                    : System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile);
+                var ftp = new FtpServer(rootDir, settings.FtpServerPort);
+                try { ftp.Start(); } catch { /* port may be in use; swallow */ }
+                return ftp;
+            });
+        }
         services.AddSingleton(dispatcher ?? (IAppDispatcher)new InlineDispatcher());
         services.AddTransient<MainViewModel>();
         services.AddTransient<SearchBoxViewModel>();
@@ -67,6 +80,7 @@ public static class AppBootstrap
         // Singleton factories are lazy. Resolve the optional server eagerly or
         // merely registering it leaves the configured endpoint permanently off.
         if (settings.EnableHttpServer) provider.GetRequiredService<HttpSearchServer>();
+        if (settings.EnableFtpServer) provider.GetRequiredService<FtpServer>();
         return provider;
     }
 }

@@ -22,6 +22,8 @@ public sealed class AppSettings
     public System.Collections.Generic.Dictionary<string, long> RunDates { get; set; } = new();
     public bool EnableHttpServer { get; set; } = false;
     public int  HttpServerPort   { get; set; } = 12321;
+    public bool EnableFtpServer  { get; set; } = false;
+    public int  FtpServerPort    { get; set; } = 12322;
 
     /// <summary>Tab queries from the last session — empty if there was just one
     /// blank tab. Used by the Chrome-style "Restore previous tabs?" prompt.</summary>

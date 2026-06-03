@@ -145,7 +145,8 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | Everything | WhereIsIt | Notes |
 |---|---|---|
 | HTTP server (web UI) | ✅ | ➕ serves an HTML search page at `/` plus the JSON `/search?q=` endpoint; localhost-only by design (no LAN binding — security choice ⭐) |
-| ETP / FTP server | ⛔ | proprietary protocol; HTTP covers cross-device search |
+| FTP server | ➕ | read-only RFC 959 FTP (`FtpServer`: USER/PASV/LIST/NLST/RETR/SIZE/CWD), localhost-only + opt-in, directory-traversal sandboxed. Enable via `settings.json` (`EnableFtpServer`) |
+| ETP server | ⛔ | Everything's proprietary search-extension protocol over FTP; standard FTP + the HTTP search/web-UI cover the practical use |
 | Everything service | ➕ | `tools/WhereIsIt.EngineService` — engine-over-named-pipe host (see §6) |
 | `es.exe` CLI | 🟡 | ➕ `tools/WhereIsIt.Es` builds `es.exe` — same engine + query syntax, output/sort/export/modifier flags. Searches in-proc (one-shot) rather than over Everything's live-index IPC |
 | IPC / SDK (DLL + messages) | ⛔ | needs Everything's undocumented WM_COPYDATA/IPC binary protocol for third-party interop |
@@ -167,8 +168,7 @@ infrastructure plus one marginal convenience:
 |---|---|
 | Free column drag-reorder / resize | A fixed-column toggle set ships (incl. property columns); arbitrary drag-reorder/resize needs a `DataGrid`-style control + a build |
 | **Everything-compatible IPC SDK** | Byte-compatible reimplementation of Everything's **undocumented WM_COPYDATA/IPC protocol** so third-party tools interop (a native `es.exe` CLI ships in `tools/WhereIsIt.Es`) |
-| **ETP server** | Everything's **undocumented proprietary** transfer protocol (a localhost HTTP search server + web UI ships instead) |
-| **FTP server** | A standard FTP server is feasible but a large, security-sensitive network service; deliberately not shipped (localhost HTTP covers remote search) |
+| **ETP server** | Everything's **undocumented proprietary** search-extension protocol over FTP — needs the spec; a standard read-only **FTP server** now ships, plus the HTTP search/web UI |
 | Modern (always-visible) Win11 context menu | The classic registry verb ships (`ShellMenuRegistration`); a Win11 *primary* context-menu entry additionally needs a packaged `IExplorerCommand` **COM** handler |
 | Bracketless function OR (`ext:cs \| ext:txt`) | Works *with* brackets today; marginal tokenizer change otherwise |
 
