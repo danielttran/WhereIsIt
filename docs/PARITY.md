@@ -201,8 +201,15 @@ importantly — a **regression where `<`/`>` comparison operators (`size:>1mb`,
 parsing/filters, `< >` grouping + bracketless OR, the image/audio/document
 property readers, and the FTP/ETP/named-pipe round-trips.
 
+Also compile-verified on Linux: the **`es.exe` CLI** and the **engine service**
+(`tools/WhereIsIt.Es`, `tools/WhereIsIt.EngineService` — net10.0-windows console
+apps; building them caught and fixed two more real errors).
+
 Still requiring a Windows build to compile/smoke-test: the **WinUI app**
 (`WhereIsIt.App` — highlighting, tray, preview pane, custom columns, the
-`WM_COPYDATA` IPC window, the `IExplorerCommand` COM handler), the **native C++
-engine**, and **wire verification** of the two interop protocols against real
-Everything clients (`WM_COPYDATA` IPC, ETP result framing).
+`WM_COPYDATA` IPC window, the `IExplorerCommand` COM handler) and the **native
+C++ engine**. This is a hard boundary, not a soft one: the WinUI XAML compiler
+(`XamlCompiler.exe`) is a Windows-only PE binary and cannot run on Linux
+(verified: "Exec format error"). Also pending Windows: **wire verification** of
+the two interop protocols against real Everything clients (`WM_COPYDATA` IPC,
+ETP result framing).
