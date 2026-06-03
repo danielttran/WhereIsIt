@@ -45,7 +45,7 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | `da:` date accessed | ✅ | |
 | `dr:` date run | ➕ | backed by `RunCountService` last-run timestamps (persisted in settings) via the decorator's path-keyed lookup |
 | `rc:` / `runcount:` | ➕ | backed by `RunCountService` open counts via the decorator's path-keyed lookup |
-| date keywords (today/yesterday/tomorrow, this-/last-/past- week/month/year, month + weekday names) | 🟡 | ➕ `tomorrow`, month names, weekday names (most-recent), and rolling `pastweek`/`pastmonth`/`pastyear` added; only arbitrary `last N <unit>` (space-separated, e.g. "last 3 days") still unparsed — needs multi-token date values |
+| date keywords (today/yesterday/tomorrow, this-/last-/past- periods, month + weekday names, relative spans) | ✅ | ➕ `tomorrow`, month + weekday names, rolling `past*`, and relative spans (`3days`/`last2weeks`/`past6months`/`next1year`). Only the space-separated phrasing `dm:last 3 days` needs quoting — the collapsed `last3days` form works unquoted |
 | date ranges `a..b`, comparisons | ✅ | |
 | `attrib:` / `attributes:` (rhsad) | ✅ | |
 | `child:<path>` | ✅ | |
@@ -149,17 +149,23 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 
 ## 9. Notable remaining gaps (ranked by parity value vs. effort)
 
-1. **Arbitrary `last N <unit>` (space-separated) date forms** — e.g.
-   `dm:last 3 days`. Needs the tokenizer to keep multi-word date values
-   together inside a function; the fixed rolling `past*` keywords are parsed.
-2. **Explicit `< >` grouping** — needs a flat-clause → expression-tree rewrite
-   across both engines' match hot paths; high blind-change risk for a niche
-   power-user feature, so left for a Windows session with a build.
-3. **Preview pane** — Everything 1.5 feature; needs a content/thumbnail preview host.
-4. **Property/metadata index** — unlocks `album:`/`width:`/… and custom
-   property columns. Large; depends on Windows Property System.
-5. **Shell context-menu extension, `es.exe`, IPC SDK, ETP/FTP, background
-   service** — Windows-only, larger, and several were deliberately scoped out.
+1. **Explicit `< >` grouping** — needs a flat-clause → boolean-expression-tree
+   rewrite across both engines' match hot paths (and ideally the filter system
+   too, to match Everything's `size:>1mb | ext:cs`). High blind-change risk for
+   a niche power-user feature; left for a Windows session with a build.
+2. **Preview pane** — Everything 1.5 feature; needs a content/thumbnail preview host (WinUI, needs a build).
+3. **Property/metadata index** — unlocks `album:`/`width:`/… and custom
+   property columns. Large native engine + Windows Property System work.
+4. **`es.exe` CLI + Everything-compatible IPC SDK** — the real value is talking
+   to the live index over Everything's exact WM_COPYDATA/IPC protocol so
+   third-party tools interop; that's a binary-compatible Windows-only protocol.
+5. **Shell context-menu extension, ETP/FTP server, background (non-admin)
+   service** — Windows-only COM / proprietary-protocol / service work; large.
+
+Items 2–5 cannot be implemented *and verified* without the Windows .NET/WinUI/
+MSVC toolchain, and several (ETP/FTP, IPC SDK) target undocumented/proprietary
+Everything protocols. They are tracked here rather than landed as unbuildable,
+untested code.
 
 ## 10. Where WhereIsIt is intentionally *better*
 

@@ -197,6 +197,41 @@ public class QueryParserExtendedTests
         QueryParser.ParseDateSpec("pastyear", now)!.Min.Should().Be(new System.DateTime(2025, 6, 3));
     }
 
+    [Theory]
+    [InlineData("3days", 0, -3, 0)]
+    [InlineData("last2weeks", 0, -14, 0)]
+    [InlineData("past6months", -6, 0, 0)]
+    [InlineData("1year", 0, 0, -1)]
+    public void ParseDateSpec_RelativeSpan_IsRollingPastWindow(
+        string spec, int monthDelta, int dayDelta, int yearDelta)
+    {
+        var now = new System.DateTime(2026, 6, 3, 10, 0, 0);
+        var r = QueryParser.ParseDateSpec(spec, now);
+        r.Should().NotBeNull();
+        var expectedMin = now.AddMonths(monthDelta).AddDays(dayDelta).AddYears(yearDelta);
+        r!.Min.Should().Be(expectedMin);
+        r.Max.Should().Be(now);
+    }
+
+    [Fact]
+    public void ParseDateSpec_NextRelativeSpan_IsFutureWindow()
+    {
+        var now = new System.DateTime(2026, 6, 3, 10, 0, 0);
+        var r = QueryParser.ParseDateSpec("next2days", now);
+        r.Should().NotBeNull();
+        r!.Min.Should().Be(now);
+        r.Max.Should().Be(now.AddDays(2));
+    }
+
+    [Fact]
+    public void ParseDateSpec_FourDigitYear_StillParsesAsYearNotSpan()
+    {
+        // A bare 4-digit number must remain a year literal, not a relative span.
+        var now = new System.DateTime(2026, 6, 3);
+        var r = QueryParser.ParseDateSpec("2024", now);
+        r!.Min.Should().Be(new System.DateTime(2024, 1, 1));
+    }
+
     [Fact]
     public void ParseDateSpec_Weekday_ResolvesToMostRecentOccurrence()
     {

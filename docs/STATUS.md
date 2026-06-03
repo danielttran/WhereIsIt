@@ -102,10 +102,12 @@ Closed 2026-06-03 (run-metadata filters):
 
 - ✅ **`rc:` / `runcount:` and `dr:` filters** — `RunCountService` now also tracks (and persists, via `AppSettings.RunDates`) last-run timestamps and is thread-safe. `EngineClientFactory` passes path-keyed `Get`/`GetLastRun` lookups into `FilteringEngineClient`, which evaluates `rc:`/`dr:` in its post-filter for every inner engine. Covered by `FilteringEngineClientTests`, `QueryParserExtendedTests`, `RunCountServiceTests`.
 
+Relative date spans (`3days`/`last2weeks`/`past6months`/`next1year`) now parse too, so the entire `ParseDateSpec` keyword surface is at parity (only the space-separated phrasing needs quoting).
+
 Remaining Everything-parity gaps (full detail + ranking in `docs/PARITY.md` §9):
 
-- **`last N <unit>` relative dates** — last `ParseDateSpec` gap (month + weekday names now parsed).
-- **Explicit `< >` grouping** — needs a flat-clause → expression-tree rewrite across both engines; deferred to a Windows build session (high blind-change risk).
+- **Explicit `< >` grouping** — needs a flat-clause → boolean-AST rewrite across both engines; deferred to a Windows build session (high blind-change risk).
+- **Preview pane, property/metadata index, `es.exe`+IPC SDK, shell extension, ETP/FTP server, background service** — Windows-only / large / proprietary-protocol work that can't be built or verified in a Linux session.
 - **Property/metadata index** — unlocks `album:`/`width:`/… + custom columns.
 - **ETP / FTP server** — proprietary Everything protocol. Skipped; HTTP server covers the cross-device search use case.
 - **Everything IPC/SDK, `es.exe` CLI, shell context-menu extension, background service** — Windows-only integration surface; deliberately deferred.

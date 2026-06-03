@@ -815,6 +815,11 @@ public static class QueryParser
         var keyword = TryKeyword(spec, now);
         if (keyword is not null) return keyword;
 
+        // Relative span: "3days", "last2weeks", "past6months", "next1year", … —
+        // a rolling window relative to now (past unless next/coming).
+        var relative = TryRelativeSpan(spec, now);
+        if (relative is not null) return relative;
+
         // Range with ".." separator
         int dotdot = spec.IndexOf("..", StringComparison.Ordinal);
         if (dotdot > 0)
@@ -852,6 +857,37 @@ public static class QueryParser
         // Bare literal — match the whole period (year / month / day)
         var (low, high) = ParsePointAsRange(spec);
         return (low is null || high is null) ? null : new DateRange(low.Value, high.Value);
+    }
+
+    // "[last|past|prev|previous|next|coming] N unit[s]" collapsed to one token
+    // (the tokenizer splits on spaces, so multi-word forms must be quoted).
+    private static readonly System.Text.RegularExpressions.Regex RelativeSpanRx =
+        new(@"^(last|past|prev|previous|next|coming)?\s*(\d{1,6})\s*(minute|min|hour|hr|day|week|wk|month|mon|year|yr)s?$",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    private static DateRange? TryRelativeSpan(string spec, DateTime now)
+    {
+        var m = RelativeSpanRx.Match(spec);
+        if (!m.Success) return null;
+        if (!int.TryParse(m.Groups[2].Value, out var n) || n <= 0) return null;
+
+        bool future = m.Groups[1].Value is "next" or "coming";
+        var unit = m.Groups[3].Value;
+
+        DateTime Shift(DateTime t, int sign) => unit switch
+        {
+            "minute" or "min"  => t.AddMinutes(sign * n),
+            "hour" or "hr"     => t.AddHours(sign * n),
+            "day"              => t.AddDays(sign * n),
+            "week" or "wk"     => t.AddDays(sign * 7 * n),
+            "month" or "mon"   => t.AddMonths(sign * n),
+            "year" or "yr"     => t.AddYears(sign * n),
+            _                  => t,
+        };
+
+        return future
+            ? new DateRange(now, Shift(now, +1))
+            : new DateRange(Shift(now, -1), now);
     }
 
     private static DateRange? TryKeyword(string spec, DateTime now)
