@@ -12,10 +12,18 @@ namespace WhereIsIt.App.Tests;
 public class BooleanQueryTests
 {
     [Fact]
-    public void TryParse_NoGrouping_ReturnsNull()
+    public void TryParse_NoOperators_ReturnsNull()
     {
+        // Pure implicit-AND with no group/OR — nothing for the tree to add.
         BooleanQuery.TryParse("report log").Should().BeNull();
-        BooleanQuery.TryParse("a|b").Should().BeNull();
+    }
+
+    [Fact]
+    public void TryParse_TopLevelOr_Parses()
+    {
+        // A top-level OR is now modelled (the QueryParser caller only engages it
+        // for a standalone '|' token, so bare "a|b" queries stay the flat form).
+        BooleanQuery.TryParse("a|b").Should().BeOfType<BoolOr>();
     }
 
     [Fact]

@@ -292,6 +292,26 @@ public class FilteringEngineClientTests
     }
 
     [Fact]
+    public async Task BracketlessFunctionOr_MatchesEitherFunction()
+    {
+        var inner = new FakeInner();
+        inner.Rows[1] = Row("a.cs",  @"C:\");
+        inner.Rows[2] = Row("b.txt", @"C:\");
+        inner.Rows[3] = Row("c.py",  @"C:\");
+
+        using var client = new FilteringEngineClient(inner);
+        IReadOnlyList<uint>? rec = null;
+        using var sub = client.ObserveResults.Subscribe(ids => rec = ids);
+
+        // Bracketless function-level OR via a standalone '|'.
+        await client.SearchAsync("ext:cs | ext:txt", CancellationToken.None);
+        inner.Emit(1, 2, 3);
+        await Task.Delay(50);
+
+        rec!.Should().Equal((uint)1, (uint)2);
+    }
+
+    [Fact]
     public async Task GroupedFunctionAndTerm_AppliesBoth()
     {
         var inner = new FakeInner();

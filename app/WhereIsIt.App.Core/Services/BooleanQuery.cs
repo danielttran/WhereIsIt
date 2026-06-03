@@ -45,8 +45,10 @@ public static class BooleanQuery
     {
         if (string.IsNullOrEmpty(rawQuery)) return null;
         var atoms = Lex(rawQuery);
-        // No grouping bracket ⇒ nothing for this parser to add over the flat model.
-        if (!atoms.Any(a => a.Kind is Tok.LParen or Tok.RParen)) return null;
+        // Engage for an explicit group (< >) or a top-level OR operator (a
+        // standalone '|' — e.g. "ext:cs | ext:txt"). A query with neither has
+        // nothing for this parser to add over the flat clause model.
+        if (!atoms.Any(a => a.Kind is Tok.LParen or Tok.RParen or Tok.Or)) return null;
 
         int pos = 0;
         var expr = ParseOr(atoms, ref pos);

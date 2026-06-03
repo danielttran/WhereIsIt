@@ -616,17 +616,17 @@ public static class QueryParser
                     termStr.Split('|', StringSplitOptions.RemoveEmptyEntries)));
         }
 
-        // Grouped boolean queries (< >) build an expression tree that supersedes
-        // the flat clause list for term matching. Only engaged when a bracket is
-        // present, so non-grouped queries keep the original fast path untouched.
+        // Grouped / boolean queries build an expression tree that supersedes the
+        // flat clause list AND the global per-row filters (both terms and
+        // functions become tree leaves). Engaged for an explicit group (< >) or a
+        // top-level OR — a standalone "|" token, e.g. "ext:cs | ext:txt". A bare
+        // "a|b" (no spaces) stays the flat alternative form, so non-grouped
+        // queries keep the original fast path untouched.
         BoolExpr? termExpr = null;
-        if (query.IndexOf('<') >= 0 || query.IndexOf('>') >= 0)
-        {
+        if (query.IndexOf('<') >= 0 || query.IndexOf('>') >= 0 || tokens.Contains("|"))
             termExpr = BooleanQuery.TryParse(query);
-            if (termExpr is not null) clauses.Clear();
-        }
 
-        return new ParsedQuery
+        var result = new ParsedQuery
         {
             CaseSensitive = caseSensitive,
             RegexMode = regexMode,
@@ -670,6 +670,26 @@ public static class QueryParser
             TermExpr         = termExpr,
             Clauses = clauses,
         };
+
+        // When the boolean tree is active it owns all term + per-row function
+        // matching, so drop the flat clauses and the global per-row filters (the
+        // tree's leaves re-parse each function token). Keep the global modifiers,
+        // and the cross-row dupe:/count: which the tree can't express per row.
+        if (termExpr is not null)
+            result = result with
+            {
+                Clauses = [],
+                ExtWhitelist = null, Size = null, Modified = null, Created = null, Accessed = null,
+                Attribute = null, ChildOfPath = null, ParentIsPath = null, FileOnly = false, FolderOnly = false,
+                ContentSearch = null, StartsWith = null, EndsWith = null, WholeFilename = null,
+                RootOnly = false, NameLength = null, EmptyOnly = false,
+                ChildCount = null, ChildFileCount = null, ChildFolderCount = null, Depth = null,
+                Width = null, Height = null, Orientation = null, MediaFilters = [],
+                Duration = null, SampleRate = null, Channels = null, Bitrate = null,
+                DateRun = null, RunCount = null,
+            };
+
+        return result;
     }
 
     /// <summary>

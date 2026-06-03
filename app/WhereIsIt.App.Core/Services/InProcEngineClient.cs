@@ -155,6 +155,9 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         // Pre-compile clause regexes once — without this, every file with a
         // wildcard or regex query pays a Regex compile+JIT per row.
         var clauseRegexes = BuildClauseRegexes(parsed);
+        // Pre-parse each distinct function leaf of a grouped/boolean query so the
+        // per-row evaluation reuses Matches() against the leaf's single-filter query.
+        var funcLeaves = BuildFuncLeaves(parsed);
 
         var results = new List<FileSystemInfo>(256);
         var opts = new EnumerationOptions
@@ -181,7 +184,7 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
                 foreach (var info in rootInfo.EnumerateFileSystemInfos("*", opts))
                 {
                     if (cancellationToken.IsCancellationRequested) break;
-                    if (!Matches(info, parsed, root, childPrefixLower, parentLower, clauseRegexes)) continue;
+                    if (!Matches(info, parsed, root, childPrefixLower, parentLower, clauseRegexes, funcLeaves)) continue;
                     results.Add(info);
                 }
             }
@@ -191,7 +194,28 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         return results.ToArray();
     }
 
-    private static bool Matches(FileSystemInfo info, ParsedQuery q, string root, string? childPrefixLower, string? parentLower, Regex?[]? clauseRegexes)
+    private sealed record FuncLeaf(ParsedQuery Query, string? ChildPrefixLower, string? ParentLower);
+
+    private static Dictionary<string, FuncLeaf>? BuildFuncLeaves(ParsedQuery parsed)
+    {
+        if (parsed.TermExpr is null) return null;
+        var tokens = new List<string>();
+        BooleanQuery.CollectFunctionTokens(parsed.TermExpr, tokens);
+        if (tokens.Count == 0) return null;
+        var map = new Dictionary<string, FuncLeaf>(StringComparer.Ordinal);
+        foreach (var tok in tokens)
+        {
+            if (map.ContainsKey(tok)) continue;
+            var lq = QueryParser.Parse(tok);
+            string? cp = lq.ChildOfPath is null ? null
+                : TrimTrailingSeparators(lq.ChildOfPath).ToLowerInvariant() + Path.DirectorySeparatorChar;
+            string? pl = lq.ParentIsPath is null ? null : TrimTrailingSeparators(lq.ParentIsPath).ToLowerInvariant();
+            map[tok] = new FuncLeaf(lq, cp, pl);
+        }
+        return map;
+    }
+
+    private static bool Matches(FileSystemInfo info, ParsedQuery q, string root, string? childPrefixLower, string? parentLower, Regex?[]? clauseRegexes, Dictionary<string, FuncLeaf>? funcLeaves = null)
     {
         FileAttributes attr;
         try { attr = info.Attributes; }
@@ -313,16 +337,20 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         // short-circuited above without paying for GetRelativePath/Replace.
         var relative = Path.GetRelativePath(root, fullPath).Replace('\\', '/');
 
-        // Grouped boolean query (< >): evaluate term leaves here as a candidate
-        // generator; function leaves are treated as a superset (true) and the
-        // always-on filtering decorator narrows them with full per-row logic.
+        // Grouped / boolean query: evaluate the expression tree. Term leaves
+        // match here; function leaves re-use Matches() against the pre-parsed
+        // single-filter query for that token.
         if (q.TermExpr is not null)
-            return BooleanQuery.EvalTerms(q.TermExpr, alts =>
+        {
+            var capturedInfo = info;
+            return BooleanQuery.Eval(q.TermExpr, leaf => leaf switch
             {
-                foreach (var alt in alts)
-                    if (AlternativeMatches(alt, null, q, name, relative, cmp)) return true;
-                return false;
+                BoolTerm t => MatchAnyAlt(t.Alternatives, q, name, relative, cmp),
+                BoolFunc f => funcLeaves is not null && funcLeaves.TryGetValue(f.Token, out var fl)
+                              && Matches(capturedInfo, fl.Query, root, fl.ChildPrefixLower, fl.ParentLower, null),
+                _ => true,
             });
+        }
 
         int rxIdx = 0;
         foreach (var clause in q.Clauses)
@@ -422,6 +450,13 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
             return MatchesWord(name, alt, cmp) || (q.MatchPath && MatchesWord(relative, alt, cmp));
 
         return name.Contains(alt, cmp) || (q.MatchPath && relative.Contains(alt, cmp));
+    }
+
+    private static bool MatchAnyAlt(IReadOnlyList<string> alts, ParsedQuery q, string name, string relative, StringComparison cmp)
+    {
+        foreach (var alt in alts)
+            if (AlternativeMatches(alt, null, q, name, relative, cmp)) return true;
+        return false;
     }
 
     private static bool MatchesWord(string haystack, string needle, StringComparison cmp)

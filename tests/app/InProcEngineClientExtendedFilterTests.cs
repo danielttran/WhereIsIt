@@ -207,6 +207,20 @@ public class InProcEngineClientExtendedFilterTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Search_BracketlessFunctionOr_MatchesEither()
+    {
+        await File.WriteAllTextAsync(Path.Combine(_root.FullName, "a.cs"),  "");
+        await File.WriteAllTextAsync(Path.Combine(_root.FullName, "b.txt"), "");
+        await File.WriteAllTextAsync(Path.Combine(_root.FullName, "c.py"),  "");
+
+        // Standalone '|' → boolean OR of two functions, evaluated via in-proc
+        // function-leaf matching (globals are cleared in tree mode).
+        var names = await GetNamesAsync("ext:cs | ext:txt");
+
+        names.Should().BeEquivalentTo("a.cs", "b.txt");
+    }
+
+    [Fact]
     public async Task Search_GroupWithGlobalFunction_AppliesBoth()
     {
         await File.WriteAllTextAsync(Path.Combine(_root.FullName, "alpha.cs"),  "");
