@@ -148,6 +148,48 @@ public class QueryParserExtendedTests
         QueryParser.ParseDateSpec("JULY", now).Should().NotBeNull();
     }
 
+    // ── ExtractHighlightTerms (result-list match highlighting) ────────────
+
+    [Fact]
+    public void ExtractHighlightTerms_ReturnsPositiveLiteralTerms()
+    {
+        QueryParser.ExtractHighlightTerms("report 2026")
+            .Should().BeEquivalentTo("report", "2026");
+    }
+
+    [Fact]
+    public void ExtractHighlightTerms_IncludesOrAlternatives()
+    {
+        QueryParser.ExtractHighlightTerms("report|log")
+            .Should().BeEquivalentTo("report", "log");
+    }
+
+    [Fact]
+    public void ExtractHighlightTerms_ExcludesNegatedClauses()
+    {
+        QueryParser.ExtractHighlightTerms("report !backup")
+            .Should().Equal("report");
+    }
+
+    [Fact]
+    public void ExtractHighlightTerms_ExcludesWildcardPatterns()
+    {
+        QueryParser.ExtractHighlightTerms("rep* ext:cs")
+            .Should().BeEmpty();
+    }
+
+    [Fact]
+    public void ExtractHighlightTerms_RegexQuery_ReturnsEmpty()
+    {
+        QueryParser.ExtractHighlightTerms("regex:^a.*z$").Should().BeEmpty();
+    }
+
+    [Fact]
+    public void ExtractHighlightTerms_IgnoresModifierOnlyQuery()
+    {
+        QueryParser.ExtractHighlightTerms("ext:cs size:>1mb").Should().BeEmpty();
+    }
+
     // ── RemoveDiacritics helper ───────────────────────────────────────────
 
     [Theory]

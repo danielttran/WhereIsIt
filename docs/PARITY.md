@@ -106,8 +106,8 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | quick-filter bar (Everything/Audio/Video/Doc/Pic/Exe/Zip/Folder) | ✅ | plus Code ⭐ |
 | thumbnails view | ✅ | Off/Small/Medium/Large/XL |
 | preview pane | ⛔ | 1.5 feature; not started |
-| match highlighting in results | ⛔ | not started |
-| system tray / minimize to tray | ⛔ | not started |
+| match highlighting in results | ➕ | literal query terms highlighted in the Name column via WinUI `TextHighlighter` ranges |
+| system tray / minimize to tray | ➕ | dependency-free `Shell_NotifyIcon` tray host; minimize hides to tray, left-click/menu restores |
 | global hotkey | ✅ | configurable, default Ctrl+Alt+W |
 | run on startup | ✅ | |
 | command-line args (`-s`, `-p`) | ✅ | |
@@ -148,20 +148,17 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 
 ## 9. Notable remaining gaps (ranked by parity value vs. effort)
 
-1. **Match highlighting** in the results list — pure UI, high polish value, no
-   engine work. *Recommended next.*
-2. **System tray + minimize to tray** — common Everything workflow; WinUI 3
-   tray needs a small Win32 interop shim.
-3. **`dr:` / `runcount:` query filters** — wire `RunCountService` data onto the
+1. **`dr:` / `runcount:` query filters** — wire `RunCountService` data onto the
    row model (or a side-table) so the post-filter can see it. Column already
    exists; only the filter + sort are missing.
-4. **Richer date keywords** — weekday names and `last N <unit>` forms in
+2. **Richer date keywords** — weekday names and `last N <unit>` forms in
    `ParseDateSpec` (month names + `tomorrow` already added this audit).
-5. **Explicit `< >` grouping** — parser change to a small expression tree;
+3. **Explicit `< >` grouping** — parser change to a small expression tree;
    moderate effort, niche usage.
-6. **Property/metadata index** — unlocks `album:`/`width:`/… and custom
+4. **Preview pane** — Everything 1.5 feature; needs a content/thumbnail preview host.
+5. **Property/metadata index** — unlocks `album:`/`width:`/… and custom
    property columns. Large; depends on Windows Property System.
-7. **Shell context-menu extension, `es.exe`, IPC SDK, ETP/FTP, background
+6. **Shell context-menu extension, `es.exe`, IPC SDK, ETP/FTP, background
    service** — Windows-only, larger, and several were deliberately scoped out.
 
 ## 10. Where WhereIsIt is intentionally *better*
@@ -176,8 +173,13 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 ---
 
 *Verification note:* this audit pass was authored on a Linux session without
-the .NET 10 / WinUI / MSVC toolchain, so the newly-added functions
-(`wildcards:`, `nodiacritics:`, content aliases, `childcount:` family) ship with
-xUnit coverage but still need a Windows build + test run to confirm green. See
-`tests/app/QueryParserExtendedTests.cs` and
-`tests/app/InProcEngineClientExtendedFilterTests.cs`.
+the .NET 10 / WinUI / MSVC toolchain. The query-layer additions (`wildcards:`,
+`nodiacritics:`, content aliases, `childcount:` family, month-name dates,
+`ExtractHighlightTerms`) ship with xUnit coverage in
+`tests/app/QueryParserExtendedTests.cs`,
+`tests/app/InProcEngineClientExtendedFilterTests.cs`, and
+`tests/app/ViewModels/ResultsListViewModelTests.cs`. The two WinUI pieces —
+match highlighting (`SearchHighlighter.cs` attached property + MainWindow.xaml)
+and the system-tray host (`TrayIconHost.cs` + MainWindow minimize-to-tray) —
+are P/Invoke / XAML and **must be built and smoke-tested on Windows**; they
+could not be compiled in this Linux session.

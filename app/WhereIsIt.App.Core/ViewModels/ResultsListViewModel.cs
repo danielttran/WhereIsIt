@@ -58,7 +58,7 @@ public partial class ResultsListViewModel : ObservableObject
         this.engineClient = engineClient;
     }
 
-    public void BindResults(IReadOnlyList<uint> ids)
+    public void BindResults(IReadOnlyList<uint> ids, string highlightTerms = "")
     {
         var display = Math.Min(ids.Count, DisplayCap);
         var list = new List<ResultRowViewModel>(display);
@@ -80,6 +80,9 @@ public partial class ResultsListViewModel : ObservableObject
                     rowCache.Remove(evict);
                 }
             }
+            // Cached rows persist across searches, so refresh the highlight
+            // terms every bind even when the row instance is reused.
+            row.HighlightTerms = highlightTerms;
             if (i < EagerLoadCount)
                 _ = row.EnsureLoadedAsync(CancellationToken.None);
             list.Add(row);

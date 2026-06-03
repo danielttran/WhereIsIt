@@ -26,6 +26,12 @@ public partial class ResultRowViewModel : ObservableObject
     [ObservableProperty] private string attributesText = string.Empty;
     [ObservableProperty] private int runCount;
 
+    // Newline-separated literal terms the result list should highlight in the
+    // Name column. Shared across all rows of the current search; set by
+    // ResultsListViewModel.BindResults so the highlighter attached property in
+    // the App layer can mark up matched spans without this assembly touching WinUI.
+    [ObservableProperty] private string highlightTerms = string.Empty;
+
     // Loosely typed as object so this assembly doesn't need to reference
     // WinUI. At runtime it's a Microsoft.UI.Xaml.Media.ImageSource set by
     // the App's ThumbnailService; the Image's Source property accepts it

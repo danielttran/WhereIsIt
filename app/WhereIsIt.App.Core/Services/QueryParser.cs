@@ -572,6 +572,31 @@ public static class QueryParser
         return ulong.TryParse(rest, out var v) ? new SizeRange(op, v) : null;
     }
 
+    /// <summary>
+    /// Extracts the plain literal terms a result-list highlighter should mark up
+    /// in matched names: the positive (non-negated) clause alternatives, minus
+    /// wildcard/regex patterns that wouldn't map to a simple substring span.
+    /// Returns an empty list for regex queries (no literal span to highlight).
+    /// </summary>
+    public static IReadOnlyList<string> ExtractHighlightTerms(string query)
+    {
+        var parsed = Parse(query);
+        if (parsed.RegexMode || parsed.Clauses.Count == 0) return [];
+
+        var terms = new List<string>();
+        foreach (var clause in parsed.Clauses)
+        {
+            if (clause.Negated) continue;
+            foreach (var alt in clause.Alternatives)
+            {
+                if (string.IsNullOrEmpty(alt)) continue;
+                if (alt.Contains('*') || alt.Contains('?')) continue; // wildcard, not a literal span
+                terms.Add(alt);
+            }
+        }
+        return terms;
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────
 
     /// <summary>

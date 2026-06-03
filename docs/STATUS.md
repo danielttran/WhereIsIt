@@ -93,10 +93,13 @@ Closed 2026-06-03 (feature-parity audit — see `docs/PARITY.md`):
 - ✅ Full Everything ⇄ WhereIsIt parity scorecard captured in `docs/PARITY.md`.
 - ✅ Query funcs: `wildcards:`/`nowildcards:` (literal `*`/`?`), `diacritics:`/`nodiacritics:` (accent folding in the substring + whole-word paths; the native engine receives the `diacritics:false` hint so its candidate set stays a superset), the encoding-specific content aliases (`ansicontent:`/`utf8content:`/`utf16content:`/`utf16becontent:` → `content:`), and the `childcount:`/`childfilecount:`/`childfoldercount:` folder filters. Parsed in `QueryParser`, post-filtered in both `FilteringEngineClient` and `InProcEngineClient`. Covered by `QueryParserExtendedTests` + `InProcEngineClientExtendedFilterTests` (needs a Windows build to run green).
 
+Closed 2026-06-03 (UI parity follow-up):
+
+- ✅ **Match highlighting** — literal query terms (from `QueryParser.ExtractHighlightTerms`) are highlighted in the Name column via a `SearchHighlighter` attached property that drives WinUI `TextHighlighter` ranges. Terms flow MainViewModel → `ResultsListViewModel.BindResults` → row VM → XAML. Needs a Windows build to smoke-test.
+- ✅ **System tray + minimize to tray** — dependency-free `TrayIconHost` (`Shell_NotifyIcon` on a message-only window); minimizing hides to tray, tray left-click / "Open WhereIsIt" restores, "Exit" quits. Needs a Windows build to smoke-test.
+
 Remaining Everything-parity gaps (full detail + ranking in `docs/PARITY.md` §9):
 
-- **Match highlighting** in results — pure UI, recommended next.
-- **System tray / minimize to tray** — needs a small Win32 interop shim.
 - **`dr:` / `runcount:` filters** — wire `RunCountService` onto the row model.
 - **Richer date keywords**, **explicit `< >` grouping** — `QueryParser` work.
 - **Property/metadata index** — unlocks `album:`/`width:`/… + custom columns.

@@ -19,6 +19,7 @@ public sealed partial class MainWindow : Window
     private readonly WhereIsIt.App.Services.RunCountService?    runCountService;
     private readonly ThumbnailService?                          thumbnailService;
     private GlobalHotkeyHost? hotkeyHost;
+    private TrayIconHost? trayIcon;
 
     public MainViewModel ViewModel { get; }
 
@@ -39,6 +40,8 @@ public sealed partial class MainWindow : Window
         TrySetMicaBackdrop();
         TrySetWindowIcon();
         TryRegisterGlobalHotkey();
+        TrySetupTrayIcon();
+        AppWindow.Changed += OnAppWindowChanged;
         Closed += OnClosedReleaseHotkey;
         Closed += OnClosedPersistTabs;
 
@@ -85,6 +88,9 @@ public sealed partial class MainWindow : Window
     private void BringToFront()
     {
         AppWindow.Show();
+        // Restore the presenter too, so a window that was minimized-to-tray
+        // comes back to a normal (not minimized) state.
+        if (AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter p) p.Restore();
         SetForegroundWindow(WinRT.Interop.WindowNative.GetWindowHandle(this));
         SearchTextBox.Focus(FocusState.Programmatic);
         SearchTextBox.SelectAll();
@@ -93,8 +99,37 @@ public sealed partial class MainWindow : Window
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr hWnd);
 
+    // ── System tray / minimize-to-tray ──────────────────────────────────
+
+    private void TrySetupTrayIcon()
+    {
+        try
+        {
+            var iconPath = System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "WhereIsIt.ico");
+            trayIcon = new TrayIconHost("WhereIsIt", iconPath, BringToFront, Close);
+        }
+        catch { /* tray icon is optional — never block startup on it */ }
+    }
+
+    private void OnAppWindowChanged(Microsoft.UI.Windowing.AppWindow sender,
+                                    Microsoft.UI.Windowing.AppWindowChangedEventArgs args)
+    {
+        // Minimize-to-tray: only when the tray icon is live (otherwise the user
+        // would have no way to bring the window back).
+        if (trayIcon is null) return;
+        if (sender.Presenter is Microsoft.UI.Windowing.OverlappedPresenter
+            { State: Microsoft.UI.Windowing.OverlappedPresenterState.Minimized })
+        {
+            sender.Hide();
+        }
+    }
+
     private void OnClosedReleaseHotkey(object sender, WindowEventArgs args)
-        => hotkeyHost?.Dispose();
+    {
+        AppWindow.Changed -= OnAppWindowChanged;
+        hotkeyHost?.Dispose();
+        trayIcon?.Dispose();
+    }
 
     private void OnClosedPersistTabs(object sender, WindowEventArgs args)
     {

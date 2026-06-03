@@ -336,7 +336,9 @@
                                    Stretch="Uniform"
                                    Margin="0,0,8,0"
                                    Visibility="{x:Bind app:ColumnSettings.Current.ThumbnailColumnVisibility, Mode=OneWay}"/>
-                            <TextBlock Grid.Column="1" Text="{x:Bind Name, Mode=OneWay}" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock Grid.Column="1" TextTrimming="CharacterEllipsis"
+                                       app:SearchHighlighter.Text="{x:Bind Name, Mode=OneWay}"
+                                       app:SearchHighlighter.Terms="{x:Bind HighlightTerms, Mode=OneWay}"/>
                             <TextBlock Grid.Column="2" Text="{x:Bind ParentPath, Mode=OneWay}"
                                        Opacity="0.7" TextTrimming="CharacterEllipsis"/>
                             <TextBlock Grid.Column="3" Text="{x:Bind SizeText, Mode=OneWay}"
