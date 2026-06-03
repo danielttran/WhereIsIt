@@ -64,6 +64,50 @@ public class AudioTagsTests
         finally { File.Delete(path); }
     }
 
+    private static byte[] Flac(params string[] comments)
+    {
+        using var ms = new MemoryStream();
+        ms.Write(Encoding.ASCII.GetBytes("fLaC"));
+        using var body = new MemoryStream();
+        WriteLe32(body, 0);                // vendor length
+        WriteLe32(body, comments.Length);  // comment count
+        foreach (var c in comments)
+        {
+            var cb = Encoding.UTF8.GetBytes(c);
+            WriteLe32(body, cb.Length);
+            body.Write(cb);
+        }
+        var arr = body.ToArray();
+        ms.WriteByte(0x84);                          // last block + type 4 (VORBIS_COMMENT)
+        ms.WriteByte((byte)((arr.Length >> 16) & 0xFF));
+        ms.WriteByte((byte)((arr.Length >> 8) & 0xFF));
+        ms.WriteByte((byte)(arr.Length & 0xFF));
+        ms.Write(arr);
+        return ms.ToArray();
+    }
+
+    private static void WriteLe32(Stream s, int v)
+    {
+        s.WriteByte((byte)(v & 0xFF));
+        s.WriteByte((byte)((v >> 8) & 0xFF));
+        s.WriteByte((byte)((v >> 16) & 0xFF));
+        s.WriteByte((byte)((v >> 24) & 0xFF));
+    }
+
+    [Fact]
+    public void TryRead_Flac_ReadsVorbisComments()
+    {
+        var path = WriteTemp(Flac("ARTIST=Daft Punk", "ALBUM=Discovery", "TITLE=One More Time"));
+        try
+        {
+            AudioTags.TryRead(path, out var tags).Should().BeTrue();
+            tags.Artist.Should().Be("Daft Punk");
+            tags.Album.Should().Be("Discovery");
+            tags.Title.Should().Be("One More Time");
+        }
+        finally { File.Delete(path); }
+    }
+
     [Fact]
     public void Match_NonAudioFile_ReturnsFalse()
     {

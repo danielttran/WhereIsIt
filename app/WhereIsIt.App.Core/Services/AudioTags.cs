@@ -69,12 +69,90 @@ public sealed class AudioTags
         try
         {
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            // FLAC carries Vorbis comments, not ID3.
+            var magic = new byte[4];
+            if (fs.Read(magic, 0, 4) == 4 && magic[0] == (byte)'f' && magic[1] == (byte)'L'
+                && magic[2] == (byte)'a' && magic[3] == (byte)'C')
+                return tags.ReadFlac(fs);
+
             bool any = tags.ReadId3v2(fs);
             if (!tags.Complete) any |= tags.ReadId3v1(fs);
             return any;
         }
         catch { return false; }
     }
+
+    // ── FLAC (Vorbis comment metadata block) ─────────────────────────────
+
+    private bool ReadFlac(FileStream fs)
+    {
+        // Positioned just past the 4-byte "fLaC" marker.
+        bool any = false;
+        for (int guard = 0; guard < 128; guard++)
+        {
+            var bh = new byte[4];
+            if (fs.Read(bh, 0, 4) != 4) break;
+            bool last = (bh[0] & 0x80) != 0;
+            int type = bh[0] & 0x7F;
+            int len = (bh[1] << 16) | (bh[2] << 8) | bh[3];
+            if (len < 0 || len > 8 * 1024 * 1024) break;
+
+            if (type == 4) // VORBIS_COMMENT
+            {
+                var block = new byte[len];
+                int read = 0;
+                while (read < len)
+                {
+                    int n = fs.Read(block, read, len - read);
+                    if (n <= 0) break;
+                    read += n;
+                }
+                any |= ParseVorbisComment(block, read);
+                break; // comments found; no need to scan further
+            }
+
+            if (last) break;
+            fs.Seek(len, SeekOrigin.Current); // skip non-comment block
+        }
+        return any;
+    }
+
+    private bool ParseVorbisComment(byte[] b, int len)
+    {
+        int p = 0;
+        if (p + 4 > len) return false;
+        int vendorLen = Le32(b, p); p += 4;
+        p += vendorLen;
+        if (p + 4 > len) return false;
+        int count = Le32(b, p); p += 4;
+        bool any = false;
+        for (int i = 0; i < count && p + 4 <= len; i++)
+        {
+            int clen = Le32(b, p); p += 4;
+            if (clen < 0 || p + clen > len) break;
+            var comment = Encoding.UTF8.GetString(b, p, clen);
+            p += clen;
+            int eq = comment.IndexOf('=');
+            if (eq <= 0) continue;
+            var field = MapVorbis(comment[..eq]);
+            if (field is not null) { Assign(field.Value, comment[(eq + 1)..]); any = true; }
+        }
+        return any;
+    }
+
+    private static MediaField? MapVorbis(string key) => key.ToUpperInvariant() switch
+    {
+        "TITLE" => MediaField.Title,
+        "ARTIST" or "ALBUMARTIST" => MediaField.Artist,
+        "ALBUM" => MediaField.Album,
+        "DATE" or "YEAR" => MediaField.Year,
+        "GENRE" => MediaField.Genre,
+        "TRACKNUMBER" or "TRACK" => MediaField.Track,
+        "COMMENT" or "DESCRIPTION" => MediaField.Comment,
+        _ => null,
+    };
+
+    private static int Le32(byte[] b, int i) => b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | (b[i + 3] << 24);
 
     // ── ID3v2 (header at start of file) ──────────────────────────────────
 
