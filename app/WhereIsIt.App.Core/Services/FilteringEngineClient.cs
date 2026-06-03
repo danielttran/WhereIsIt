@@ -109,6 +109,9 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             || parsed.ChildOfPath is not null
             || parsed.ContentSearch is not null
             || parsed.EmptyOnly
+            || parsed.ChildCount is not null
+            || parsed.ChildFileCount is not null
+            || parsed.ChildFolderCount is not null
             || parsed.MatchPath;
 
         if (parsed.WholeFilename is { Length: > 0 })
@@ -136,7 +139,7 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
         if (parsed.Clauses.Count > 0)
         {
             bool anyNeedsRegex = parsed.RegexMode;
-            if (!anyNeedsRegex)
+            if (!anyNeedsRegex && parsed.Wildcards)
             {
                 foreach (var clause in parsed.Clauses)
                 {
@@ -164,7 +167,7 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
                         {
                             if (parsed.RegexMode)
                                 rx = new Regex(alt, opts, RegexTimeout);
-                            else if (alt.Contains('*') || alt.Contains('?'))
+                            else if (parsed.Wildcards && (alt.Contains('*') || alt.Contains('?')))
                                 rx = new Regex("^" + Regex.Escape(alt).Replace(@"\*", ".*").Replace(@"\?", ".") + "$", opts, RegexTimeout);
                         }
                         // A failed compile here means a regex/wildcard WAS
@@ -274,13 +277,23 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
         if (q.StartsWith is not null || q.EndsWith is not null
             || q.WholeFilename is not null) return true;
         if (q.RootOnly || q.EmptyOnly || q.NameLength is not null) return true;
+        if (q.ChildCount is not null || q.ChildFileCount is not null
+            || q.ChildFolderCount is not null) return true;
         if (q.MaxResults is not null) return true;
+        // nodiacritics: changes how every clause matches, so the inner engine's
+        // default (diacritic-sensitive) result set has to be re-filtered.
+        if (!q.MatchDiacritics && q.Clauses.Count > 0) return true;
         // Any negated clause or |-alternatives need post-filtering because the
         // native engine treats those tokens as literal substrings.
         foreach (var c in q.Clauses)
         {
             if (c.Negated) return true;
             if (c.Alternatives.Count > 1) return true;
+            // nowildcards: must enforce a literal interpretation of * / ? that
+            // the inner engine would otherwise expand as wildcards.
+            if (!q.Wildcards)
+                foreach (var alt in c.Alternatives)
+                    if (alt.Contains('*') || alt.Contains('?')) return true;
         }
         return false;
     }
@@ -297,12 +310,14 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
         // Name-only predicates (startwith:/endwith:/wfn:/len:) — cheap, no
         // path build or stat, so test them before the heavier filters.
         var nameCmp = q.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+        // Folded form of the name for nodiacritics: matching, computed once.
+        string matchName = q.MatchDiacritics ? row.Name : QueryParser.RemoveDiacritics(row.Name);
         if (q.StartsWith is not null)
             foreach (var p in q.StartsWith)
-                if (!row.Name.StartsWith(p, nameCmp)) return false;
+                if (!matchName.StartsWith(q.MatchDiacritics ? p : QueryParser.RemoveDiacritics(p), nameCmp)) return false;
         if (q.EndsWith is not null)
             foreach (var s in q.EndsWith)
-                if (!row.Name.EndsWith(s, nameCmp)) return false;
+                if (!matchName.EndsWith(q.MatchDiacritics ? s : QueryParser.RemoveDiacritics(s), nameCmp)) return false;
         if (compiled.WholeFilenameRegexes is not null)
             foreach (var rx in compiled.WholeFilenameRegexes)
                 if (!rx.IsMatch(row.Name)) return false;
@@ -399,8 +414,17 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             else if (row.SizeBytes != 0) return false;
         }
 
+        if (q.ChildCount is not null || q.ChildFileCount is not null || q.ChildFolderCount is not null)
+        {
+            if (!isDir) return false;
+            if (!ChildCountsMatch(q, fullPath)) return false;
+        }
+
         if (q.Clauses.Count == 0) return true;
         var cmp = q.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+        // Folded path for nodiacritics: substring matching, computed once.
+        string matchFull = (q.MatchDiacritics || !q.MatchPath || fullPath.Length == 0)
+            ? fullPath : QueryParser.RemoveDiacritics(fullPath);
         int rxIdx = 0;
         var regexes = compiled.ClauseRegexes;
         foreach (var clause in q.Clauses)
@@ -414,7 +438,7 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
                 var rx = regexes is not null && (clauseStart + a) < regexes.Length
                     ? regexes[clauseStart + a]
                     : null;
-                if (AlternativeMatches(alt, rx, q, row.Name, fullPath, cmp))
+                if (AlternativeMatches(alt, rx, q, row.Name, matchName, fullPath, matchFull, cmp))
                 {
                     hit = true;
                     break;
@@ -431,16 +455,21 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
         Regex? rx,
         ParsedQuery q,
         string name,
+        string matchName,
         string fullPath,
+        string matchFull,
         StringComparison cmp)
     {
+        // Regex/wildcard patterns match against the raw (unfolded) strings —
+        // folding only applies to plain substring matching.
         if (rx is not null)
         {
             if (rx.IsMatch(name)) return true;
             return q.MatchPath && fullPath.Length > 0 && rx.IsMatch(fullPath);
         }
-        if (name.Contains(alt, cmp)) return true;
-        return q.MatchPath && fullPath.Length > 0 && fullPath.Contains(alt, cmp);
+        var needle = q.MatchDiacritics ? alt : QueryParser.RemoveDiacritics(alt);
+        if (matchName.Contains(needle, cmp)) return true;
+        return q.MatchPath && matchFull.Length > 0 && matchFull.Contains(needle, cmp);
     }
 
     // ── query simplification (rewrite for the inner engine) ──────────────
@@ -455,6 +484,11 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
         if (q.RegexMode)     parts.Add("regex:true");
         if (q.WholeWord)     parts.Add("word:true");
         if (q.MatchPath)     parts.Add("matchpath:true");
+        // nodiacritics: folding produces a *superset* of the diacritic-sensitive
+        // matches, and post-filtering can only narrow the inner engine's output.
+        // So the inner engine must fold too (its QueryEngine honours this flag);
+        // the C# post-filter then re-applies the same fold for exactness.
+        if (!q.MatchDiacritics) parts.Add("diacritics:false");
 
         // Lossy hint to the inner engine — pass the first alternative of each
         // positive clause so it can narrow the candidate set.
@@ -502,6 +536,31 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             return sep == 1;
         }
         return false;
+    }
+
+    /// <summary>Tests a folder's immediate child counts against the active
+    /// <c>childcount:</c>/<c>childfilecount:</c>/<c>childfoldercount:</c> filters.
+    /// Enumerates the directory once and only stats entry types when a
+    /// file/folder split is actually requested.</summary>
+    private static bool ChildCountsMatch(ParsedQuery q, string fullPath)
+    {
+        try
+        {
+            bool needSplit = q.ChildFileCount is not null || q.ChildFolderCount is not null;
+            ulong total = 0, files = 0, folders = 0;
+            foreach (var entry in Directory.EnumerateFileSystemEntries(fullPath))
+            {
+                total++;
+                if (!needSplit) continue;
+                if (Directory.Exists(entry)) folders++;
+                else files++;
+            }
+            if (q.ChildCount is not null && !q.ChildCount.Matches(total)) return false;
+            if (q.ChildFileCount is not null && !q.ChildFileCount.Matches(files)) return false;
+            if (q.ChildFolderCount is not null && !q.ChildFolderCount.Matches(folders)) return false;
+            return true;
+        }
+        catch { return false; }
     }
 
     private static bool FileContains(string path, string needle, bool caseSensitive)

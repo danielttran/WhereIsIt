@@ -9,10 +9,13 @@ built as a daily-use replacement for voidtools' *Everything*.
   `src/engine/native/`; results stay live as the file system changes.
 - **Everything-grade query syntax** — `ext:`, `size:`, `dm:`/`dc:`/`da:`,
   `attrib:`, `child:`/`parent:`, `dupe:`/`sizedupe:`/`namepartdupe:`/
-  `attribdupe:`, `content:`, `startwith:`/`endwith:`, `wfn:`/`wholefilename:`,
+  `attribdupe:`, `content:` (plus `ansicontent:`/`utf8content:`/`utf16content:`/
+  `utf16becontent:` aliases), `childcount:`/`childfilecount:`/`childfoldercount:`,
+  `startwith:`/`endwith:`, `wfn:`/`wholefilename:`,
   `root:`, `empty:`, `len:`, `count:`, `audio:`/`video:`/`doc:`/`pic:`/`exe:`/
-  `zip:`, `file:`/`folder:`, `case:`, `regex:`, `word:`, `path:`, `!`/`|`,
-  `AND`/`OR`/`NOT`.
+  `zip:`, `file:`/`folder:`, `case:`, `regex:`, `word:`, `path:`,
+  `wildcards:`/`nowildcards:`, `diacritics:`/`nodiacritics:`, `!`/`|`,
+  `AND`/`OR`/`NOT`. See `docs/PARITY.md` for the full Everything parity matrix.
 - **Everything File List (.efu)** — import and export the voidtools EFU
   format (`ResultExporter.ToEfu`/`ParseEfu`) alongside CSV/TSV, so file lists
   round-trip with Everything itself.

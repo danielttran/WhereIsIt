@@ -88,11 +88,20 @@ Closed 2026-05-17 (Everything-parity bridge):
 - ✅ EFU (Everything File List) import/export in `ResultExporter` (`ToEfu`/`WriteEfu`/`ParseEfu`/`ReadEfu`) — FILETIME ticks + numeric attribute mask, round-trips with voidtools.
 - ✅ Shutdown use-after-free fix: `IndexingEngine::Stop()` is now idempotent and records whether any worker had to be detached (timeout during the non-cancellable initial full-disk scan). `engine_destroy` refuses to free the `EngineState` when a worker is still live, converting a use-after-free into a one-shot leak at process exit.
 
-Remaining Everything-parity gaps:
+Closed 2026-06-03 (feature-parity audit — see `docs/PARITY.md`):
 
+- ✅ Full Everything ⇄ WhereIsIt parity scorecard captured in `docs/PARITY.md`.
+- ✅ Query funcs: `wildcards:`/`nowildcards:` (literal `*`/`?`), `diacritics:`/`nodiacritics:` (accent folding in the substring + whole-word paths; the native engine receives the `diacritics:false` hint so its candidate set stays a superset), the encoding-specific content aliases (`ansicontent:`/`utf8content:`/`utf16content:`/`utf16becontent:` → `content:`), and the `childcount:`/`childfilecount:`/`childfoldercount:` folder filters. Parsed in `QueryParser`, post-filtered in both `FilteringEngineClient` and `InProcEngineClient`. Covered by `QueryParserExtendedTests` + `InProcEngineClientExtendedFilterTests` (needs a Windows build to run green).
+
+Remaining Everything-parity gaps (full detail + ranking in `docs/PARITY.md` §9):
+
+- **Match highlighting** in results — pure UI, recommended next.
+- **System tray / minimize to tray** — needs a small Win32 interop shim.
+- **`dr:` / `runcount:` filters** — wire `RunCountService` onto the row model.
+- **Richer date keywords**, **explicit `< >` grouping** — `QueryParser` work.
+- **Property/metadata index** — unlocks `album:`/`width:`/… + custom columns.
 - **ETP / FTP server** — proprietary Everything protocol. Skipped; HTTP server covers the cross-device search use case.
-- **Everything IPC/SDK & `es.exe` CLI** — third-party-tool integration surface; not started.
-- **UI tier** — system tray and match-term highlighting. Not started.
+- **Everything IPC/SDK, `es.exe` CLI, shell context-menu extension, background service** — Windows-only integration surface; deliberately deferred.
 
 Closed this session:
 

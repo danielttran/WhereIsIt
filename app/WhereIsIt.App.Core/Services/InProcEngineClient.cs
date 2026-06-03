@@ -257,6 +257,12 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
             catch { return false; }
         }
 
+        if (q.ChildCount is not null || q.ChildFileCount is not null || q.ChildFolderCount is not null)
+        {
+            if (!isDir) return false;
+            if (!ChildCountsMatch(q, fullPath)) return false;
+        }
+
         if (q.Clauses.Count == 0) return true;
 
         var cmp = q.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
@@ -302,7 +308,7 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         if (parsed.Clauses.Count == 0) return null;
 
         bool anyNeedsRegex = parsed.RegexMode;
-        if (!anyNeedsRegex)
+        if (!anyNeedsRegex && parsed.Wildcards)
         {
             foreach (var clause in parsed.Clauses)
             {
@@ -332,7 +338,7 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
                 {
                     if (parsed.RegexMode)
                         rx = new Regex(alt, opts, RegexTimeout);
-                    else if (alt.Contains('*') || alt.Contains('?'))
+                    else if (parsed.Wildcards && (alt.Contains('*') || alt.Contains('?')))
                         rx = new Regex("^" + Regex.Escape(alt).Replace(@"\*", ".*").Replace(@"\?", ".") + "$", opts, RegexTimeout);
                 }
                 // Failed compile ⇒ a regex/wildcard was intended; never-match
@@ -346,9 +352,18 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
 
     private static bool AlternativeMatches(string alt, Regex? rx, ParsedQuery q, string name, string relative, StringComparison cmp)
     {
+        // Regex/wildcard patterns match the raw strings; folding applies to the
+        // plain substring and whole-word paths only.
         if (rx is not null)
         {
             return rx.IsMatch(name) || rx.IsMatch(relative);
+        }
+
+        if (!q.MatchDiacritics)
+        {
+            name = QueryParser.RemoveDiacritics(name);
+            relative = QueryParser.RemoveDiacritics(relative);
+            alt = QueryParser.RemoveDiacritics(alt);
         }
 
         if (q.WholeWord)
@@ -370,6 +385,27 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
             idx += needle.Length;
         }
         return false;
+    }
+
+    private static bool ChildCountsMatch(ParsedQuery q, string fullPath)
+    {
+        try
+        {
+            bool needSplit = q.ChildFileCount is not null || q.ChildFolderCount is not null;
+            ulong total = 0, files = 0, folders = 0;
+            foreach (var entry in Directory.EnumerateFileSystemEntries(fullPath))
+            {
+                total++;
+                if (!needSplit) continue;
+                if (Directory.Exists(entry)) folders++;
+                else files++;
+            }
+            if (q.ChildCount is not null && !q.ChildCount.Matches(total)) return false;
+            if (q.ChildFileCount is not null && !q.ChildFileCount.Matches(files)) return false;
+            if (q.ChildFolderCount is not null && !q.ChildFolderCount.Matches(folders)) return false;
+            return true;
+        }
+        catch { return false; }
     }
 
     private static string TrimTrailingSeparators(string path)

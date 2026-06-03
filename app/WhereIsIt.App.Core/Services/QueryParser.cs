@@ -14,6 +14,18 @@ public sealed record ParsedQuery
     public bool MatchPath { get; init; }
     public bool FileOnly { get; init; }
     public bool FolderOnly { get; init; }
+
+    /// <summary><c>wildcards:</c>/<c>nowildcards:</c> — when false, <c>*</c> and
+    /// <c>?</c> in a term are matched literally instead of as wildcards. Defaults
+    /// to true, matching Everything's default. Ignored when <see cref="RegexMode"/>
+    /// is on (regex always interprets its own metacharacters).</summary>
+    public bool Wildcards { get; init; } = true;
+
+    /// <summary><c>diacritics:</c>/<c>nodiacritics:</c> — when false, accented
+    /// characters fold to their base letter for matching (so <c>e</c> matches
+    /// <c>é</c>). Defaults to true (diacritic-sensitive). Folding applies to the
+    /// substring and whole-word match paths.</summary>
+    public bool MatchDiacritics { get; init; } = true;
     public string[]? ExtWhitelist { get; init; }
     public SizeRange? Size { get; init; }
     public DateRange? Modified { get; init; }
@@ -46,6 +58,14 @@ public sealed record ParsedQuery
     /// <summary><c>count:</c> — cap the number of returned rows.</summary>
     public int? MaxResults { get; init; }
 
+    /// <summary><c>childcount:</c> — folders whose immediate child count matches
+    /// (files + folders). Applies to folders only.</summary>
+    public SizeRange? ChildCount { get; init; }
+    /// <summary><c>childfilecount:</c> — folders whose immediate file count matches.</summary>
+    public SizeRange? ChildFileCount { get; init; }
+    /// <summary><c>childfoldercount:</c> — folders whose immediate sub-folder count matches.</summary>
+    public SizeRange? ChildFolderCount { get; init; }
+
     public string? ContentSearch { get; init; }
     public IReadOnlyList<SearchClause> Clauses { get; init; } = [];
 
@@ -55,7 +75,8 @@ public sealed record ParsedQuery
         && Attribute == null && ChildOfPath == null && ParentIsPath == null
         && DupeMode == DupeKind.None && ContentSearch == null
         && StartsWith == null && EndsWith == null && WholeFilename == null
-        && !RootOnly && NameLength == null && !EmptyOnly && MaxResults == null;
+        && !RootOnly && NameLength == null && !EmptyOnly && MaxResults == null
+        && ChildCount == null && ChildFileCount == null && ChildFolderCount == null;
 }
 
 /// <summary>Everything-compatible duplicate-grouping keys.</summary>
@@ -206,6 +227,11 @@ public static class QueryParser
         SizeRange? nameLen = null;
         bool emptyOnly  = false;
         int? maxResults = null;
+        bool wildcards  = true;
+        bool matchDiacritics = true;
+        SizeRange? childCount = null;
+        SizeRange? childFileCount = null;
+        SizeRange? childFolderCount = null;
         var clauses = new List<SearchClause>();
 
         foreach (var token in tokens)
@@ -269,6 +295,26 @@ public static class QueryParser
             {
                 matchPath = true;
                 AddTerm(clauses, token[10..], false);
+                continue;
+            }
+
+            // ── modifier: wildcards ───────────────────────────────────────
+            if (lower == "wildcards:" || lower == "wildcards:true") { wildcards = true; continue; }
+            if (lower == "nowildcards:" || lower == "wildcards:false") { wildcards = false; continue; }
+            if (lower.StartsWith("wildcards:") && lower.Length > 10)
+            {
+                wildcards = true;
+                AddTerm(clauses, token[10..], false);
+                continue;
+            }
+
+            // ── modifier: diacritics ──────────────────────────────────────
+            if (lower == "diacritics:" || lower == "diacritics:true") { matchDiacritics = true; continue; }
+            if (lower == "nodiacritics:" || lower == "diacritics:false") { matchDiacritics = false; continue; }
+            if (lower.StartsWith("diacritics:") && lower.Length > 11)
+            {
+                matchDiacritics = true;
+                AddTerm(clauses, token[11..], false);
                 continue;
             }
 
@@ -405,7 +451,27 @@ public static class QueryParser
                 continue;
             }
 
-            // ── content: (file-contents post-filter) ─────────────────────
+            // ── childcount: family (folder child-count post-filter) ──────
+            if (lower.StartsWith("childfilecount:") && lower.Length > 15)
+            {
+                childFileCount = ParseIntExpression(lower[15..]);
+                continue;
+            }
+            if (lower.StartsWith("childfoldercount:") && lower.Length > 17)
+            {
+                childFolderCount = ParseIntExpression(lower[17..]);
+                continue;
+            }
+            if (lower.StartsWith("childcount:") && lower.Length > 11)
+            {
+                childCount = ParseIntExpression(lower[11..]);
+                continue;
+            }
+
+            // ── content: family (file-contents post-filter) ──────────────
+            // Everything exposes encoding-specific aliases; WhereIsIt's reader
+            // auto-detects encoding, so they all map to the same content search.
+            if (TryContentAlias(lower, token, ref contentSearch)) continue;
             if (lower.StartsWith("content:") && token.Length > 8)
             {
                 contentSearch = token[8..];
@@ -445,9 +511,36 @@ public static class QueryParser
             NameLength    = nameLen,
             EmptyOnly     = emptyOnly,
             MaxResults    = maxResults,
+            Wildcards        = wildcards,
+            MatchDiacritics  = matchDiacritics,
+            ChildCount       = childCount,
+            ChildFileCount   = childFileCount,
+            ChildFolderCount = childFolderCount,
             Clauses = clauses,
         };
     }
+
+    /// <summary>
+    /// Maps Everything's encoding-specific content functions
+    /// (<c>ansicontent:</c>, <c>utf8content:</c>, <c>utf16content:</c>,
+    /// <c>utf16becontent:</c>) onto <see cref="ParsedQuery.ContentSearch"/>.
+    /// The reader auto-detects encoding, so the search itself is identical.
+    /// </summary>
+    private static bool TryContentAlias(string lower, string token, ref string? contentSearch)
+    {
+        foreach (var prefix in ContentAliasPrefixes)
+        {
+            if (lower.StartsWith(prefix, StringComparison.Ordinal) && token.Length > prefix.Length)
+            {
+                contentSearch = token[prefix.Length..];
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static readonly string[] ContentAliasPrefixes =
+        ["ansicontent:", "utf8content:", "utf16becontent:", "utf16content:"];
 
     /// <summary>
     /// Parses an integer comparison expression (<c>N</c>, <c>&gt;N</c>, <c>&lt;=N</c>,
@@ -480,6 +573,31 @@ public static class QueryParser
     }
 
     // ── helpers ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Strips combining diacritical marks so accented characters fold to their
+    /// base letter (é → e). Used by both engines for <c>nodiacritics:</c>
+    /// matching. Returns the input unchanged when it has no non-ASCII chars,
+    /// avoiding the Normalize allocation on the common all-ASCII hot path.
+    /// </summary>
+    public static string RemoveDiacritics(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        bool hasNonAscii = false;
+        foreach (var ch in text)
+            if (ch > 127) { hasNonAscii = true; break; }
+        if (!hasNonAscii) return text;
+
+        var normalized = text.Normalize(System.Text.NormalizationForm.FormD);
+        var sb = new StringBuilder(normalized.Length);
+        foreach (var ch in normalized)
+        {
+            if (System.Globalization.CharUnicodeInfo.GetUnicodeCategory(ch)
+                != System.Globalization.UnicodeCategory.NonSpacingMark)
+                sb.Append(ch);
+        }
+        return sb.ToString().Normalize(System.Text.NormalizationForm.FormC);
+    }
 
     private static bool TryTypeMacro(string lower, string token, ref string[]? extWhitelist, List<SearchClause> clauses)
     {
