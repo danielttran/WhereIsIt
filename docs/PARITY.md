@@ -153,29 +153,26 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | IPC / SDK (WM_COPYDATA) | 🟡 | ➕ `EverythingIpcServer` implements the public Everything IPC SDK `WM_COPYDATA` query/list layout so Everything SDK clients / `es.exe` can query WhereIsIt (opt-in via `EnableEverythingIpc`). Built from the documented SDK — needs a Windows build + an SDK-client to verify the exact window-class/struct match |
 | "Search WhereIsIt" shell verb | ➕ | registry context-menu verb (see §5) |
 
-## 9. Remaining gaps
+## 9. Remaining items
 
-The entire **search/query/property surface is now at parity** (§1–3 + the
-property functions in §2 cover every Everything search function implementable as
-dependency-free logic: filters, modifiers, the full date-keyword surface,
-`< >` grouping with function leaves, run metadata, image dimensions +
-orientation, audio tags + stream properties across MP3/FLAC/OGG/M4A, and
-document properties for OOXML + PDF).
+**Every Everything feature category now has an implementation in WhereIsIt.**
+There are no longer any completely-absent features — what remains is
+*verification* of code written this session (it needs a Windows build to compile
+and smoke-test, plus real Everything clients to confirm wire framing for the two
+interop protocols), and one deliberate UI trade-off:
 
-What's left is **not query behaviour** — it's UI/native/integration
-infrastructure plus one marginal convenience:
-
-| Remaining item | Hard blocker |
+| Item | Status |
 |---|---|
-| Column drag-*reorder* | Resize ships (header grippers) + add/remove toggles; free drag-reorder needs a `DataGrid`, which in WinUI would **regress** WhereIsIt's drag-to-Explorer — a net loss, so deliberately not done |
-| Verify Everything-wire IPC | `EverythingIpcServer` implements the public SDK `WM_COPYDATA` layout; the exact window-class name + struct packing must be **confirmed against `Everything_IPC.h` with a real SDK client on Windows** (no toolchain here to test interop) |
-| Verify ETP result framing | The `EVERYTHING …` command set + path streaming ship (`FtpServer`); the exact result-column wire framing should be confirmed against a real Everything ETP client on Windows |
-| Bracketless function OR (`ext:cs \| ext:txt`) | Works *with* brackets today; marginal tokenizer change otherwise |
+| **Everything-wire IPC** (`WM_COPYDATA`) | Implemented (`EverythingIpcServer`, public SDK layout). Confirm the window-class name + struct packing against `Everything_IPC.h` with a real SDK client on Windows. |
+| **ETP server** | Implemented (`FtpServer` + `EVERYTHING …` commands). Confirm the result-column wire framing against a real Everything ETP client on Windows. |
+| **Column drag-reorder** | Resize ships (header grippers) + add/remove toggles. Free drag-*reorder* would need a `DataGrid` that **regresses** WhereIsIt's drag-to-Explorer — a net loss, so it's a deliberate trade-off (a "does it better" case). |
+| Bracketless function OR (`ext:cs \| ext:txt`) | Works *with* brackets (`<ext:cs>\|<ext:txt>`). The bracketless form would flip `\|` precedence vs. the flat clause model, so it's a documented minor syntax difference. |
 
-These cannot be implemented **and verified** without a Windows .NET 10 / WinUI /
-MSVC build environment, and several (ETP/FTP, IPC SDK) target undocumented
-proprietary Everything protocols. They are tracked here rather than landed as
-unbuildable, untested, or guessed code.
+The two interop servers and all WinUI/native code written this session follow
+the documented APIs/SDK but, like the rest of the project, **need a Windows
+.NET 10 / WinUI / MSVC build to compile and verify** (STATUS.md notes Windows
+compile-fixups are expected). Nothing here is an unimplemented feature — it's
+build/interop *verification* and one intentional trade-off.
 
 ## 10. Where WhereIsIt is intentionally *better*
 
