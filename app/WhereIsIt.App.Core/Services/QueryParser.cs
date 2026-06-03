@@ -878,8 +878,29 @@ public static class QueryParser
         if (MonthNames.TryGetValue(spec, out var month))
             return MonthRange(today.Year, month);
 
+        // Weekday names (monday…sunday and mon…sun) resolve to the most recent
+        // occurrence of that weekday, including today — Everything's <weekday>
+        // date function.
+        if (WeekdayNames.TryGetValue(spec, out var dow))
+        {
+            int back = ((int)today.DayOfWeek - (int)dow + 7) % 7;
+            var day = today.AddDays(-back);
+            return new DateRange(day, day.AddDays(1).AddTicks(-1));
+        }
+
         return null;
     }
+
+    private static readonly Dictionary<string, DayOfWeek> WeekdayNames = new(StringComparer.Ordinal)
+    {
+        ["sunday"] = DayOfWeek.Sunday, ["sun"] = DayOfWeek.Sunday,
+        ["monday"] = DayOfWeek.Monday, ["mon"] = DayOfWeek.Monday,
+        ["tuesday"] = DayOfWeek.Tuesday, ["tue"] = DayOfWeek.Tuesday, ["tues"] = DayOfWeek.Tuesday,
+        ["wednesday"] = DayOfWeek.Wednesday, ["wed"] = DayOfWeek.Wednesday,
+        ["thursday"] = DayOfWeek.Thursday, ["thu"] = DayOfWeek.Thursday, ["thur"] = DayOfWeek.Thursday, ["thurs"] = DayOfWeek.Thursday,
+        ["friday"] = DayOfWeek.Friday, ["fri"] = DayOfWeek.Friday,
+        ["saturday"] = DayOfWeek.Saturday, ["sat"] = DayOfWeek.Saturday,
+    };
 
     private static readonly Dictionary<string, int> MonthNames = new(StringComparer.Ordinal)
     {

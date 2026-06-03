@@ -179,6 +179,26 @@ public class QueryParserExtendedTests
         QueryParser.ParseDateSpec("JULY", now).Should().NotBeNull();
     }
 
+    [Fact]
+    public void ParseDateSpec_Weekday_ResolvesToMostRecentOccurrence()
+    {
+        // 2026-06-03 is a Wednesday; the most recent Monday is 2026-06-01.
+        var now = new System.DateTime(2026, 6, 3);
+        var r = QueryParser.ParseDateSpec("monday", now);
+        r.Should().NotBeNull();
+        r!.Min.Should().Be(new System.DateTime(2026, 6, 1));
+        r.Max.Should().Be(new System.DateTime(2026, 6, 2).AddTicks(-1));
+    }
+
+    [Fact]
+    public void ParseDateSpec_WeekdayToday_IsToday()
+    {
+        // 2026-06-03 is a Wednesday.
+        var now = new System.DateTime(2026, 6, 3);
+        var r = QueryParser.ParseDateSpec("wed", now);
+        r!.Min.Should().Be(new System.DateTime(2026, 6, 3));
+    }
+
     // ── ExtractHighlightTerms (result-list match highlighting) ────────────
 
     [Fact]

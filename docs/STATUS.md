@@ -104,7 +104,8 @@ Closed 2026-06-03 (run-metadata filters):
 
 Remaining Everything-parity gaps (full detail + ranking in `docs/PARITY.md` §9):
 
-- **Richer date keywords**, **explicit `< >` grouping** — `QueryParser` work.
+- **`last N <unit>` relative dates** — last `ParseDateSpec` gap (month + weekday names now parsed).
+- **Explicit `< >` grouping** — needs a flat-clause → expression-tree rewrite across both engines; deferred to a Windows build session (high blind-change risk).
 - **Property/metadata index** — unlocks `album:`/`width:`/… + custom columns.
 - **ETP / FTP server** — proprietary Everything protocol. Skipped; HTTP server covers the cross-device search use case.
 - **Everything IPC/SDK, `es.exe` CLI, shell context-menu extension, background service** — Windows-only integration surface; deliberately deferred.
