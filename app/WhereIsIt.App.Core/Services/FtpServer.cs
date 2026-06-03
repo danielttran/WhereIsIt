@@ -1,11 +1,14 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Reactive.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using WhereIsIt.App.Contracts;
 
 namespace WhereIsIt.App.Services;
 
@@ -15,19 +18,28 @@ namespace WhereIsIt.App.Services;
 /// <c>127.0.0.1</c> only and opt-in — same-host by design, like
 /// <see cref="HttpSearchServer"/>. Supports anonymous login, passive mode,
 /// directory listing and file download (no upload/delete/rename).
+///
+/// When an <see cref="IEngineClient"/> is supplied it also speaks Everything's
+/// ETP extension (FTP + <c>EVERYTHING …</c> commands): <c>EVERYTHING SEARCH</c>
+/// sets the query, <c>EVERYTHING QUERY</c> runs it and streams the matching full
+/// paths over the data connection. The command set follows the public ETP
+/// description; the exact result-column framing should be confirmed against a
+/// real Everything ETP client.
 /// </summary>
 public sealed class FtpServer : IDisposable
 {
     private readonly string root;
     private readonly int requestedPort;
+    private readonly IEngineClient? engine;
     private TcpListener? control;
     private CancellationTokenSource? cts;
     private Task? loop;
 
-    public FtpServer(string rootDirectory, int port = 0)
+    public FtpServer(string rootDirectory, int port = 0, IEngineClient? engine = null)
     {
         root = Path.GetFullPath(rootDirectory);
         requestedPort = port;
+        this.engine = engine;
     }
 
     /// <summary>Starts listening; returns the actual control-connection port.</summary>
@@ -59,6 +71,10 @@ public sealed class FtpServer : IDisposable
         public string Cwd = "/";
         public bool Binary = true;
         public TcpListener? Pasv;
+        // ETP (Everything extension) query state.
+        public string EtpSearch = string.Empty;
+        public int EtpOffset;
+        public int EtpMaxResults = int.MaxValue;
     }
 
     private async Task ServeAsync(TcpClient client, CancellationToken ct)
@@ -94,6 +110,7 @@ public sealed class FtpServer : IDisposable
                     case "LIST": await DataTransferAsync(writer, s, Listing(s.Cwd), ct).ConfigureAwait(false); break;
                     case "NLST": await DataTransferAsync(writer, s, Names(s.Cwd), ct).ConfigureAwait(false); break;
                     case "RETR": await RetrAsync(writer, s, s.Cwd, arg, ct).ConfigureAwait(false); break;
+                    case "EVERYTHING": await HandleEverythingAsync(writer, s, arg, ct).ConfigureAwait(false); break;
                     case "QUIT": await writer.WriteLineAsync("221 Bye").ConfigureAwait(false); return;
                     default: await writer.WriteLineAsync("502 Not implemented").ConfigureAwait(false); break;
                 }
@@ -145,6 +162,72 @@ public sealed class FtpServer : IDisposable
         finally { try { s.Pasv?.Stop(); } catch { } s.Pasv = null; }
         await writer.WriteLineAsync("226 Transfer complete").ConfigureAwait(false);
     }
+
+    // ── ETP: Everything's FTP extension commands ─────────────────────────
+
+    private async Task HandleEverythingAsync(StreamWriter writer, Session s, string arg, CancellationToken ct)
+    {
+        if (engine is null) { await writer.WriteLineAsync("502 ETP not enabled").ConfigureAwait(false); return; }
+
+        int sp = arg.IndexOf(' ');
+        string sub = (sp < 0 ? arg : arg[..sp]).ToUpperInvariant();
+        string rest = sp < 0 ? string.Empty : arg[(sp + 1)..].Trim();
+
+        switch (sub)
+        {
+            case "SEARCH": s.EtpSearch = rest; await writer.WriteLineAsync("200 OK").ConfigureAwait(false); break;
+            case "RESULT_OFFSET": s.EtpOffset = ParseInt(rest, 0); await writer.WriteLineAsync("200 OK").ConfigureAwait(false); break;
+            case "MAX_RESULTS": s.EtpMaxResults = ParseInt(rest, int.MaxValue); await writer.WriteLineAsync("200 OK").ConfigureAwait(false); break;
+            // Column/sort directives are accepted (results carry the full path).
+            case "SORT" or "SIZE_COLUMN" or "DATE_MODIFIED_COLUMN" or "DATE_CREATED_COLUMN" or "PATH_COLUMN" or "ATTRIBUTES_COLUMN":
+                await writer.WriteLineAsync("200 OK").ConfigureAwait(false); break;
+            case "QUERY":
+                await EtpQueryAsync(writer, s, ct).ConfigureAwait(false); break;
+            default:
+                await writer.WriteLineAsync("502 Not implemented").ConfigureAwait(false); break;
+        }
+    }
+
+    private async Task EtpQueryAsync(StreamWriter writer, Session s, CancellationToken ct)
+    {
+        var lines = new StringBuilder();
+        try
+        {
+            var paths = await EtpSearchAsync(s.EtpSearch, s.EtpOffset, s.EtpMaxResults, ct).ConfigureAwait(false);
+            foreach (var p in paths) lines.Append(p).Append("\r\n");
+        }
+        catch { /* return whatever we have */ }
+        await DataTransferAsync(writer, s, lines.ToString(), ct).ConfigureAwait(false);
+    }
+
+    private async Task<List<string>> EtpSearchAsync(string query, int offset, int max, CancellationToken ct)
+    {
+        var result = new List<string>();
+        if (engine is null) return result;
+
+        var tcs = new TaskCompletionSource<IReadOnlyList<uint>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var sub = engine.ObserveResults.Take(1).Subscribe(ids => tcs.TrySetResult(ids));
+        await engine.SearchAsync(query, ct).ConfigureAwait(false);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
+        using var _ = linked.Token.Register(() => tcs.TrySetResult(Array.Empty<uint>()));
+        var ids = await tcs.Task.ConfigureAwait(false);
+
+        int start = Math.Min(offset < 0 ? 0 : offset, ids.Count);
+        int end = max == int.MaxValue ? ids.Count : Math.Min(ids.Count, start + Math.Max(0, max));
+        for (int i = start; i < end; i++)
+        {
+            try
+            {
+                var row = await engine.GetRowAsync(ids[i], ct).ConfigureAwait(false);
+                result.Add(string.IsNullOrEmpty(row.ParentPath) ? row.Name : Path.Combine(row.ParentPath, row.Name));
+            }
+            catch { }
+        }
+        return result;
+    }
+
+    private static int ParseInt(string s, int fallback) => int.TryParse(s, out var v) ? v : fallback;
 
     private string SizeReply(string cwd, string name)
     {

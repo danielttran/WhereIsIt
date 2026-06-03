@@ -63,12 +63,13 @@ public static class AppBootstrap
         // Optional FTP frontend — bound to 127.0.0.1 only, read-only, opt-in.
         if (settings.EnableFtpServer)
         {
-            services.AddSingleton(_ =>
+            services.AddSingleton(provider =>
             {
                 var rootDir = settings.ScopeRoots.Length > 0
                     ? settings.ScopeRoots[0]
                     : System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile);
-                var ftp = new FtpServer(rootDir, settings.FtpServerPort);
+                // Passing the engine turns the FTP server into an ETP server too.
+                var ftp = new FtpServer(rootDir, settings.FtpServerPort, provider.GetRequiredService<IEngineClient>());
                 try { ftp.Start(); } catch { /* port may be in use; swallow */ }
                 return ftp;
             });

@@ -73,4 +73,51 @@ public class FtpServerTests
             try { dir.Delete(recursive: true); } catch { }
         }
     }
+
+    [Fact]
+    public async Task Etp_SearchAndQueryReturnsMatches()
+    {
+        var dir = Directory.CreateTempSubdirectory("whereisit-etp-tests-");
+        await File.WriteAllTextAsync(Path.Combine(dir.FullName, "alpha.cs"), "");
+        await File.WriteAllTextAsync(Path.Combine(dir.FullName, "notes.txt"), "");
+
+        using var inner = new WhereIsIt.App.Services.InProcEngineClient(() => new[] { dir.FullName });
+        using var engine = new WhereIsIt.App.Services.FilteringEngineClient(inner);
+        using var server = new FtpServer(dir.FullName, 0, engine);
+        var port = server.Start();
+
+        try
+        {
+            using var ctrl = new TcpClient();
+            await ctrl.ConnectAsync(IPAddress.Loopback, port);
+            using var cs = ctrl.GetStream();
+            using var r = new StreamReader(cs);
+            using var w = new StreamWriter(cs) { AutoFlush = true, NewLine = "\r\n" };
+
+            (await r.ReadLineAsync())!.Should().StartWith("220");
+            await w.WriteLineAsync("USER anonymous"); (await r.ReadLineAsync())!.Should().StartWith("331");
+            await w.WriteLineAsync("PASS x"); (await r.ReadLineAsync())!.Should().StartWith("230");
+
+            await w.WriteLineAsync("EVERYTHING SEARCH ext:cs");
+            (await r.ReadLineAsync())!.Should().StartWith("200");
+
+            await w.WriteLineAsync("PASV");
+            int dport = ParsePasvPort((await r.ReadLineAsync())!);
+            using var data = new TcpClient();
+            await data.ConnectAsync(IPAddress.Loopback, dport);
+            await w.WriteLineAsync("EVERYTHING QUERY");
+            (await r.ReadLineAsync())!.Should().StartWith("150");
+            var results = await new StreamReader(data.GetStream()).ReadToEndAsync();
+            (await r.ReadLineAsync())!.Should().StartWith("226");
+
+            results.Should().Contain("alpha.cs");
+            results.Should().NotContain("notes.txt");
+
+            await w.WriteLineAsync("QUIT");
+        }
+        finally
+        {
+            try { dir.Delete(recursive: true); } catch { }
+        }
+    }
 }

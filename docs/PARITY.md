@@ -147,7 +147,7 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 |---|---|---|
 | HTTP server (web UI) | ✅ | ➕ serves an HTML search page at `/` plus the JSON `/search?q=` endpoint; localhost-only by design (no LAN binding — security choice ⭐) |
 | FTP server | ➕ | read-only RFC 959 FTP (`FtpServer`: USER/PASV/LIST/NLST/RETR/SIZE/CWD), localhost-only + opt-in, directory-traversal sandboxed. Enable via `settings.json` (`EnableFtpServer`) |
-| ETP server | ⛔ | Everything's proprietary search-extension protocol over FTP; standard FTP + the HTTP search/web-UI cover the practical use |
+| ETP server | ➕ | `FtpServer` (with an engine) speaks Everything's ETP extension — `EVERYTHING SEARCH`/`QUERY`/`RESULT_OFFSET`/`MAX_RESULTS`/sort+column directives over FTP, streaming matching full paths. Localhost-only + opt-in (`EnableFtpServer`); the exact result-column framing should be confirmed against a real Everything ETP client |
 | Everything service | ➕ | `tools/WhereIsIt.EngineService` — engine-over-named-pipe host (see §6) |
 | `es.exe` CLI | 🟡 | ➕ `tools/WhereIsIt.Es` builds `es.exe` — same engine + query syntax, output/sort/export/modifier flags. Searches in-proc (one-shot) rather than over Everything's live-index IPC |
 | IPC / SDK (WM_COPYDATA) | 🟡 | ➕ `EverythingIpcServer` implements the public Everything IPC SDK `WM_COPYDATA` query/list layout so Everything SDK clients / `es.exe` can query WhereIsIt (opt-in via `EnableEverythingIpc`). Built from the documented SDK — needs a Windows build + an SDK-client to verify the exact window-class/struct match |
@@ -169,7 +169,7 @@ infrastructure plus one marginal convenience:
 |---|---|
 | Column drag-*reorder* | Resize ships (header grippers) + add/remove toggles; free drag-reorder needs a `DataGrid`, which in WinUI would **regress** WhereIsIt's drag-to-Explorer — a net loss, so deliberately not done |
 | Verify Everything-wire IPC | `EverythingIpcServer` implements the public SDK `WM_COPYDATA` layout; the exact window-class name + struct packing must be **confirmed against `Everything_IPC.h` with a real SDK client on Windows** (no toolchain here to test interop) |
-| **ETP server** | Everything's **undocumented proprietary** search-extension protocol over FTP — needs the spec; a standard read-only **FTP server** now ships, plus the HTTP search/web UI |
+| Verify ETP result framing | The `EVERYTHING …` command set + path streaming ship (`FtpServer`); the exact result-column wire framing should be confirmed against a real Everything ETP client on Windows |
 | Bracketless function OR (`ext:cs \| ext:txt`) | Works *with* brackets today; marginal tokenizer change otherwise |
 
 These cannot be implemented **and verified** without a Windows .NET 10 / WinUI /
