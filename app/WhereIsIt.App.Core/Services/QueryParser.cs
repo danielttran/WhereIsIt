@@ -784,6 +784,7 @@ public static class QueryParser
         ("artist:", MediaField.Artist), ("album:", MediaField.Album), ("title:", MediaField.Title),
         ("genre:", MediaField.Genre), ("track:", MediaField.Track), ("comment:", MediaField.Comment),
         ("year:", MediaField.Year),
+        ("author:", MediaField.Author), ("subject:", MediaField.Subject), ("keywords:", MediaField.Keywords),
     ];
 
     private static bool TryMediaFilter(string lower, string token, List<MediaFilter> into)

@@ -277,7 +277,7 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         if (q.MediaFilters.Count > 0)
         {
             if (isDir) return false;
-            if (!AudioTags.Match(q.MediaFilters, fullPath, q.CaseSensitive, q.MatchDiacritics)) return false;
+            if (!MediaProperties.Match(q.MediaFilters, fullPath, q.CaseSensitive, q.MatchDiacritics)) return false;
         }
 
         if (q.Duration is not null || q.SampleRate is not null || q.Channels is not null)

@@ -5,8 +5,8 @@ using System.Text;
 
 namespace WhereIsIt.App.Services;
 
-/// <summary>Recognised media-tag fields for the audio property search functions.</summary>
-public enum MediaField { Title, Artist, Album, Year, Genre, Track, Comment }
+/// <summary>Recognised property fields for the media/document search functions.</summary>
+public enum MediaField { Title, Artist, Album, Year, Genre, Track, Comment, Author, Subject, Keywords }
 
 /// <summary>A single media-property filter: a field plus a substring to match.</summary>
 public sealed record MediaFilter(MediaField Field, string Value);

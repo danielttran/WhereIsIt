@@ -215,6 +215,9 @@ public class QueryParserExtendedTests
     [InlineData("genre:x", MediaField.Genre)]
     [InlineData("track:x", MediaField.Track)]
     [InlineData("comment:x", MediaField.Comment)]
+    [InlineData("author:x", MediaField.Author)]
+    [InlineData("subject:x", MediaField.Subject)]
+    [InlineData("keywords:x", MediaField.Keywords)]
     public void Parse_MediaPrefixes_MapToFields(string query, MediaField field)
     {
         QueryParser.Parse(query).MediaFilters[0].Field.Should().Be(field);
