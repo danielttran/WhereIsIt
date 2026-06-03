@@ -125,7 +125,7 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 |---|---|---|
 | NTFS USN journal + MFT indexing | ✅ | native C++ engine |
 | live incremental updates | ✅ | |
-| non-admin via background service | ➕ | `tools/WhereIsIt.EngineService` hosts the engine behind a named pipe (`EnginePipeServer`); a non-elevated app connects via the real `NamedPipeEngineClient`. Console host runs today; `sc create` registers it as a Windows service |
+| non-admin via background service | ➕ | `tools/WhereIsIt.EngineService` — a real Windows service (generic host + `UseWindowsService`) hosting the engine behind a named pipe (`EnginePipeServer`); a non-elevated app connects via the real `NamedPipeEngineClient`. Also runs as a console |
 | folder indexing (non-NTFS / network) | 🟡 | `Directory.EnumerateFiles` fallback works but isn't a persistent folder index |
 | ReFS / FAT indexing | ⛔ | NTFS only |
 | file-list (.efu) as an index source | 🟡 | import/export ✅; not mountable as a live index |
@@ -169,7 +169,6 @@ infrastructure plus one marginal convenience:
 | **Everything-compatible IPC SDK** | Byte-compatible reimplementation of Everything's **undocumented WM_COPYDATA/IPC protocol** so third-party tools interop (a native `es.exe` CLI ships in `tools/WhereIsIt.Es`) |
 | **ETP / FTP server** | **Undocumented proprietary protocol** |
 | Modern (always-visible) Win11 context menu | The classic registry verb ships (`ShellMenuRegistration`); a Win11 *primary* context-menu entry additionally needs a packaged `IExplorerCommand` **COM** handler |
-| Windows-**service** auto-install | The engine-over-pipe host ships (`tools/WhereIsIt.EngineService`, runs now / `sc create`); a true auto-installing service needs `Microsoft.Extensions.Hosting.WindowsServices` + a build |
 | Bracketless function OR (`ext:cs \| ext:txt`) | Works *with* brackets today; marginal tokenizer change otherwise |
 
 These cannot be implemented **and verified** without a Windows .NET 10 / WinUI /
