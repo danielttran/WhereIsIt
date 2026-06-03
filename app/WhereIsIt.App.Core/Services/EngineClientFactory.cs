@@ -36,11 +36,27 @@ public static class EngineClientFactory
             catch { /* DLL present but failed to load; fall through */ }
         }
 
+        // Non-admin: if the background indexing service is listening, talk to it
+        // over the named pipe so we get a live index without elevation.
         var elevated = forceElevated ?? IsElevated();
         if (!elevated && CanConnectToPipe())
-            return new PipeEngineClient();
+            return new NamedPipeEngineClient(PipeName);
 
         return new InProcEngineClient();
+    }
+
+    /// <summary>Creates a raw local engine (native if available, else in-proc) with
+    /// no filtering decorator or pipe — used by the background service host.</summary>
+    public static IEngineClient CreateLocalEngine(string[]? scopeRoots = null)
+    {
+        if (NativeEngineClient.IsAvailable())
+        {
+            try { return new NativeEngineClient(scopeRoots); }
+            catch { /* fall through to in-proc */ }
+        }
+        return scopeRoots is { Length: > 0 }
+            ? new InProcEngineClient(() => scopeRoots)
+            : new InProcEngineClient();
     }
 
     private static bool CanConnectToPipe()

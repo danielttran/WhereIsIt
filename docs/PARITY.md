@@ -125,7 +125,7 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 |---|---|---|
 | NTFS USN journal + MFT indexing | ✅ | native C++ engine |
 | live incremental updates | ✅ | |
-| non-admin via background service | ⛔ | runs in-process w/ elevation; pipe service is a stub (STATUS §What's left) |
+| non-admin via background service | ➕ | `tools/WhereIsIt.EngineService` hosts the engine behind a named pipe (`EnginePipeServer`); a non-elevated app connects via the real `NamedPipeEngineClient`. Console host runs today; `sc create` registers it as a Windows service |
 | folder indexing (non-NTFS / network) | 🟡 | `Directory.EnumerateFiles` fallback works but isn't a persistent folder index |
 | ReFS / FAT indexing | ⛔ | NTFS only |
 | file-list (.efu) as an index source | 🟡 | import/export ✅; not mountable as a live index |
@@ -146,7 +146,7 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 |---|---|---|
 | HTTP server (web UI) | ✅ | ➕ serves an HTML search page at `/` plus the JSON `/search?q=` endpoint; localhost-only by design (no LAN binding — security choice ⭐) |
 | ETP / FTP server | ⛔ | proprietary protocol; HTTP covers cross-device search |
-| Everything service | ⛔ | see §6 non-admin |
+| Everything service | ➕ | `tools/WhereIsIt.EngineService` — engine-over-named-pipe host (see §6) |
 | `es.exe` CLI | 🟡 | ➕ `tools/WhereIsIt.Es` builds `es.exe` — same engine + query syntax, output/sort/export/modifier flags. Searches in-proc (one-shot) rather than over Everything's live-index IPC |
 | IPC / SDK (DLL + messages) | ⛔ | needs Everything's undocumented WM_COPYDATA/IPC binary protocol for third-party interop |
 | URL protocol / "Search Everything" shell verb | ⛔ | shell integration |
@@ -169,7 +169,7 @@ infrastructure plus one marginal convenience:
 | **Everything-compatible IPC SDK** | Byte-compatible reimplementation of Everything's **undocumented WM_COPYDATA/IPC protocol** so third-party tools interop (a native `es.exe` CLI ships in `tools/WhereIsIt.Es`) |
 | **ETP / FTP server** | **Undocumented proprietary protocol** |
 | **Shell context-menu extension** | A separate registered **Windows COM** component |
-| **Background (non-admin) service** | A **Windows service** hosting the native engine |
+| Windows-**service** auto-install | The engine-over-pipe host ships (`tools/WhereIsIt.EngineService`, runs now / `sc create`); a true auto-installing service needs `Microsoft.Extensions.Hosting.WindowsServices` + a build |
 | Bracketless function OR (`ext:cs \| ext:txt`) | Works *with* brackets today; marginal tokenizer change otherwise |
 
 These cannot be implemented **and verified** without a Windows .NET 10 / WinUI /
