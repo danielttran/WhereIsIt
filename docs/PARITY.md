@@ -67,8 +67,8 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | `frn:` file reference number | ⛔ | niche NTFS internal id |
 | `infolder:` | ✅ | ➕ explicit alias for `child:` (recursive "anywhere under this folder") |
 | image dimensions `width:` / `height:` / `dimensions:` | ➕ | dependency-free header reader (`ImageDimensions`) for PNG/JPEG/GIF/BMP/WEBP; post-filtered per row |
-| audio tags `artist:`,`album:`,`title:`,`year:`,`genre:`,`track:`,`comment:` | ➕ | dependency-free ID3 reader (`AudioTags`, ID3v2.3/2.4 + ID3v1) — MP3 coverage; matched as case-insensitive substrings |
-| other property functions: `bitrate:`,`orientation:`,`duration:`,`channels:`,`samplerate:`,… (and tags for FLAC/M4A/Office/PDF) | ⛔ | need a broader per-format metadata index (large; see §9) |
+| audio tags `artist:`,`album:`,`title:`,`year:`,`genre:`,`track:`,`comment:` | ➕ | dependency-free `AudioTags` reader — MP3 (ID3v2.3/2.4 + ID3v1) and FLAC (Vorbis comments); matched as case-insensitive substrings |
+| other property functions: `bitrate:`,`orientation:`,`duration:`,`channels:`,`samplerate:`,… (and tags for M4A/Office/PDF) | ⛔ | need a broader per-format metadata index (large; see §9) |
 
 ## 3. Boolean / grouping
 
