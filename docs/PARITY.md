@@ -45,7 +45,7 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | `da:` date accessed | ✅ | |
 | `dr:` date run | ➕ | backed by `RunCountService` last-run timestamps (persisted in settings) via the decorator's path-keyed lookup |
 | `rc:` / `runcount:` | ➕ | backed by `RunCountService` open counts via the decorator's path-keyed lookup |
-| date keywords (today/yesterday/tomorrow/this-,last-week/month/year, month + weekday names) | 🟡 | ➕ `tomorrow`, month names, and weekday names (most-recent occurrence) added; only `last N <unit>` relative forms still unparsed |
+| date keywords (today/yesterday/tomorrow, this-/last-/past- week/month/year, month + weekday names) | 🟡 | ➕ `tomorrow`, month names, weekday names (most-recent), and rolling `pastweek`/`pastmonth`/`pastyear` added; only arbitrary `last N <unit>` (space-separated, e.g. "last 3 days") still unparsed — needs multi-token date values |
 | date ranges `a..b`, comparisons | ✅ | |
 | `attrib:` / `attributes:` (rhsad) | ✅ | |
 | `child:<path>` | ✅ | |
@@ -149,9 +149,9 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 
 ## 9. Notable remaining gaps (ranked by parity value vs. effort)
 
-1. **`last N <unit>` relative date forms** — the remaining `ParseDateSpec`
-   gap (today/yesterday/tomorrow/this-,last- periods, month + weekday names
-   are all parsed now).
+1. **Arbitrary `last N <unit>` (space-separated) date forms** — e.g.
+   `dm:last 3 days`. Needs the tokenizer to keep multi-word date values
+   together inside a function; the fixed rolling `past*` keywords are parsed.
 2. **Explicit `< >` grouping** — needs a flat-clause → expression-tree rewrite
    across both engines' match hot paths; high blind-change risk for a niche
    power-user feature, so left for a Windows session with a build.

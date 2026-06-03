@@ -180,6 +180,24 @@ public class QueryParserExtendedTests
     }
 
     [Fact]
+    public void ParseDateSpec_PastWeek_IsRollingSevenDayWindow()
+    {
+        var now = new System.DateTime(2026, 6, 3, 10, 0, 0);
+        var r = QueryParser.ParseDateSpec("pastweek", now);
+        r.Should().NotBeNull();
+        r!.Min.Should().Be(new System.DateTime(2026, 6, 3).AddDays(-7)); // from today's date
+        r.Max.Should().Be(now);
+    }
+
+    [Fact]
+    public void ParseDateSpec_PastMonthAndYear_AreRolling()
+    {
+        var now = new System.DateTime(2026, 6, 3, 10, 0, 0);
+        QueryParser.ParseDateSpec("pastmonth", now)!.Min.Should().Be(new System.DateTime(2026, 5, 3));
+        QueryParser.ParseDateSpec("pastyear", now)!.Min.Should().Be(new System.DateTime(2025, 6, 3));
+    }
+
+    [Fact]
     public void ParseDateSpec_Weekday_ResolvesToMostRecentOccurrence()
     {
         // 2026-06-03 is a Wednesday; the most recent Monday is 2026-06-01.

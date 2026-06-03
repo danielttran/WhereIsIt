@@ -868,6 +868,11 @@ public static class QueryParser
             "lastmonth" => MonthOffsetRange(today, -1),
             "thisyear"  => YearRange(today.Year),
             "lastyear"  => YearRange(today.Year - 1),
+            // Rolling "past N to now" ranges (distinct from the calendar-aligned
+            // last* keywords above), matching Everything's past* functions.
+            "pastweek"  => new DateRange(today.AddDays(-7), now),
+            "pastmonth" => new DateRange(today.AddMonths(-1), now),
+            "pastyear"  => new DateRange(today.AddYears(-1), now),
             _ => (DateRange?)null
         };
         if (kw is not null) return kw;
