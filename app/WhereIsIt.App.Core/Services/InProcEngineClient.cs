@@ -274,9 +274,11 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         // short-circuited above without paying for GetRelativePath/Replace.
         var relative = Path.GetRelativePath(root, fullPath).Replace('\\', '/');
 
-        // Grouped boolean query (< >): evaluate the expression tree.
+        // Grouped boolean query (< >): evaluate term leaves here as a candidate
+        // generator; function leaves are treated as a superset (true) and the
+        // always-on filtering decorator narrows them with full per-row logic.
         if (q.TermExpr is not null)
-            return BooleanQuery.Eval(q.TermExpr, alts =>
+            return BooleanQuery.EvalTerms(q.TermExpr, alts =>
             {
                 foreach (var alt in alts)
                     if (AlternativeMatches(alt, null, q, name, relative, cmp)) return true;

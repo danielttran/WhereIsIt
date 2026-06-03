@@ -26,6 +26,9 @@ public abstract record BoolExpr;
 
 /// <summary>A leaf: OR of substring alternatives (matched like a normal term).</summary>
 public sealed record BoolTerm(IReadOnlyList<string> Alternatives) : BoolExpr;
+/// <summary>A leaf carrying a function token (e.g. <c>ext:cs</c>, <c>size:&gt;1mb</c>)
+/// evaluated by re-parsing it and reusing the engine's per-row filter logic.</summary>
+public sealed record BoolFunc(string Token) : BoolExpr;
 public sealed record BoolNot(BoolExpr Inner) : BoolExpr;
 public sealed record BoolAnd(IReadOnlyList<BoolExpr> Parts) : BoolExpr;
 public sealed record BoolOr(IReadOnlyList<BoolExpr> Parts) : BoolExpr;
@@ -49,17 +52,33 @@ public static class BooleanQuery
         return expr;
     }
 
-    /// <summary>Evaluates the tree, delegating leaf matching to
-    /// <paramref name="matchTerm"/> (which ORs a term's alternatives against the
-    /// current row using the engine's own matching rules).</summary>
-    public static bool Eval(BoolExpr expr, Func<IReadOnlyList<string>, bool> matchTerm) => expr switch
+    /// <summary>Evaluates the tree, delegating each leaf (a <see cref="BoolTerm"/>
+    /// or <see cref="BoolFunc"/>) to <paramref name="evalLeaf"/>.</summary>
+    public static bool Eval(BoolExpr expr, Func<BoolExpr, bool> evalLeaf) => expr switch
     {
-        BoolTerm t => matchTerm(t.Alternatives),
-        BoolNot n  => !Eval(n.Inner, matchTerm),
-        BoolAnd a  => a.Parts.All(p => Eval(p, matchTerm)),
-        BoolOr o   => o.Parts.Any(p => Eval(p, matchTerm)),
-        _          => true,
+        BoolAnd a => a.Parts.All(p => Eval(p, evalLeaf)),
+        BoolOr o  => o.Parts.Any(p => Eval(p, evalLeaf)),
+        BoolNot n => !Eval(n.Inner, evalLeaf),
+        _         => evalLeaf(expr), // BoolTerm or BoolFunc
     };
+
+    /// <summary>Term-only evaluation: function leaves are treated as <c>true</c>
+    /// so a candidate generator (the in-proc engine) returns a superset that the
+    /// always-on filtering decorator then narrows with full per-row function logic.</summary>
+    public static bool EvalTerms(BoolExpr expr, Func<IReadOnlyList<string>, bool> matchTerm)
+        => Eval(expr, leaf => leaf is BoolTerm t ? matchTerm(t.Alternatives) : true);
+
+    /// <summary>Collects every function-leaf token in the tree (for pre-compiling).</summary>
+    public static void CollectFunctionTokens(BoolExpr expr, List<string> into)
+    {
+        switch (expr)
+        {
+            case BoolFunc f: into.Add(f.Token); break;
+            case BoolNot n: CollectFunctionTokens(n.Inner, into); break;
+            case BoolAnd a: foreach (var p in a.Parts) CollectFunctionTokens(p, into); break;
+            case BoolOr o:  foreach (var p in o.Parts) CollectFunctionTokens(p, into); break;
+        }
+    }
 
     // ── recursive-descent parser ────────────────────────────────────────
 
@@ -80,7 +99,7 @@ public static class BooleanQuery
     private static BoolExpr? ParseAnd(List<Atom> atoms, ref int pos)
     {
         var parts = new List<BoolExpr>();
-        while (pos < atoms.Count && atoms[pos].Kind is Tok.Term or Tok.LParen or Tok.Not)
+        while (pos < atoms.Count && atoms[pos].Kind is Tok.Term or Tok.Func or Tok.LParen or Tok.Not)
         {
             var unary = ParseUnary(atoms, ref pos);
             if (unary is null) break;
@@ -116,12 +135,17 @@ public static class BooleanQuery
             pos++;
             return new BoolTerm([a.Text]);
         }
+        if (a.Kind == Tok.Func)
+        {
+            pos++;
+            return new BoolFunc(a.Text);
+        }
         return null; // a stray Or / RParen — let the caller stop
     }
 
     // ── lexer ───────────────────────────────────────────────────────────
 
-    private enum Tok { Term, Or, Not, LParen, RParen }
+    private enum Tok { Term, Func, Or, Not, LParen, RParen }
     private readonly record struct Atom(Tok Kind, string Text);
 
     private static List<Atom> Lex(string s)
@@ -152,10 +176,12 @@ public static class BooleanQuery
             while (i < s.Length && s[i] is not (' ' or '\t' or '<' or '>' or '|' or '!' or '"'))
                 i++;
             var word = s.Substring(start, i - start);
-            // Function tokens (ext:, size:, child:, …) are handled by the global
-            // filter parser, not the boolean term tree, so skip them here.
-            if (word.Length > 0 && !word.Contains(':'))
-                atoms.Add(new Atom(Tok.Term, word));
+            if (word.Length == 0) continue;
+            // Function tokens (ext:, size:, child:, …) become function leaves so
+            // they can be grouped/OR'd; plain words become term leaves.
+            atoms.Add(word.Contains(':')
+                ? new Atom(Tok.Func, word)
+                : new Atom(Tok.Term, word));
         }
         return atoms;
     }

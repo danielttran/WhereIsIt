@@ -54,12 +54,35 @@ public class BooleanQueryTests
     }
 
     [Fact]
-    public void TryParse_SkipsFunctionTokens()
+    public void TryParse_FunctionBecomesLeaf()
     {
-        // ext:cs is a global function, not part of the boolean term tree.
+        // ext:cs is now a function leaf AND-ed with the <a b> group.
         var e = BooleanQuery.TryParse("ext:cs <a b>");
         e.Should().BeOfType<BoolAnd>();
-        ((BoolAnd)e!).Parts.Should().HaveCount(2);
+        var and = (BoolAnd)e!;
+        and.Parts.Should().HaveCount(2);
+        and.Parts.Should().ContainSingle(p => p is BoolFunc f && f.Token == "ext:cs");
+    }
+
+    [Fact]
+    public void TryParse_OrOfFunctionGroups()
+    {
+        // <ext:cs>|<ext:txt> — function-level OR via grouping.
+        var e = BooleanQuery.TryParse("<ext:cs>|<ext:txt>");
+        e.Should().BeOfType<BoolOr>();
+        var or = (BoolOr)e!;
+        or.Parts.Should().HaveCount(2);
+        or.Parts[0].Should().BeOfType<BoolFunc>();
+        or.Parts[1].Should().BeOfType<BoolFunc>();
+    }
+
+    [Fact]
+    public void CollectFunctionTokens_GathersAllFuncLeaves()
+    {
+        var e = BooleanQuery.TryParse("<ext:cs>|<size:>1mb>")!;
+        var tokens = new List<string>();
+        BooleanQuery.CollectFunctionTokens(e, tokens);
+        tokens.Should().Contain("ext:cs");
     }
 
     // ── evaluation ────────────────────────────────────────────────────────
@@ -69,7 +92,7 @@ public class BooleanQueryTests
         var set = new HashSet<string>(present);
         var e = BooleanQuery.TryParse(query);
         e.Should().NotBeNull();
-        return BooleanQuery.Eval(e!, alts => alts.Any(set.Contains));
+        return BooleanQuery.EvalTerms(e!, alts => alts.Any(set.Contains));
     }
 
     [Theory]

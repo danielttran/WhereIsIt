@@ -50,6 +50,9 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
         // listed pattern, all of which must match the whole filename.
         public Regex[]? WholeFilenameRegexes;
         public bool NeedsFullPath;         // true when any predicate needs the joined path
+        // Pre-compiled per-function-leaf queries for grouped boolean queries that
+        // OR/group functions (e.g. <ext:cs>|<ext:txt>). Keyed by the raw token.
+        public Dictionary<string, CompiledQuery>? FuncLeaves;
     }
 
     private CompiledQuery currentCompiled = new();
@@ -193,6 +196,25 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
                     }
                 }
                 c.ClauseRegexes = arr;
+            }
+        }
+
+        // Pre-compile each distinct function leaf in a grouped boolean query so
+        // the per-row evaluation reuses the normal Passes() filter logic without
+        // re-parsing the token for every row.
+        if (parsed.TermExpr is not null)
+        {
+            var tokens = new List<string>();
+            BooleanQuery.CollectFunctionTokens(parsed.TermExpr, tokens);
+            if (tokens.Count > 0)
+            {
+                var map = new Dictionary<string, CompiledQuery>(StringComparer.Ordinal);
+                foreach (var tok in tokens)
+                {
+                    if (map.ContainsKey(tok)) continue;
+                    map[tok] = Compile(QueryParser.Parse(tok));
+                }
+                c.FuncLeaves = map;
             }
         }
         return c;
@@ -463,10 +485,17 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             ? fullPath : QueryParser.RemoveDiacritics(fullPath);
 
         // Grouped boolean query (< >): evaluate the expression tree instead of
-        // the flat clause list. Leaves match via the same substring rules.
+        // the flat clause list. Term leaves match via the substring rules;
+        // function leaves reuse Passes() against their pre-compiled sub-query.
         if (q.TermExpr is not null)
-            return BooleanQuery.Eval(q.TermExpr,
-                alts => MatchAnyAlternative(alts, q, row.Name, matchName, fullPath, matchFull, cmp));
+            return BooleanQuery.Eval(q.TermExpr, leaf => leaf switch
+            {
+                BoolTerm t => MatchAnyAlternative(t.Alternatives, q, row.Name, matchName, fullPath, matchFull, cmp),
+                BoolFunc f => compiled.FuncLeaves is not null
+                              && compiled.FuncLeaves.TryGetValue(f.Token, out var fc)
+                              && Passes(row, fc),
+                _ => true,
+            });
 
         int rxIdx = 0;
         var regexes = compiled.ClauseRegexes;
