@@ -49,6 +49,24 @@ public class ImageDimensionsTests
     }
 
     [Fact]
+    public void ParseExifOrientation_ReadsValue()
+    {
+        // JPEG with an APP1/Exif IFD0 carrying Orientation (tag 0x0112) = 6.
+        byte[] jpg =
+        {
+            0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x22,             // SOI, APP1, segLen=34
+            0x45, 0x78, 0x69, 0x66, 0x00, 0x00,             // "Exif\0\0"
+            0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, // TIFF (little-endian), IFD@8
+            0x01, 0x00,                                     // 1 entry
+            0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, // tag 0x0112, SHORT, count 1
+            0x06, 0x00, 0x00, 0x00,                         // value = 6
+            0x00, 0x00, 0x00, 0x00,                         // next IFD = 0
+        };
+        ImageDimensions.ParseExifOrientation(jpg, jpg.Length, out var o).Should().BeTrue();
+        o.Should().Be(6);
+    }
+
+    [Fact]
     public void TryParse_NonImage_ReturnsFalse()
     {
         byte[] junk = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 };

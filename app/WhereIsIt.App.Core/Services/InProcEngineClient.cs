@@ -274,6 +274,13 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
             if (q.Height is not null && !q.Height.Matches((ulong)h)) return false;
         }
 
+        if (q.Orientation is not null)
+        {
+            if (isDir) return false;
+            if (!ImageDimensions.TryReadOrientation(fullPath, out int o)) return false;
+            if (!q.Orientation.Matches((ulong)o)) return false;
+        }
+
         if (q.MediaFilters.Count > 0)
         {
             if (isDir) return false;

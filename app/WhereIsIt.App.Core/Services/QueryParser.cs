@@ -77,6 +77,8 @@ public sealed record ParsedQuery
     public SizeRange? Width { get; init; }
     /// <summary><c>height:</c> / <c>dimensions:</c> — image pixel height.</summary>
     public SizeRange? Height { get; init; }
+    /// <summary><c>orientation:</c> — EXIF orientation value (1–8).</summary>
+    public SizeRange? Orientation { get; init; }
     /// <summary>Audio tag filters (<c>artist:</c>/<c>album:</c>/<c>title:</c>/
     /// <c>year:</c>/<c>genre:</c>/<c>track:</c>/<c>comment:</c>), matched as
     /// case-insensitive substrings against ID3 tags.</summary>
@@ -109,7 +111,8 @@ public sealed record ParsedQuery
         && ChildCount == null && ChildFileCount == null && ChildFolderCount == null
         && DateRun == null && RunCount == null && TermExpr == null && Depth == null
         && Width == null && Height == null && MediaFilters.Count == 0
-        && Duration == null && SampleRate == null && Channels == null && Bitrate == null;
+        && Duration == null && SampleRate == null && Channels == null && Bitrate == null
+        && Orientation == null;
 }
 
 /// <summary>Everything-compatible duplicate-grouping keys.</summary>
@@ -268,6 +271,7 @@ public static class QueryParser
         SizeRange? depth = null;
         SizeRange? widthRange = null;
         SizeRange? heightRange = null;
+        SizeRange? orientationRange = null;
         var mediaFilters = new List<MediaFilter>();
         SizeRange? durationRange = null;
         SizeRange? sampleRateRange = null;
@@ -563,6 +567,11 @@ public static class QueryParser
                 ParseDimensions(lower[11..], ref widthRange, ref heightRange);
                 continue;
             }
+            if (lower.StartsWith("orientation:") && lower.Length > 12)
+            {
+                orientationRange = ParseIntExpression(lower[12..]);
+                continue;
+            }
 
             // ── audio tags (artist:/album:/title:/year:/genre:/track:/comment:) ──
             if (TryMediaFilter(lower, token, mediaFilters)) continue;
@@ -650,6 +659,7 @@ public static class QueryParser
             Depth            = depth,
             Width            = widthRange,
             Height           = heightRange,
+            Orientation      = orientationRange,
             MediaFilters     = mediaFilters.Count > 0 ? mediaFilters.ToArray() : [],
             Duration         = durationRange,
             SampleRate       = sampleRateRange,

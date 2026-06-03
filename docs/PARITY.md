@@ -70,7 +70,7 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | audio tags `artist:`,`album:`,`title:`,`year:`,`genre:`,`track:`,`comment:` | ➕ | dependency-free `AudioTags` reader — MP3 (ID3v2.3/2.4 + ID3v1), FLAC + OGG (Vorbis comments), and M4A/MP4 (iTunes atoms); matched as case-insensitive substrings |
 | audio stream `duration:` / `samplerate:` / `channels:` / `bitrate:` | ➕ | FLAC STREAMINFO (rate/channels/duration) + M4A `mvhd` (duration); `bitrate:` is the average (size × 8 ÷ duration, kbps); `duration:` accepts seconds or `H:M:S` |
 | document properties `author:`/`subject:`/`keywords:`/`title:`/`comment:` | ➕ | OOXML core props (.docx/.xlsx/.pptx via ZIP + Dublin-Core) and best-effort PDF `/Info`; unified with audio tags through `MediaProperties` |
-| other property functions: `orientation:` (EXIF), … | ⛔ | EXIF/per-format extras — niche; need a broader metadata index (see §9) |
+| image `orientation:` (EXIF) | ➕ | reads the JPEG EXIF Orientation tag (1–8) |
 
 ## 3. Boolean / grouping
 

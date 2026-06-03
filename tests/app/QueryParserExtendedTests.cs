@@ -190,6 +190,15 @@ public class QueryParserExtendedTests
         QueryParser.Parse("width:>100").IsEmpty.Should().BeFalse();
     }
 
+    [Fact]
+    public void Parse_Orientation_Parses()
+    {
+        var q = QueryParser.Parse("orientation:6");
+        q.Orientation.Should().NotBeNull();
+        q.Orientation!.Low.Should().Be(6UL);
+        q.IsEmpty.Should().BeFalse();
+    }
+
     // ── audio tags (artist:/album:/...) ───────────────────────────────────
 
     [Fact]

@@ -129,6 +129,7 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             || parsed.Depth is not null
             || parsed.Width is not null
             || parsed.Height is not null
+            || parsed.Orientation is not null
             || parsed.MediaFilters.Count > 0
             || parsed.Duration is not null
             || parsed.SampleRate is not null
@@ -324,7 +325,7 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
         if (q.ChildCount is not null || q.ChildFileCount is not null
             || q.ChildFolderCount is not null) return true;
         if (q.Depth is not null) return true;
-        if (q.Width is not null || q.Height is not null) return true;
+        if (q.Width is not null || q.Height is not null || q.Orientation is not null) return true;
         if (q.MediaFilters.Count > 0) return true;
         if (q.Duration is not null || q.SampleRate is not null || q.Channels is not null) return true;
         if (q.Bitrate is not null) return true;
@@ -480,6 +481,13 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             if (!ImageDimensions.TryRead(fullPath, out int w, out int h)) return false;
             if (q.Width is not null && !q.Width.Matches((ulong)w)) return false;
             if (q.Height is not null && !q.Height.Matches((ulong)h)) return false;
+        }
+
+        if (q.Orientation is not null)
+        {
+            if (isDir) return false;
+            if (!ImageDimensions.TryReadOrientation(fullPath, out int o)) return false;
+            if (!q.Orientation.Matches((ulong)o)) return false;
         }
 
         if (q.MediaFilters.Count > 0)

@@ -37,6 +37,72 @@ public static class ImageDimensions
         catch { return false; }
     }
 
+    /// <summary>Reads the EXIF orientation (1–8) from a JPEG, for the
+    /// <c>orientation:</c> search function. False when absent/unreadable.</summary>
+    public static bool TryReadOrientation(string path, out int orientation)
+    {
+        orientation = 0;
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            int len = (int)Math.Min(fs.Length, HeaderBytes);
+            if (len < 12) return false;
+            var b = new byte[len];
+            int read = 0;
+            while (read < len) { int n = fs.Read(b, read, len - read); if (n <= 0) break; read += n; }
+            return ParseExifOrientation(b, read, out orientation);
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Parses EXIF orientation from an in-memory JPEG buffer. Exposed for tests.</summary>
+    public static bool ParseExifOrientation(byte[] b, int len, out int orientation)
+    {
+        orientation = 0;
+        if (len < 4 || b[0] != 0xFF || b[1] != 0xD8) return false;
+        int p = 2;
+        while (p + 4 <= len)
+        {
+            if (b[p] != 0xFF) { p++; continue; }
+            byte marker = b[p + 1];
+            if (marker == 0xFF) { p++; continue; }
+            if (marker is 0xD8 or 0xD9 || (marker >= 0xD0 && marker <= 0xD7)) { p += 2; continue; }
+            int segLen = Be16(b, p + 2);
+            if (segLen < 2) return false;
+            // APP1 with an "Exif\0\0" header carries the TIFF/IFD with orientation.
+            if (marker == 0xE1 && p + 10 <= len
+                && b[p + 4] == (byte)'E' && b[p + 5] == (byte)'x' && b[p + 6] == (byte)'i' && b[p + 7] == (byte)'f'
+                && b[p + 8] == 0 && b[p + 9] == 0)
+            {
+                int tiff = p + 10;
+                if (tiff + 8 > len) return false;
+                bool le = b[tiff] == 0x49 && b[tiff + 1] == 0x49;
+                bool be = b[tiff] == 0x4D && b[tiff + 1] == 0x4D;
+                if (!le && !be) return false;
+                int ifd = tiff + ReadU32(b, tiff + 4, le);
+                if (ifd + 2 > len) return false;
+                int count = ReadU16(b, ifd, le);
+                int e = ifd + 2;
+                for (int k = 0; k < count && e + 12 <= len; k++, e += 12)
+                {
+                    if (ReadU16(b, e, le) == 0x0112)
+                    {
+                        orientation = ReadU16(b, e + 8, le);
+                        return orientation is >= 1 and <= 8;
+                    }
+                }
+                return false;
+            }
+            p += 2 + segLen;
+        }
+        return false;
+    }
+
+    private static int ReadU16(byte[] b, int i, bool le) => le ? (b[i] | (b[i + 1] << 8)) : ((b[i] << 8) | b[i + 1]);
+    private static int ReadU32(byte[] b, int i, bool le) => le
+        ? (b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | (b[i + 3] << 24))
+        : ((b[i] << 24) | (b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3]);
+
     /// <summary>Parses dimensions from an in-memory header buffer. Exposed for tests.</summary>
     public static bool TryParse(byte[] b, int len, out int width, out int height)
     {
