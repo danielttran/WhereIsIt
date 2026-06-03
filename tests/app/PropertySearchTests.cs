@@ -63,6 +63,27 @@ public class PropertySearchTests
     }
 
     [Fact]
+    public void DocumentProps_ReadsPdfInfoStrings()
+    {
+        var pdf =
+            "%PDF-1.4\n1 0 obj\n<< /Title (Annual Report) /Author (Jane Doe) " +
+            "/Subject (Finance) /Keywords (budget 2026) >>\nendobj\n" +
+            "trailer\n<< /Info 1 0 R >>\n%%EOF";
+        var path = Path.Combine(Path.GetTempPath(), "whereisit-" + Guid.NewGuid().ToString("N") + ".pdf");
+        File.WriteAllText(path, pdf);
+        try
+        {
+            DocumentProps.TryRead(path, out var p).Should().BeTrue();
+            p.Title.Should().Be("Annual Report");
+            p.Author.Should().Be("Jane Doe");
+            p.Keywords.Should().Be("budget 2026");
+            MediaProperties.Match([new MediaFilter(MediaField.Author, "jane")], path, false, true)
+                .Should().BeTrue();
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
     public void DocumentProps_NonOoxml_ReturnsFalse()
     {
         var path = Path.Combine(Path.GetTempPath(), "whereisit-" + Guid.NewGuid().ToString("N") + ".txt");

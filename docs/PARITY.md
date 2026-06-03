@@ -69,8 +69,8 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | image dimensions `width:` / `height:` / `dimensions:` | ➕ | dependency-free header reader (`ImageDimensions`) for PNG/JPEG/GIF/BMP/WEBP; post-filtered per row |
 | audio tags `artist:`,`album:`,`title:`,`year:`,`genre:`,`track:`,`comment:` | ➕ | dependency-free `AudioTags` reader — MP3 (ID3v2.3/2.4 + ID3v1), FLAC + OGG (Vorbis comments), and M4A/MP4 (iTunes atoms); matched as case-insensitive substrings |
 | audio stream `duration:` / `samplerate:` / `channels:` / `bitrate:` | ➕ | FLAC STREAMINFO (rate/channels/duration) + M4A `mvhd` (duration); `bitrate:` is the average (size × 8 ÷ duration, kbps); `duration:` accepts seconds or `H:M:S` |
-| document properties `author:`/`subject:`/`keywords:`/`title:`/`comment:` | ➕ | OOXML core props (`DocumentProps`, .docx/.xlsx/.pptx) via ZIP + Dublin-Core XML; unified with audio tags through `MediaProperties` |
-| other property functions: `orientation:`, PDF document info, … | ⛔ | need a broader per-format metadata index (large; see §9) |
+| document properties `author:`/`subject:`/`keywords:`/`title:`/`comment:` | ➕ | OOXML core props (.docx/.xlsx/.pptx via ZIP + Dublin-Core) and best-effort PDF `/Info`; unified with audio tags through `MediaProperties` |
+| other property functions: `orientation:` (EXIF), … | ⛔ | EXIF/per-format extras — niche; need a broader metadata index (see §9) |
 
 ## 3. Boolean / grouping
 
