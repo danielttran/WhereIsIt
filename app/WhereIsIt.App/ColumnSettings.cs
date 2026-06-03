@@ -33,6 +33,22 @@ public partial class ColumnSettings : ObservableObject
     private bool showPreviewPane;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(DimensionsColumnWidth), nameof(DimensionsColumnVisibility))]
+    private bool showDimensionsColumn;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ArtistColumnWidth), nameof(ArtistColumnVisibility))]
+    private bool showArtistColumn;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AlbumColumnWidth), nameof(AlbumColumnVisibility))]
+    private bool showAlbumColumn;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AuthorColumnWidth), nameof(AuthorColumnVisibility))]
+    private bool showAuthorColumn;
+
+    [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(ThumbnailColumnWidth), nameof(ThumbnailColumnVisibility), nameof(ThumbnailRenderSize),
         nameof(IsThumbOff), nameof(IsThumbSmall), nameof(IsThumbMedium), nameof(IsThumbLarge), nameof(IsThumbXL))]
     private int thumbnailSizePx;
@@ -60,4 +76,14 @@ public partial class ColumnSettings : ObservableObject
 
     public GridLength PreviewPaneWidth => ShowPreviewPane ? new GridLength(320) : new GridLength(0);
     public Visibility PreviewPaneVisibility => ShowPreviewPane ? Visibility.Visible : Visibility.Collapsed;
+
+    public GridLength DimensionsColumnWidth => ShowDimensionsColumn ? new GridLength(110) : new GridLength(0);
+    public GridLength ArtistColumnWidth     => ShowArtistColumn     ? new GridLength(160) : new GridLength(0);
+    public GridLength AlbumColumnWidth      => ShowAlbumColumn      ? new GridLength(160) : new GridLength(0);
+    public GridLength AuthorColumnWidth     => ShowAuthorColumn     ? new GridLength(160) : new GridLength(0);
+
+    public Visibility DimensionsColumnVisibility => ShowDimensionsColumn ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility ArtistColumnVisibility     => ShowArtistColumn     ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility AlbumColumnVisibility      => ShowAlbumColumn      ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility AuthorColumnVisibility     => ShowAuthorColumn     ? Visibility.Visible : Visibility.Collapsed;
 }

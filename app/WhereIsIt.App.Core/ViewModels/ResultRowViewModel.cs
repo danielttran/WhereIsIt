@@ -26,6 +26,13 @@ public partial class ResultRowViewModel : ObservableObject
     [ObservableProperty] private string attributesText = string.Empty;
     [ObservableProperty] private int runCount;
 
+    // Optional metadata-property columns, filled lazily by the App layer (which
+    // reads the file header off the UI thread) only when the column is shown.
+    [ObservableProperty] private string dimensionsText = string.Empty;
+    [ObservableProperty] private string artistText = string.Empty;
+    [ObservableProperty] private string albumText = string.Empty;
+    [ObservableProperty] private string authorText = string.Empty;
+
     // Newline-separated literal terms the result list should highlight in the
     // Name column. Shared across all rows of the current search; set by
     // ResultsListViewModel.BindResults so the highlighter attached property in

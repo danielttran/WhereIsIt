@@ -92,8 +92,8 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | sort by created/accessed | ✅ | native schema v10 stores all three timestamps |
 | sort by extension(type)/attributes | ✅ | |
 | run-count column | ✅ | persisted `RunCountService` ⭐ |
-| add/remove/reorder/resize columns | 🟡 | Created/Accessed/Runs toggle + thumbnail gutter; arbitrary column reorder/resize not yet |
-| custom property columns | ⛔ | tied to property index (§9) |
+| add/remove columns | ✅ | Created/Accessed/Runs + Dimensions/Artist/Album/Author toggles (View menu), thumbnail gutter; free drag-reorder/resize is the only column nicety still missing |
+| custom property columns | ➕ | Dimensions/Artist/Album/Author columns (View menu), lazily read per visible row via the image/audio/document property readers |
 | `sort:` in query | ✅ | native `sort:asc`/`sort:desc` |
 
 ## 5. UI / shell
@@ -165,9 +165,10 @@ infrastructure plus one marginal convenience:
 
 | Remaining item | Hard blocker |
 |---|---|
-| **Custom property columns** | Dynamic WinUI `ListView` columns bound to the metadata readers; needs a build to do safely |
+| Free column drag-reorder / resize | A fixed-column toggle set ships (incl. property columns); arbitrary drag-reorder/resize needs a `DataGrid`-style control + a build |
 | **Everything-compatible IPC SDK** | Byte-compatible reimplementation of Everything's **undocumented WM_COPYDATA/IPC protocol** so third-party tools interop (a native `es.exe` CLI ships in `tools/WhereIsIt.Es`) |
-| **ETP / FTP server** | **Undocumented proprietary protocol** |
+| **ETP server** | Everything's **undocumented proprietary** transfer protocol (a localhost HTTP search server + web UI ships instead) |
+| **FTP server** | A standard FTP server is feasible but a large, security-sensitive network service; deliberately not shipped (localhost HTTP covers remote search) |
 | Modern (always-visible) Win11 context menu | The classic registry verb ships (`ShellMenuRegistration`); a Win11 *primary* context-menu entry additionally needs a packaged `IExplorerCommand` **COM** handler |
 | Bracketless function OR (`ext:cs \| ext:txt`) | Works *with* brackets today; marginal tokenizer change otherwise |
 

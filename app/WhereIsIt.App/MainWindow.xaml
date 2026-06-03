@@ -134,6 +134,18 @@
                 <ToggleMenuFlyoutItem Text="Runs"
                     IsChecked="{x:Bind app:ColumnSettings.Current.ShowRunCountColumn, Mode=TwoWay}"
                     Click="OnColumnToggleClick"/>
+                <ToggleMenuFlyoutItem Text="Dimensions"
+                    IsChecked="{x:Bind app:ColumnSettings.Current.ShowDimensionsColumn, Mode=TwoWay}"
+                    Click="OnPropertyColumnToggleClick"/>
+                <ToggleMenuFlyoutItem Text="Artist"
+                    IsChecked="{x:Bind app:ColumnSettings.Current.ShowArtistColumn, Mode=TwoWay}"
+                    Click="OnPropertyColumnToggleClick"/>
+                <ToggleMenuFlyoutItem Text="Album"
+                    IsChecked="{x:Bind app:ColumnSettings.Current.ShowAlbumColumn, Mode=TwoWay}"
+                    Click="OnPropertyColumnToggleClick"/>
+                <ToggleMenuFlyoutItem Text="Author"
+                    IsChecked="{x:Bind app:ColumnSettings.Current.ShowAuthorColumn, Mode=TwoWay}"
+                    Click="OnPropertyColumnToggleClick"/>
                 <MenuFlyoutSeparator/>
                 <ToggleMenuFlyoutItem Text="Preview pane"
                     IsChecked="{x:Bind app:ColumnSettings.Current.ShowPreviewPane, Mode=TwoWay}"
@@ -211,6 +223,10 @@
                     <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.RunCountColumnWidth, Mode=OneWay}"/>
                     <ColumnDefinition Width="100"/>
                     <ColumnDefinition Width="80"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.DimensionsColumnWidth, Mode=OneWay}"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.ArtistColumnWidth, Mode=OneWay}"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AlbumColumnWidth, Mode=OneWay}"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AuthorColumnWidth, Mode=OneWay}"/>
                 </Grid.ColumnDefinitions>
                 <Button Grid.Column="1" Style="{StaticResource ColumnHeaderButton}"
                         Command="{x:Bind ViewModel.ResultsList.SortByCommand}" CommandParameter="name">
@@ -271,6 +287,14 @@
                         <TextBlock Text="Attr"/><TextBlock Text="{x:Bind ViewModel.ResultsList.AttributesSortIndicator, Mode=OneWay}" Opacity="0.7"/>
                     </StackPanel>
                 </Button>
+                <Button Grid.Column="10" Style="{StaticResource ColumnHeaderButton}" Content="Dimensions"
+                        Visibility="{x:Bind app:ColumnSettings.Current.DimensionsColumnVisibility, Mode=OneWay}"/>
+                <Button Grid.Column="11" Style="{StaticResource ColumnHeaderButton}" Content="Artist"
+                        Visibility="{x:Bind app:ColumnSettings.Current.ArtistColumnVisibility, Mode=OneWay}"/>
+                <Button Grid.Column="12" Style="{StaticResource ColumnHeaderButton}" Content="Album"
+                        Visibility="{x:Bind app:ColumnSettings.Current.AlbumColumnVisibility, Mode=OneWay}"/>
+                <Button Grid.Column="13" Style="{StaticResource ColumnHeaderButton}" Content="Author"
+                        Visibility="{x:Bind app:ColumnSettings.Current.AuthorColumnVisibility, Mode=OneWay}"/>
             </Grid>
 
             <!-- Empty state overlay -->
@@ -340,6 +364,10 @@
                                 <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.RunCountColumnWidth, Mode=OneWay}"/>
                                 <ColumnDefinition Width="100"/>
                                 <ColumnDefinition Width="80"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.DimensionsColumnWidth, Mode=OneWay}"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.ArtistColumnWidth, Mode=OneWay}"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AlbumColumnWidth, Mode=OneWay}"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AuthorColumnWidth, Mode=OneWay}"/>
                             </Grid.ColumnDefinitions>
                             <Image Grid.Column="0"
                                    Source="{x:Bind app:Converters.AsImageSource(ThumbnailSource), Mode=OneWay}"
@@ -362,6 +390,10 @@
                                        HorizontalAlignment="Right" Opacity="0.55"/>
                             <TextBlock Grid.Column="8" Text="{x:Bind ExtensionText, Mode=OneWay}" TextTrimming="CharacterEllipsis" Opacity="0.6"/>
                             <TextBlock Grid.Column="9" Text="{x:Bind AttributesText, Mode=OneWay}" Opacity="0.6"/>
+                            <TextBlock Grid.Column="10" Text="{x:Bind DimensionsText, Mode=OneWay}" Opacity="0.6" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock Grid.Column="11" Text="{x:Bind ArtistText, Mode=OneWay}" Opacity="0.6" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock Grid.Column="12" Text="{x:Bind AlbumText, Mode=OneWay}" Opacity="0.6" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock Grid.Column="13" Text="{x:Bind AuthorText, Mode=OneWay}" Opacity="0.6" TextTrimming="CharacterEllipsis"/>
                         </Grid>
                     </DataTemplate>
                 </ListView.ItemTemplate>

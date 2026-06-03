@@ -51,6 +51,54 @@ public sealed partial class MainWindow : Window
         Activated += OnFirstActivatedShowRestorePrompt;
     }
 
+    // ── Custom property columns ─────────────────────────────────────────
+
+    private void OnPropertyColumnToggleClick(object sender, RoutedEventArgs e)
+    {
+        var c = ColumnSettings.Current;
+        settingsService?.SavePropertyColumns(c.ShowDimensionsColumn, c.ShowArtistColumn, c.ShowAlbumColumn, c.ShowAuthorColumn);
+        // Refresh values for already-realized rows so a freshly-enabled column fills in.
+        foreach (var row in ViewModel.ResultsList.Rows) LoadPropertyColumns(row);
+    }
+
+    private void LoadPropertyColumns(ViewModels.ResultRowViewModel row)
+    {
+        var c = ColumnSettings.Current;
+        bool needAudio = c.ShowArtistColumn || c.ShowAlbumColumn;
+        if (!c.ShowDimensionsColumn && !needAudio && !c.ShowAuthorColumn) return;
+
+        var path = row.FullPath;
+        if (string.IsNullOrEmpty(path)) return;
+
+        _ = System.Threading.Tasks.Task.Run(() =>
+        {
+            string dim = string.Empty, artist = string.Empty, album = string.Empty, author = string.Empty;
+            try
+            {
+                if (c.ShowDimensionsColumn &&
+                    WhereIsIt.App.Services.ImageDimensions.TryRead(path, out int w, out int h))
+                    dim = $"{w}×{h}";
+                if (needAudio && WhereIsIt.App.Services.AudioTags.TryRead(path, out var tags))
+                {
+                    artist = tags.Artist ?? string.Empty;
+                    album = tags.Album ?? string.Empty;
+                }
+                if (c.ShowAuthorColumn &&
+                    WhereIsIt.App.Services.DocumentProps.TryRead(path, out var doc))
+                    author = doc.Author ?? string.Empty;
+            }
+            catch { /* unreadable — leave blank */ }
+
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (c.ShowDimensionsColumn) row.DimensionsText = dim;
+                if (c.ShowArtistColumn) row.ArtistText = artist;
+                if (c.ShowAlbumColumn) row.AlbumText = album;
+                if (c.ShowAuthorColumn) row.AuthorText = author;
+            });
+        });
+    }
+
     private void OnShellMenuToggleClick(object sender, RoutedEventArgs e)
     {
         bool on = (sender as ToggleMenuFlyoutItem)?.IsChecked ?? false;
@@ -326,6 +374,7 @@ public sealed partial class MainWindow : Window
 
         await row.EnsureLoadedAsync(System.Threading.CancellationToken.None);
         if (runCountService is not null) row.RunCount = runCountService.Get(row.FullPath);
+        LoadPropertyColumns(row);
 
         var thumbs = thumbnailService;
         var size = thumbs?.CurrentSize ?? WhereIsIt.App.Services.ThumbnailSize.Off;

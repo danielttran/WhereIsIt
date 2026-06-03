@@ -20,6 +20,10 @@ public static class AppBootstrap
         ColumnSettings.Current.ShowAccessedColumn = settings.ShowAccessedColumn;
         ColumnSettings.Current.ShowRunCountColumn = settings.ShowRunCountColumn;
         ColumnSettings.Current.ShowPreviewPane    = settings.ShowPreviewPane;
+        ColumnSettings.Current.ShowDimensionsColumn = settings.ShowDimensionsColumn;
+        ColumnSettings.Current.ShowArtistColumn   = settings.ShowArtistColumn;
+        ColumnSettings.Current.ShowAlbumColumn    = settings.ShowAlbumColumn;
+        ColumnSettings.Current.ShowAuthorColumn   = settings.ShowAuthorColumn;
         ColumnSettings.Current.ThumbnailSizePx    = settings.ThumbnailSizePx;
 
         var history = new SearchHistory();

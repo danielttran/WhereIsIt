@@ -186,6 +186,20 @@ public sealed class AppSettingsService : IDisposable
         ScheduleFlush();
     }
 
+    public void SavePropertyColumns(bool dimensions, bool artist, bool album, bool author)
+    {
+        lock (gate)
+        {
+            cached ??= LoadFromDisk();
+            cached.ShowDimensionsColumn = dimensions;
+            cached.ShowArtistColumn = artist;
+            cached.ShowAlbumColumn = album;
+            cached.ShowAuthorColumn = author;
+            revision++;
+        }
+        ScheduleFlush();
+    }
+
     public void SavePreviewPane(bool show)
     {
         lock (gate)
