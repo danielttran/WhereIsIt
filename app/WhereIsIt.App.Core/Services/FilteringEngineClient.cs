@@ -133,6 +133,7 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             || parsed.Duration is not null
             || parsed.SampleRate is not null
             || parsed.Channels is not null
+            || parsed.Bitrate is not null
             || parsed.RunCount is not null
             || parsed.DateRun is not null
             || parsed.TermExpr is not null
@@ -326,6 +327,7 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
         if (q.Width is not null || q.Height is not null) return true;
         if (q.MediaFilters.Count > 0) return true;
         if (q.Duration is not null || q.SampleRate is not null || q.Channels is not null) return true;
+        if (q.Bitrate is not null) return true;
         if (q.RunCount is not null || q.DateRun is not null) return true;
         if (q.TermExpr is not null) return true;
         if (q.MaxResults is not null) return true;
@@ -490,6 +492,12 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
         {
             if (isDir) return false;
             if (!AudioTags.MatchStream(fullPath, q.Duration, q.SampleRate, q.Channels)) return false;
+        }
+
+        if (q.Bitrate is not null)
+        {
+            if (isDir) return false;
+            if (!AudioTags.MatchBitrate(fullPath, row.SizeBytes, q.Bitrate)) return false;
         }
 
         // Run-metadata filters degrade to no-ops when no lookup is wired, so a

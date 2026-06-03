@@ -68,8 +68,8 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | `infolder:` | ✅ | ➕ explicit alias for `child:` (recursive "anywhere under this folder") |
 | image dimensions `width:` / `height:` / `dimensions:` | ➕ | dependency-free header reader (`ImageDimensions`) for PNG/JPEG/GIF/BMP/WEBP; post-filtered per row |
 | audio tags `artist:`,`album:`,`title:`,`year:`,`genre:`,`track:`,`comment:` | ➕ | dependency-free `AudioTags` reader — MP3 (ID3v2.3/2.4 + ID3v1), FLAC + OGG (Vorbis comments), and M4A/MP4 (iTunes atoms); matched as case-insensitive substrings |
-| audio stream `duration:` / `samplerate:` / `channels:` | ➕ | FLAC STREAMINFO (all three) + M4A `mvhd` (duration); `duration:` accepts seconds or `H:M:S` |
-| other property functions: `bitrate:`,`orientation:`,… (and tags for Office/PDF) | ⛔ | need a broader per-format metadata index (large; see §9) |
+| audio stream `duration:` / `samplerate:` / `channels:` / `bitrate:` | ➕ | FLAC STREAMINFO (rate/channels/duration) + M4A `mvhd` (duration); `bitrate:` is the average (size × 8 ÷ duration, kbps); `duration:` accepts seconds or `H:M:S` |
+| other property functions: `orientation:`,… (and tags for Office/PDF) | ⛔ | need a broader per-format metadata index (large; see §9) |
 
 ## 3. Boolean / grouping
 

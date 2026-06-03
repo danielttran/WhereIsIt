@@ -264,6 +264,15 @@ public class QueryParserExtendedTests
         QueryParser.Parse("duration:>60").IsEmpty.Should().BeFalse();
     }
 
+    [Fact]
+    public void Parse_Bitrate_ParsesComparison()
+    {
+        var q = QueryParser.Parse("bitrate:>=320");
+        q.Bitrate.Should().NotBeNull();
+        q.Bitrate!.Op.Should().Be(SizeOp.GreaterOrEqual);
+        q.Bitrate.Low.Should().Be(320UL);
+    }
+
     // ── infolder: (alias for child:) ──────────────────────────────────────
 
     [Fact]

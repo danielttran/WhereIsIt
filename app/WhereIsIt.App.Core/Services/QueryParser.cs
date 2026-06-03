@@ -87,6 +87,8 @@ public sealed record ParsedQuery
     public SizeRange? SampleRate { get; init; }
     /// <summary><c>channels:</c> — audio channel count.</summary>
     public SizeRange? Channels { get; init; }
+    /// <summary><c>bitrate:</c> — average audio bitrate in kbps (file size × 8 ÷ duration).</summary>
+    public SizeRange? Bitrate { get; init; }
 
     public string? ContentSearch { get; init; }
     public IReadOnlyList<SearchClause> Clauses { get; init; } = [];
@@ -107,7 +109,7 @@ public sealed record ParsedQuery
         && ChildCount == null && ChildFileCount == null && ChildFolderCount == null
         && DateRun == null && RunCount == null && TermExpr == null && Depth == null
         && Width == null && Height == null && MediaFilters.Count == 0
-        && Duration == null && SampleRate == null && Channels == null;
+        && Duration == null && SampleRate == null && Channels == null && Bitrate == null;
 }
 
 /// <summary>Everything-compatible duplicate-grouping keys.</summary>
@@ -270,6 +272,7 @@ public static class QueryParser
         SizeRange? durationRange = null;
         SizeRange? sampleRateRange = null;
         SizeRange? channelsRange = null;
+        SizeRange? bitrateRange = null;
         DateRange? drRange = null;
         SizeRange? runCount = null;
         var clauses = new List<SearchClause>();
@@ -580,6 +583,11 @@ public static class QueryParser
                 channelsRange = ParseIntExpression(lower[9..]);
                 continue;
             }
+            if (lower.StartsWith("bitrate:") && lower.Length > 8)
+            {
+                bitrateRange = ParseIntExpression(lower[8..]);
+                continue;
+            }
 
             // ── content: family (file-contents post-filter) ──────────────
             // Everything exposes encoding-specific aliases; WhereIsIt's reader
@@ -646,6 +654,7 @@ public static class QueryParser
             Duration         = durationRange,
             SampleRate       = sampleRateRange,
             Channels         = channelsRange,
+            Bitrate          = bitrateRange,
             DateRun          = drRange,
             RunCount         = runCount,
             TermExpr         = termExpr,

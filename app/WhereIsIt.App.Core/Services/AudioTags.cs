@@ -82,6 +82,15 @@ public sealed class AudioTags
         return true;
     }
 
+    /// <summary>True when the file's average bitrate (file size × 8 ÷ duration,
+    /// in kbps) satisfies <paramref name="range"/>. Needs a readable duration.</summary>
+    public static bool MatchBitrate(string path, ulong sizeBytes, SizeRange range)
+    {
+        if (!TryRead(path, out var t) || t.DurationSeconds <= 0) return false;
+        ulong kbps = sizeBytes * 8UL / ((ulong)t.DurationSeconds * 1000UL);
+        return range.Matches(kbps);
+    }
+
     public static bool TryRead(string path, out AudioTags tags)
     {
         tags = new AudioTags();
