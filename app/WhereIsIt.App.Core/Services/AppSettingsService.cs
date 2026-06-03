@@ -186,6 +186,17 @@ public sealed class AppSettingsService : IDisposable
         ScheduleFlush();
     }
 
+    public void SavePreviewPane(bool show)
+    {
+        lock (gate)
+        {
+            cached ??= LoadFromDisk();
+            cached.ShowPreviewPane = show;
+            revision++;
+        }
+        ScheduleFlush();
+    }
+
     public void SaveRunCounts(System.Collections.Generic.Dictionary<string, int> counts)
     {
         lock (gate)

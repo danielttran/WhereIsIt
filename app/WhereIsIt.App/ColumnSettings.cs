@@ -29,6 +29,10 @@ public partial class ColumnSettings : ObservableObject
     private bool showRunCountColumn;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(PreviewPaneWidth), nameof(PreviewPaneVisibility))]
+    private bool showPreviewPane;
+
+    [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(ThumbnailColumnWidth), nameof(ThumbnailColumnVisibility), nameof(ThumbnailRenderSize),
         nameof(IsThumbOff), nameof(IsThumbSmall), nameof(IsThumbMedium), nameof(IsThumbLarge), nameof(IsThumbXL))]
     private int thumbnailSizePx;
@@ -53,4 +57,7 @@ public partial class ColumnSettings : ObservableObject
     public Visibility ThumbnailColumnVisibility => ThumbnailSizePx > 0 ? Visibility.Visible : Visibility.Collapsed;
 
     public double ThumbnailRenderSize => ThumbnailSizePx > 0 ? ThumbnailSizePx : 0d;
+
+    public GridLength PreviewPaneWidth => ShowPreviewPane ? new GridLength(320) : new GridLength(0);
+    public Visibility PreviewPaneVisibility => ShowPreviewPane ? Visibility.Visible : Visibility.Collapsed;
 }

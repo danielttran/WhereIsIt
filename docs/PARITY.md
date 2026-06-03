@@ -110,7 +110,7 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | search history (↑/↓ recall) | ✅ | |
 | quick-filter bar (Everything/Audio/Video/Doc/Pic/Exe/Zip/Folder) | ✅ | plus Code ⭐ |
 | thumbnails view | ✅ | Off/Small/Medium/Large/XL |
-| preview pane | ⛔ | 1.5 feature; not started |
+| preview pane | ➕ | toggleable right-hand pane (View → Preview pane) showing image thumbnails, a text head, and file info for the selected row; needs a Windows build to smoke-test |
 | match highlighting in results | ➕ | literal query terms highlighted in the Name column via WinUI `TextHighlighter` ranges |
 | system tray / minimize to tray | ➕ | dependency-free `Shell_NotifyIcon` tray host; minimize hides to tray, left-click/menu restores |
 | global hotkey | ✅ | configurable, default Ctrl+Alt+W |
@@ -165,8 +165,7 @@ infrastructure plus one marginal convenience:
 
 | Remaining item | Hard blocker |
 |---|---|
-| **Preview pane** | WinUI control hosting — no .NET/WinUI toolchain in this Linux session to build or verify it |
-| **Custom property columns** | UI + relies on the same metadata readers; needs a build |
+| **Custom property columns** | Dynamic WinUI `ListView` columns bound to the metadata readers; needs a build to do safely |
 | **Everything-compatible IPC SDK** | Byte-compatible reimplementation of Everything's **undocumented WM_COPYDATA/IPC protocol** so third-party tools interop (a native `es.exe` CLI ships in `tools/WhereIsIt.Es`) |
 | **ETP / FTP server** | **Undocumented proprietary protocol** |
 | **Shell context-menu extension** | A separate registered **Windows COM** component |

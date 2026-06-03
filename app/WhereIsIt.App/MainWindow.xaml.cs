@@ -46,7 +46,84 @@ public sealed partial class MainWindow : Window
         Closed += OnClosedPersistTabs;
 
         RefreshBookmarksMenu();
+        ViewModel.ResultsList.PropertyChanged += OnResultsListPropertyChanged;
         Activated += OnFirstActivatedShowRestorePrompt;
+    }
+
+    // ── Preview pane ────────────────────────────────────────────────────
+
+    private void OnResultsListPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(ViewModels.ResultsListViewModel.SelectedRow))
+            _ = UpdatePreviewAsync();
+    }
+
+    private void OnPreviewToggleClick(object sender, RoutedEventArgs e)
+    {
+        settingsService?.SavePreviewPane(ColumnSettings.Current.ShowPreviewPane);
+        _ = UpdatePreviewAsync();
+    }
+
+    private static readonly System.Collections.Generic.HashSet<string> PreviewImageExts =
+        new(StringComparer.OrdinalIgnoreCase) { ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".ico", ".tif", ".tiff" };
+    private static readonly System.Collections.Generic.HashSet<string> PreviewTextExts =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".txt", ".log", ".md", ".csv", ".json", ".xml", ".yaml", ".yml", ".ini", ".cfg",
+            ".cs", ".c", ".cpp", ".h", ".hpp", ".py", ".js", ".ts", ".html", ".htm", ".css",
+            ".sql", ".sh", ".ps1", ".bat", ".cmd", ".rs", ".go", ".java", ".rb", ".php",
+        };
+
+    private async System.Threading.Tasks.Task UpdatePreviewAsync()
+    {
+        if (!ColumnSettings.Current.ShowPreviewPane) return;
+        var row = ViewModel.ResultsList.SelectedRow;
+        PreviewImage.Visibility = Visibility.Collapsed;
+        PreviewText.Visibility = Visibility.Collapsed;
+        if (row is null) { PreviewName.Text = string.Empty; PreviewInfo.Text = string.Empty; return; }
+
+        await row.EnsureLoadedAsync(System.Threading.CancellationToken.None);
+        var path = row.FullPath;
+        PreviewName.Text = row.Name;
+
+        try
+        {
+            var fi = new System.IO.FileInfo(path);
+            PreviewInfo.Text = fi.Exists
+                ? $"{ViewModels.ResultRowViewModel.FormatBytes((ulong)fi.Length)} · {fi.LastWriteTime:yyyy-MM-dd HH:mm}\n{path}"
+                : path;
+        }
+        catch { PreviewInfo.Text = path; }
+
+        var ext = System.IO.Path.GetExtension(path);
+        if (PreviewImageExts.Contains(ext))
+        {
+            try
+            {
+                PreviewImage.Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(path));
+                PreviewImage.Visibility = Visibility.Visible;
+            }
+            catch { /* unreadable image — leave hidden */ }
+        }
+        else if (PreviewTextExts.Contains(ext))
+        {
+            try
+            {
+                var text = await ReadHeadAsync(path, 16 * 1024);
+                PreviewText.Text = text;
+                PreviewText.Visibility = Visibility.Visible;
+            }
+            catch { /* unreadable text — leave hidden */ }
+        }
+    }
+
+    private static async System.Threading.Tasks.Task<string> ReadHeadAsync(string path, int maxChars)
+    {
+        using var reader = new System.IO.StreamReader(path, detectEncodingFromByteOrderMarks: true);
+        var buf = new char[maxChars];
+        int n = await reader.ReadAsync(buf, 0, maxChars);
+        var head = new string(buf, 0, n);
+        return n >= maxChars ? head + "\n…" : head;
     }
 
     private void OnFirstActivatedShowRestorePrompt(object sender, WindowActivatedEventArgs args)

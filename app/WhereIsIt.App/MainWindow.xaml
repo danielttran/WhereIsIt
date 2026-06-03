@@ -135,6 +135,10 @@
                     IsChecked="{x:Bind app:ColumnSettings.Current.ShowRunCountColumn, Mode=TwoWay}"
                     Click="OnColumnToggleClick"/>
                 <MenuFlyoutSeparator/>
+                <ToggleMenuFlyoutItem Text="Preview pane"
+                    IsChecked="{x:Bind app:ColumnSettings.Current.ShowPreviewPane, Mode=TwoWay}"
+                    Click="OnPreviewToggleClick"/>
+                <MenuFlyoutSeparator/>
                 <MenuFlyoutItem Text="Thumbnails" IsEnabled="False" FontWeight="SemiBold"/>
                 <ToggleMenuFlyoutItem Text="Off"         Tag="0"   Click="OnThumbnailSizeClick"
                     IsChecked="{x:Bind app:ColumnSettings.Current.IsThumbOff,    Mode=OneWay}"/>
@@ -180,8 +184,13 @@
             </muxc:TabView.TabItemTemplate>
         </muxc:TabView>
 
-        <!-- Results -->
-        <Grid Grid.Row="3" RowDefinitions="Auto,*" Padding="12,0,12,0">
+        <!-- Results + optional preview pane -->
+        <Grid Grid.Row="3">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.PreviewPaneWidth, Mode=OneWay}"/>
+        </Grid.ColumnDefinitions>
+        <Grid Grid.Column="0" RowDefinitions="Auto,*" Padding="12,0,12,0">
             <!-- Column headers -->
             <Grid Grid.Row="0"
                   x:Name="HeaderGrid"
@@ -354,6 +363,27 @@
                     </DataTemplate>
                 </ListView.ItemTemplate>
             </ListView>
+        </Grid>
+
+        <!-- Preview pane (toggled from View → Preview pane) -->
+        <Border Grid.Column="1"
+                x:Name="PreviewPaneBorder"
+                Visibility="{x:Bind app:ColumnSettings.Current.PreviewPaneVisibility, Mode=OneWay}"
+                BorderBrush="{ThemeResource SystemControlForegroundBaseLowBrush}"
+                BorderThickness="1,0,0,0"
+                Padding="12,4,12,4">
+            <ScrollViewer>
+                <StackPanel Spacing="8">
+                    <TextBlock x:Name="PreviewName" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                    <Image x:Name="PreviewImage" Stretch="Uniform" MaxHeight="280"
+                           HorizontalAlignment="Left" Visibility="Collapsed"/>
+                    <TextBlock x:Name="PreviewInfo" Opacity="0.7" TextWrapping="Wrap"/>
+                    <TextBox x:Name="PreviewText" IsReadOnly="True" AcceptsReturn="True"
+                             TextWrapping="Wrap" BorderThickness="0" Background="Transparent"
+                             FontFamily="Consolas" Visibility="Collapsed" MaxHeight="400"/>
+                </StackPanel>
+            </ScrollViewer>
+        </Border>
         </Grid>
 
         <!-- Status bar -->
