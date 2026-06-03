@@ -1,0 +1,91 @@
+using System.Collections.Generic;
+using System.Linq;
+using FluentAssertions;
+using WhereIsIt.App.Services;
+using Xunit;
+
+namespace WhereIsIt.App.Tests;
+
+/// <summary>
+/// Coverage for the &lt; &gt; grouped boolean query parser + evaluator.
+/// </summary>
+public class BooleanQueryTests
+{
+    [Fact]
+    public void TryParse_NoGrouping_ReturnsNull()
+    {
+        BooleanQuery.TryParse("report log").Should().BeNull();
+        BooleanQuery.TryParse("a|b").Should().BeNull();
+    }
+
+    [Fact]
+    public void TryParse_SingleGroup_IsAndOfTerms()
+    {
+        var e = BooleanQuery.TryParse("<a b>");
+        e.Should().BeOfType<BoolAnd>();
+        ((BoolAnd)e!).Parts.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public void TryParse_GroupedOr_BuildsOrOfAnds()
+    {
+        var e = BooleanQuery.TryParse("<a b>|<c d>");
+        e.Should().BeOfType<BoolOr>();
+        var or = (BoolOr)e!;
+        or.Parts.Should().HaveCount(2);
+        or.Parts[0].Should().BeOfType<BoolAnd>();
+        or.Parts[1].Should().BeOfType<BoolAnd>();
+    }
+
+    [Fact]
+    public void TryParse_OrInsideGroup()
+    {
+        var e = BooleanQuery.TryParse("<a|b>");
+        e.Should().BeOfType<BoolOr>();
+        ((BoolOr)e!).Parts.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public void TryParse_NotBeforeGroup()
+    {
+        var e = BooleanQuery.TryParse("!<a b>");
+        e.Should().BeOfType<BoolNot>();
+        ((BoolNot)e!).Inner.Should().BeOfType<BoolAnd>();
+    }
+
+    [Fact]
+    public void TryParse_SkipsFunctionTokens()
+    {
+        // ext:cs is a global function, not part of the boolean term tree.
+        var e = BooleanQuery.TryParse("ext:cs <a b>");
+        e.Should().BeOfType<BoolAnd>();
+        ((BoolAnd)e!).Parts.Should().HaveCount(2);
+    }
+
+    // ── evaluation ────────────────────────────────────────────────────────
+
+    private static bool EvalWith(string query, params string[] present)
+    {
+        var set = new HashSet<string>(present);
+        var e = BooleanQuery.TryParse(query);
+        e.Should().NotBeNull();
+        return BooleanQuery.Eval(e!, alts => alts.Any(set.Contains));
+    }
+
+    [Theory]
+    [InlineData(true, "a", "b")]      // (a AND b) holds
+    [InlineData(false, "a")]          // missing b ⇒ first group fails, second fails
+    [InlineData(true, "c", "d")]      // second group holds
+    [InlineData(false, "a", "c")]     // neither group fully present
+    public void Eval_GroupedOrOfAnds(bool expected, params string[] present)
+    {
+        EvalWith("<a b>|<c d>", present).Should().Be(expected);
+    }
+
+    [Fact]
+    public void Eval_NotGroup_Negates()
+    {
+        EvalWith("!<a b>", "a", "b").Should().BeFalse();
+        EvalWith("!<a b>", "a").Should().BeTrue();
+    }
+}

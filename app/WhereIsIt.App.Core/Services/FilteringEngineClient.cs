@@ -125,6 +125,7 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             || parsed.ChildFolderCount is not null
             || parsed.RunCount is not null
             || parsed.DateRun is not null
+            || parsed.TermExpr is not null
             || parsed.MatchPath;
 
         if (parsed.WholeFilename is { Length: > 0 })
@@ -293,6 +294,7 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
         if (q.ChildCount is not null || q.ChildFileCount is not null
             || q.ChildFolderCount is not null) return true;
         if (q.RunCount is not null || q.DateRun is not null) return true;
+        if (q.TermExpr is not null) return true;
         if (q.MaxResults is not null) return true;
         // nodiacritics: changes how every clause matches, so the inner engine's
         // default (diacritic-sensitive) result set has to be re-filtered.
@@ -449,11 +451,18 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             if (!q.DateRun.Matches(dr.LocalDateTime)) return false;
         }
 
-        if (q.Clauses.Count == 0) return true;
+        if (q.TermExpr is null && q.Clauses.Count == 0) return true;
         var cmp = q.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
         // Folded path for nodiacritics: substring matching, computed once.
         string matchFull = (q.MatchDiacritics || !q.MatchPath || fullPath.Length == 0)
             ? fullPath : QueryParser.RemoveDiacritics(fullPath);
+
+        // Grouped boolean query (< >): evaluate the expression tree instead of
+        // the flat clause list. Leaves match via the same substring rules.
+        if (q.TermExpr is not null)
+            return BooleanQuery.Eval(q.TermExpr,
+                alts => MatchAnyAlternative(alts, q, row.Name, matchName, fullPath, matchFull, cmp));
+
         int rxIdx = 0;
         var regexes = compiled.ClauseRegexes;
         foreach (var clause in q.Clauses)
@@ -477,6 +486,18 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
             if (clause.Negated ? hit : !hit) return false;
         }
         return true;
+    }
+
+    /// <summary>True when any of a boolean term's alternatives matches the row
+    /// (substring/diacritic/match-path rules; grouped terms aren't wildcarded).</summary>
+    private static bool MatchAnyAlternative(
+        IReadOnlyList<string> alts, ParsedQuery q,
+        string name, string matchName, string fullPath, string matchFull, StringComparison cmp)
+    {
+        foreach (var alt in alts)
+            if (AlternativeMatches(alt, null, q, name, matchName, fullPath, matchFull, cmp))
+                return true;
+        return false;
     }
 
     private static bool AlternativeMatches(

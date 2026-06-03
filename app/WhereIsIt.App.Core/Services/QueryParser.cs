@@ -74,6 +74,12 @@ public sealed record ParsedQuery
     public string? ContentSearch { get; init; }
     public IReadOnlyList<SearchClause> Clauses { get; init; } = [];
 
+    /// <summary>Boolean expression tree for grouped (<c>&lt; &gt;</c>) queries.
+    /// Non-null only when the query used grouping; when set it supersedes
+    /// <see cref="Clauses"/> for term matching and the engines evaluate it
+    /// instead. Filters (ext:/size:/…) still apply globally.</summary>
+    public BoolExpr? TermExpr { get; init; }
+
     public bool IsEmpty => Clauses.Count == 0 && ExtWhitelist == null
         && !FileOnly && !FolderOnly && Size == null
         && Modified == null && Created == null && Accessed == null
@@ -82,7 +88,7 @@ public sealed record ParsedQuery
         && StartsWith == null && EndsWith == null && WholeFilename == null
         && !RootOnly && NameLength == null && !EmptyOnly && MaxResults == null
         && ChildCount == null && ChildFileCount == null && ChildFolderCount == null
-        && DateRun == null && RunCount == null;
+        && DateRun == null && RunCount == null && TermExpr == null;
 }
 
 /// <summary>Everything-compatible duplicate-grouping keys.</summary>
@@ -518,6 +524,16 @@ public static class QueryParser
                     termStr.Split('|', StringSplitOptions.RemoveEmptyEntries)));
         }
 
+        // Grouped boolean queries (< >) build an expression tree that supersedes
+        // the flat clause list for term matching. Only engaged when a bracket is
+        // present, so non-grouped queries keep the original fast path untouched.
+        BoolExpr? termExpr = null;
+        if (query.IndexOf('<') >= 0 || query.IndexOf('>') >= 0)
+        {
+            termExpr = BooleanQuery.TryParse(query);
+            if (termExpr is not null) clauses.Clear();
+        }
+
         return new ParsedQuery
         {
             CaseSensitive = caseSensitive,
@@ -550,6 +566,7 @@ public static class QueryParser
             ChildFolderCount = childFolderCount,
             DateRun          = drRange,
             RunCount         = runCount,
+            TermExpr         = termExpr,
             Clauses = clauses,
         };
     }

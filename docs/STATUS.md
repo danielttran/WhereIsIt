@@ -104,9 +104,13 @@ Closed 2026-06-03 (run-metadata filters):
 
 Relative date spans (`3days`/`last2weeks`/`past6months`/`next1year`) now parse too, so the entire `ParseDateSpec` keyword surface is at parity (only the space-separated phrasing needs quoting).
 
+Closed 2026-06-03 (boolean grouping):
+
+- ✅ **`< >` grouping** — new additive `BooleanQuery` expression tree (lexer + recursive-descent parser + evaluator) engages only when a query contains a bracket, so the existing flat-clause fast path is untouched. Both engines evaluate the tree (`FilteringEngineClient`/`InProcEngineClient`). Functions apply globally (place them outside groups). Covered by `BooleanQueryTests` + `InProcEngineClientExtendedFilterTests`.
+
 Remaining Everything-parity gaps (full detail + ranking in `docs/PARITY.md` §9):
 
-- **Explicit `< >` grouping** — needs a flat-clause → boolean-AST rewrite across both engines; deferred to a Windows build session (high blind-change risk).
+- **Function-level OR / functions inside `< >`** — term grouping done; folding filters into the boolean tree is a larger engine change.
 - **Preview pane, property/metadata index, `es.exe`+IPC SDK, shell extension, ETP/FTP server, background service** — Windows-only / large / proprietary-protocol work that can't be built or verified in a Linux session.
 - **Property/metadata index** — unlocks `album:`/`width:`/… + custom columns.
 - **ETP / FTP server** — proprietary Everything protocol. Skipped; HTTP server covers the cross-device search use case.

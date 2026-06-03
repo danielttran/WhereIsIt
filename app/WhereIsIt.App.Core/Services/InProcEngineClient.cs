@@ -263,14 +263,22 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
             if (!ChildCountsMatch(q, fullPath)) return false;
         }
 
-        if (q.Clauses.Count == 0) return true;
+        if (q.TermExpr is null && q.Clauses.Count == 0) return true;
 
         var cmp = q.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
-        // Build the relative path only when a clause needs it (i.e. we have
-        // any clauses). For a typical extension-only or size-only query the
-        // clauses list is empty so we short-circuited above without paying for
-        // GetRelativePath/Replace allocations.
+        // Build the relative path only when a clause/expression needs it. For a
+        // typical extension-only or size-only query both are empty so we
+        // short-circuited above without paying for GetRelativePath/Replace.
         var relative = Path.GetRelativePath(root, fullPath).Replace('\\', '/');
+
+        // Grouped boolean query (< >): evaluate the expression tree.
+        if (q.TermExpr is not null)
+            return BooleanQuery.Eval(q.TermExpr, alts =>
+            {
+                foreach (var alt in alts)
+                    if (AlternativeMatches(alt, null, q, name, relative, cmp)) return true;
+                return false;
+            });
 
         int rxIdx = 0;
         foreach (var clause in q.Clauses)

@@ -129,6 +129,35 @@ public class InProcEngineClientExtendedFilterTests : IAsyncLifetime
         names.Should().Contain("mixed2");
     }
 
+    // ── < > boolean grouping ──────────────────────────────────────────────
+
+    [Fact]
+    public async Task Search_GroupedOrOfAnds_MatchesEitherGroup()
+    {
+        await File.WriteAllTextAsync(Path.Combine(_root.FullName, "report_log.txt"), "");
+        await File.WriteAllTextAsync(Path.Combine(_root.FullName, "temp_data.txt"), "");
+        await File.WriteAllTextAsync(Path.Combine(_root.FullName, "report_only.txt"), "");
+        await File.WriteAllTextAsync(Path.Combine(_root.FullName, "other.txt"), "");
+
+        // (report AND log) OR (temp AND data)
+        var names = await GetNamesAsync("<report log>|<temp data>");
+
+        names.Should().BeEquivalentTo("report_log.txt", "temp_data.txt");
+    }
+
+    [Fact]
+    public async Task Search_GroupWithGlobalFunction_AppliesBoth()
+    {
+        await File.WriteAllTextAsync(Path.Combine(_root.FullName, "alpha.cs"),  "");
+        await File.WriteAllTextAsync(Path.Combine(_root.FullName, "beta.cs"),   "");
+        await File.WriteAllTextAsync(Path.Combine(_root.FullName, "alpha.txt"), "");
+
+        // ext:cs applies globally; <alpha|beta> is the grouped term.
+        var names = await GetNamesAsync("ext:cs <alpha|beta>");
+
+        names.Should().BeEquivalentTo("alpha.cs", "beta.cs");
+    }
+
     [Fact]
     public async Task Search_ChildCount_ExcludesFiles()
     {

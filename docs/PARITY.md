@@ -76,7 +76,7 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | `OR` / `|` | ✅ | keyword and `|` alternative form |
 | `NOT` / `!` | ✅ | |
 | `AND` keyword | ✅ | |
-| `<` `>` explicit grouping / precedence | ⛔ | flat clause list only; nested grouping not parsed |
+| `<` `>` explicit grouping / precedence | ➕ | boolean expression tree (`BooleanQuery`) evaluated in both engines; activates only when a bracket is present. Functions go outside groups (e.g. `ext:cs <a\|b>`); functions *inside* a group aren't modelled |
 | quoted phrases `"..."` | ✅ | unterminated-quote-safe ⭐ |
 | operators `==` `<` `>` `<=` `>=` on functions | ✅ | size/date/len/childcount |
 
@@ -149,10 +149,9 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 
 ## 9. Notable remaining gaps (ranked by parity value vs. effort)
 
-1. **Explicit `< >` grouping** — needs a flat-clause → boolean-expression-tree
-   rewrite across both engines' match hot paths (and ideally the filter system
-   too, to match Everything's `size:>1mb | ext:cs`). High blind-change risk for
-   a niche power-user feature; left for a Windows session with a build.
+1. **Function-level OR / grouping** (`size:>1mb | ext:cs`, functions *inside*
+   `< >`) — term grouping is done; folding the filter system into the boolean
+   tree too is a larger engine change.
 2. **Preview pane** — Everything 1.5 feature; needs a content/thumbnail preview host (WinUI, needs a build).
 3. **Property/metadata index** — unlocks `album:`/`width:`/… and custom
    property columns. Large native engine + Windows Property System work.
