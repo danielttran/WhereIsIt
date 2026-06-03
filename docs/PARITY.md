@@ -149,7 +149,7 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 | ETP server | ⛔ | Everything's proprietary search-extension protocol over FTP; standard FTP + the HTTP search/web-UI cover the practical use |
 | Everything service | ➕ | `tools/WhereIsIt.EngineService` — engine-over-named-pipe host (see §6) |
 | `es.exe` CLI | 🟡 | ➕ `tools/WhereIsIt.Es` builds `es.exe` — same engine + query syntax, output/sort/export/modifier flags. Searches in-proc (one-shot) rather than over Everything's live-index IPC |
-| IPC / SDK (DLL + messages) | ⛔ | needs Everything's undocumented WM_COPYDATA/IPC binary protocol for third-party interop |
+| IPC / SDK (WM_COPYDATA) | 🟡 | ➕ `EverythingIpcServer` implements the public Everything IPC SDK `WM_COPYDATA` query/list layout so Everything SDK clients / `es.exe` can query WhereIsIt (opt-in via `EnableEverythingIpc`). Built from the documented SDK — needs a Windows build + an SDK-client to verify the exact window-class/struct match |
 | "Search WhereIsIt" shell verb | ➕ | registry context-menu verb (see §5) |
 
 ## 9. Remaining gaps
@@ -167,7 +167,7 @@ infrastructure plus one marginal convenience:
 | Remaining item | Hard blocker |
 |---|---|
 | Free column drag-reorder / resize | A fixed-column toggle set ships (incl. property columns); arbitrary drag-reorder/resize needs a `DataGrid`-style control + a build |
-| **Everything-compatible IPC SDK** | Byte-compatible reimplementation of Everything's **undocumented WM_COPYDATA/IPC protocol** so third-party tools interop (a native `es.exe` CLI ships in `tools/WhereIsIt.Es`) |
+| Verify Everything-wire IPC | `EverythingIpcServer` implements the public SDK `WM_COPYDATA` layout; the exact window-class name + struct packing must be **confirmed against `Everything_IPC.h` with a real SDK client on Windows** (no toolchain here to test interop) |
 | **ETP server** | Everything's **undocumented proprietary** search-extension protocol over FTP — needs the spec; a standard read-only **FTP server** now ships, plus the HTTP search/web UI |
 | Modern (always-visible) Win11 context menu | The classic registry verb ships (`ShellMenuRegistration`); a Win11 *primary* context-menu entry additionally needs a packaged `IExplorerCommand` **COM** handler |
 | Bracketless function OR (`ext:cs \| ext:txt`) | Works *with* brackets today; marginal tokenizer change otherwise |

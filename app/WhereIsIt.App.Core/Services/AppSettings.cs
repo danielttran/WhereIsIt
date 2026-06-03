@@ -24,6 +24,9 @@ public sealed class AppSettings
     public int  HttpServerPort   { get; set; } = 12321;
     public bool EnableFtpServer  { get; set; } = false;
     public int  FtpServerPort    { get; set; } = 12322;
+    /// <summary>Opt-in Everything-compatible WM_COPYDATA IPC server so Everything
+    /// SDK clients / es.exe can query WhereIsIt.</summary>
+    public bool EnableEverythingIpc { get; set; } = false;
 
     /// <summary>Tab queries from the last session — empty if there was just one
     /// blank tab. Used by the Chrome-style "Restore previous tabs?" prompt.</summary>

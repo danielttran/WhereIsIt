@@ -20,6 +20,7 @@ public sealed partial class MainWindow : Window
     private readonly ThumbnailService?                          thumbnailService;
     private GlobalHotkeyHost? hotkeyHost;
     private TrayIconHost? trayIcon;
+    private EverythingIpcServer? ipcServer;
 
     public MainViewModel ViewModel { get; }
 
@@ -41,6 +42,7 @@ public sealed partial class MainWindow : Window
         TrySetWindowIcon();
         TryRegisterGlobalHotkey();
         TrySetupTrayIcon();
+        TrySetupEverythingIpc();
         AppWindow.Changed += OnAppWindowChanged;
         Closed += OnClosedReleaseHotkey;
         Closed += OnClosedPersistTabs;
@@ -260,11 +262,24 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private void TrySetupEverythingIpc()
+    {
+        try
+        {
+            if (settingsService?.Load().EnableEverythingIpc != true) return;
+            if (services.GetService(typeof(WhereIsIt.App.Contracts.IEngineClient))
+                is WhereIsIt.App.Contracts.IEngineClient engine)
+                ipcServer = new EverythingIpcServer(engine);
+        }
+        catch { /* IPC is optional — never block startup on it */ }
+    }
+
     private void OnClosedReleaseHotkey(object sender, WindowEventArgs args)
     {
         AppWindow.Changed -= OnAppWindowChanged;
         hotkeyHost?.Dispose();
         trayIcon?.Dispose();
+        ipcServer?.Dispose();
     }
 
     private void OnClosedPersistTabs(object sender, WindowEventArgs args)
