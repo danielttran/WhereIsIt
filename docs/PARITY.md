@@ -155,24 +155,24 @@ flip `MatchDiacritics`'s default in `ParsedQuery` if exact parity is desired.
 
 ## 9. Remaining items
 
-**Every Everything feature category now has an implementation in WhereIsIt.**
-There are no longer any completely-absent features — what remains is
-*verification* of code written this session (it needs a Windows build to compile
-and smoke-test, plus real Everything clients to confirm wire framing for the two
-interop protocols), and one deliberate UI trade-off:
+**Every Everything feature category now has an implementation in WhereIsIt**, and
+the entire query/logic layer is **build- and test-verified on .NET 10** (see the
+verification note below). What remains is *verification* of the Windows-only code
+(WinUI app, native engine, and the two interop protocols' exact wire framing) on
+a Windows toolchain, plus one deliberate UI trade-off:
 
 | Item | Status |
 |---|---|
-| **Everything-wire IPC** (`WM_COPYDATA`) | Implemented (`EverythingIpcServer`, public SDK layout). Confirm the window-class name + struct packing against `Everything_IPC.h` with a real SDK client on Windows. |
-| **ETP server** | Implemented (`FtpServer` + `EVERYTHING …` commands). Confirm the result-column wire framing against a real Everything ETP client on Windows. |
-| **Column drag-reorder** | Resize ships (header grippers) + add/remove toggles. Free drag-*reorder* would need a `DataGrid` that **regresses** WhereIsIt's drag-to-Explorer — a net loss, so it's a deliberate trade-off (a "does it better" case). |
-| Bracketless function OR (`ext:cs \| ext:txt`) | Works *with* brackets (`<ext:cs>\|<ext:txt>`). The bracketless form would flip `\|` precedence vs. the flat clause model, so it's a documented minor syntax difference. |
+| **Bracketless function OR** (`ext:cs \| ext:txt`) | ✅ **Implemented + verified** on .NET 10 (engages the boolean tree on a standalone `\|`; bare `a\|b` stays the flat form). |
+| **Everything-wire IPC** (`WM_COPYDATA`) | Implemented (`EverythingIpcServer`, public SDK layout). Confirm window-class + struct packing against `Everything_IPC.h` with a real SDK client on Windows. |
+| **ETP server** | Implemented + the command round-trip is **tested** (`FtpServer` + `EVERYTHING …`). Confirm the result-column wire framing against a real Everything ETP client on Windows. |
+| **Win11 primary context menu** | Best-effort `IExplorerCommand` COM handler (`ExplorerCommandHandler.cs`) — **unverified**; needs a Windows build + a sparse MSIX package to register (see the file header). The classic registry verb ships and works today. |
+| **Column drag-reorder** | Resize ships (header grippers) + add/remove toggles. Free drag-*reorder* would need a `DataGrid` that **regresses** WhereIsIt's drag-to-Explorer — a deliberate trade-off (a "does it better" case). |
 
-The two interop servers and all WinUI/native code written this session follow
-the documented APIs/SDK but, like the rest of the project, **need a Windows
-.NET 10 / WinUI / MSVC build to compile and verify** (STATUS.md notes Windows
-compile-fixups are expected). Nothing here is an unimplemented feature — it's
-build/interop *verification* and one intentional trade-off.
+The WinUI app, native engine, the `WM_COPYDATA` IPC window, and the COM handler
+follow documented APIs/SDK but **need a Windows .NET 10 / WinUI / MSVC + MSIX
+build to compile and verify**. The cross-platform query/IPC/FTP/ETP logic is
+already verified (below).
 
 ## 10. Where WhereIsIt is intentionally *better*
 
