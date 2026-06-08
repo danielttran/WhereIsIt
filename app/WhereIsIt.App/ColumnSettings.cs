@@ -29,6 +29,26 @@ public partial class ColumnSettings : ObservableObject
     private bool showRunCountColumn;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(PreviewPaneWidth), nameof(PreviewPaneVisibility))]
+    private bool showPreviewPane;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(DimensionsColumnWidth), nameof(DimensionsColumnVisibility))]
+    private bool showDimensionsColumn;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ArtistColumnWidth), nameof(ArtistColumnVisibility))]
+    private bool showArtistColumn;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AlbumColumnWidth), nameof(AlbumColumnVisibility))]
+    private bool showAlbumColumn;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AuthorColumnWidth), nameof(AuthorColumnVisibility))]
+    private bool showAuthorColumn;
+
+    [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(ThumbnailColumnWidth), nameof(ThumbnailColumnVisibility), nameof(ThumbnailRenderSize),
         nameof(IsThumbOff), nameof(IsThumbSmall), nameof(IsThumbMedium), nameof(IsThumbLarge), nameof(IsThumbXL))]
     private int thumbnailSizePx;
@@ -53,4 +73,43 @@ public partial class ColumnSettings : ObservableObject
     public Visibility ThumbnailColumnVisibility => ThumbnailSizePx > 0 ? Visibility.Visible : Visibility.Collapsed;
 
     public double ThumbnailRenderSize => ThumbnailSizePx > 0 ? ThumbnailSizePx : 0d;
+
+    // ── user-resizable fixed columns (drag the header grippers) ──────────
+
+    [ObservableProperty][NotifyPropertyChangedFor(nameof(SizeColWidth))]     private double sizeColPx = 120;
+    [ObservableProperty][NotifyPropertyChangedFor(nameof(ModifiedColWidth))] private double modifiedColPx = 160;
+    [ObservableProperty][NotifyPropertyChangedFor(nameof(TypeColWidth))]     private double typeColPx = 100;
+    [ObservableProperty][NotifyPropertyChangedFor(nameof(AttrColWidth))]     private double attrColPx = 80;
+
+    public GridLength SizeColWidth     => new(SizeColPx);
+    public GridLength ModifiedColWidth => new(ModifiedColPx);
+    public GridLength TypeColWidth     => new(TypeColPx);
+    public GridLength AttrColWidth     => new(AttrColPx);
+
+    /// <summary>Applies a header-gripper drag delta to a column, clamped to a
+    /// sensible minimum.</summary>
+    public void ResizeColumn(string key, double delta)
+    {
+        static double Clamp(double v) => v < 48 ? 48 : v;
+        switch (key)
+        {
+            case "size": SizeColPx = Clamp(SizeColPx + delta); break;
+            case "modified": ModifiedColPx = Clamp(ModifiedColPx + delta); break;
+            case "type": TypeColPx = Clamp(TypeColPx + delta); break;
+            case "attr": AttrColPx = Clamp(AttrColPx + delta); break;
+        }
+    }
+
+    public GridLength PreviewPaneWidth => ShowPreviewPane ? new GridLength(320) : new GridLength(0);
+    public Visibility PreviewPaneVisibility => ShowPreviewPane ? Visibility.Visible : Visibility.Collapsed;
+
+    public GridLength DimensionsColumnWidth => ShowDimensionsColumn ? new GridLength(110) : new GridLength(0);
+    public GridLength ArtistColumnWidth     => ShowArtistColumn     ? new GridLength(160) : new GridLength(0);
+    public GridLength AlbumColumnWidth      => ShowAlbumColumn      ? new GridLength(160) : new GridLength(0);
+    public GridLength AuthorColumnWidth     => ShowAuthorColumn     ? new GridLength(160) : new GridLength(0);
+
+    public Visibility DimensionsColumnVisibility => ShowDimensionsColumn ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility ArtistColumnVisibility     => ShowArtistColumn     ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility AlbumColumnVisibility      => ShowAlbumColumn      ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility AuthorColumnVisibility     => ShowAuthorColumn     ? Visibility.Visible : Visibility.Collapsed;
 }

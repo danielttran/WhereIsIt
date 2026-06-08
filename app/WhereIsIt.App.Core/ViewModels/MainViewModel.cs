@@ -36,7 +36,10 @@ public partial class MainViewModel : ObservableObject, IDisposable
         resultsSubscription = engineClient.ObserveResults
             .Subscribe(ids => dispatcher.Enqueue(() =>
             {
-                ResultsList.BindResults(ids);
+                // Literal terms for the result-list match highlighter, derived
+                // from the active query once per result batch.
+                var highlightTerms = string.Join('\n', QueryParser.ExtractHighlightTerms(SearchBox.Query));
+                ResultsList.BindResults(ids, highlightTerms);
                 StatusBar.RecordCount = ids.Count;
 
                 var isActiveQuery = !string.IsNullOrEmpty(SearchBox.Query);

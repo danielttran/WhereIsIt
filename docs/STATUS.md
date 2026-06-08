@@ -88,11 +88,37 @@ Closed 2026-05-17 (Everything-parity bridge):
 - ✅ EFU (Everything File List) import/export in `ResultExporter` (`ToEfu`/`WriteEfu`/`ParseEfu`/`ReadEfu`) — FILETIME ticks + numeric attribute mask, round-trips with voidtools.
 - ✅ Shutdown use-after-free fix: `IndexingEngine::Stop()` is now idempotent and records whether any worker had to be detached (timeout during the non-cancellable initial full-disk scan). `engine_destroy` refuses to free the `EngineState` when a worker is still live, converting a use-after-free into a one-shot leak at process exit.
 
-Remaining Everything-parity gaps:
+Closed 2026-06-03 (build + test verification):
 
+- ✅ Installed the .NET 10 SDK in-session and **compiled + ran the test suite on Linux** (`-p:EnableWindowsTargeting=true`) for `App.Core`, `Pipe.Client`, and the xUnit project. **436 tests pass, 0 fail** (excluding native-DLL integration + two inherently-Windows tests). Building caught real defects the never-compiled branch hid: a comparison-operator regression (`<`/`>` mis-parsed as grouping) in `BooleanQuery.Lex`, a pre-existing CS0420 in `InProcEngineClient`, an `out _`/`using var _` clash in `FtpServer`, and an expression-tree `is`-pattern in a test — all fixed. So the entire query/property/grouping/IPC/FTP/ETP logic is now verified, not just authored.
+
+Closed 2026-06-03 (feature-parity audit — see `docs/PARITY.md`):
+
+- ✅ Full Everything ⇄ WhereIsIt parity scorecard captured in `docs/PARITY.md`.
+- ✅ Query funcs: `wildcards:`/`nowildcards:` (literal `*`/`?`), `diacritics:`/`nodiacritics:` (accent folding in the substring + whole-word paths; the native engine receives the `diacritics:false` hint so its candidate set stays a superset), the encoding-specific content aliases (`ansicontent:`/`utf8content:`/`utf16content:`/`utf16becontent:` → `content:`), and the `childcount:`/`childfilecount:`/`childfoldercount:` folder filters. Parsed in `QueryParser`, post-filtered in both `FilteringEngineClient` and `InProcEngineClient`. Covered by `QueryParserExtendedTests` + `InProcEngineClientExtendedFilterTests` (needs a Windows build to run green).
+
+Closed 2026-06-03 (UI parity follow-up):
+
+- ✅ **Match highlighting** — literal query terms (from `QueryParser.ExtractHighlightTerms`) are highlighted in the Name column via a `SearchHighlighter` attached property that drives WinUI `TextHighlighter` ranges. Terms flow MainViewModel → `ResultsListViewModel.BindResults` → row VM → XAML. Needs a Windows build to smoke-test.
+- ✅ **System tray + minimize to tray** — dependency-free `TrayIconHost` (`Shell_NotifyIcon` on a message-only window); minimizing hides to tray, tray left-click / "Open WhereIsIt" restores, "Exit" quits. Needs a Windows build to smoke-test.
+
+Closed 2026-06-03 (run-metadata filters):
+
+- ✅ **`rc:` / `runcount:` and `dr:` filters** — `RunCountService` now also tracks (and persists, via `AppSettings.RunDates`) last-run timestamps and is thread-safe. `EngineClientFactory` passes path-keyed `Get`/`GetLastRun` lookups into `FilteringEngineClient`, which evaluates `rc:`/`dr:` in its post-filter for every inner engine. Covered by `FilteringEngineClientTests`, `QueryParserExtendedTests`, `RunCountServiceTests`.
+
+Relative date spans (`3days`/`last2weeks`/`past6months`/`next1year`) now parse too, so the entire `ParseDateSpec` keyword surface is at parity (only the space-separated phrasing needs quoting).
+
+Closed 2026-06-03 (boolean grouping):
+
+- ✅ **`< >` grouping** — new additive `BooleanQuery` expression tree (lexer + recursive-descent parser + evaluator) engages only when a query contains a bracket, so the existing flat-clause fast path is untouched. Both engines evaluate the tree (`FilteringEngineClient`/`InProcEngineClient`). Functions apply globally (place them outside groups). Covered by `BooleanQueryTests` + `InProcEngineClientExtendedFilterTests`.
+
+Remaining Everything-parity gaps (full detail + ranking in `docs/PARITY.md` §9):
+
+- **Function-level OR / functions inside `< >`** — term grouping done; folding filters into the boolean tree is a larger engine change.
+- **Preview pane, property/metadata index, `es.exe`+IPC SDK, shell extension, ETP/FTP server, background service** — Windows-only / large / proprietary-protocol work that can't be built or verified in a Linux session.
+- **Property/metadata index** — unlocks `album:`/`width:`/… + custom columns.
 - **ETP / FTP server** — proprietary Everything protocol. Skipped; HTTP server covers the cross-device search use case.
-- **Everything IPC/SDK & `es.exe` CLI** — third-party-tool integration surface; not started.
-- **UI tier** — system tray and match-term highlighting. Not started.
+- **Everything IPC/SDK, `es.exe` CLI, shell context-menu extension, background service** — Windows-only integration surface; deliberately deferred.
 
 Closed this session:
 

@@ -39,6 +39,26 @@ public class ResultsListViewModelTests
     }
 
     [Fact]
+    public void BindResults_PropagatesHighlightTermsToRows()
+    {
+        var vm = new ResultsListViewModel(new FakeEngineClient());
+        vm.BindResults(new uint[] { 1, 2 }, "report\nlog");
+        Assert.All(vm.Rows, r => Assert.Equal("report\nlog", r.HighlightTerms));
+    }
+
+    [Fact]
+    public void BindResults_RefreshesHighlightTermsOnReusedRows()
+    {
+        var vm = new ResultsListViewModel(new FakeEngineClient());
+        vm.BindResults(new uint[] { 1 }, "first");
+        var firstRow = vm.Rows[0];
+        vm.BindResults(new uint[] { 1 }, "second");
+        // Same cached row instance, but terms updated for the new search.
+        Assert.Same(firstRow, vm.Rows[0]);
+        Assert.Equal("second", vm.Rows[0].HighlightTerms);
+    }
+
+    [Fact]
     public void SortKeyChange_CallsSort()
     {
         var fake = new FakeEngineClient();

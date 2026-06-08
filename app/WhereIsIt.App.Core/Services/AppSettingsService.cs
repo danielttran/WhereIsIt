@@ -186,12 +186,62 @@ public sealed class AppSettingsService : IDisposable
         ScheduleFlush();
     }
 
+    public void SavePropertyColumns(bool dimensions, bool artist, bool album, bool author)
+    {
+        lock (gate)
+        {
+            cached ??= LoadFromDisk();
+            cached.ShowDimensionsColumn = dimensions;
+            cached.ShowArtistColumn = artist;
+            cached.ShowAlbumColumn = album;
+            cached.ShowAuthorColumn = author;
+            revision++;
+        }
+        ScheduleFlush();
+    }
+
+    public void SaveColumnWidths(double size, double modified, double type, double attr)
+    {
+        lock (gate)
+        {
+            cached ??= LoadFromDisk();
+            cached.SizeColumnPx = size;
+            cached.ModifiedColumnPx = modified;
+            cached.TypeColumnPx = type;
+            cached.AttrColumnPx = attr;
+            revision++;
+        }
+        ScheduleFlush();
+    }
+
+    public void SavePreviewPane(bool show)
+    {
+        lock (gate)
+        {
+            cached ??= LoadFromDisk();
+            cached.ShowPreviewPane = show;
+            revision++;
+        }
+        ScheduleFlush();
+    }
+
     public void SaveRunCounts(System.Collections.Generic.Dictionary<string, int> counts)
     {
         lock (gate)
         {
             cached ??= LoadFromDisk();
             cached.RunCounts = counts;
+            revision++;
+        }
+        ScheduleFlush();
+    }
+
+    public void SaveRunDates(System.Collections.Generic.Dictionary<string, long> dates)
+    {
+        lock (gate)
+        {
+            cached ??= LoadFromDisk();
+            cached.RunDates = dates;
             revision++;
         }
         ScheduleFlush();

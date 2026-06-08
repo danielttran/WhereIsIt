@@ -5,6 +5,7 @@
     xmlns:vm="using:WhereIsIt.App.ViewModels"
     xmlns:app="using:WhereIsIt.App"
     xmlns:muxc="using:Microsoft.UI.Xaml.Controls"
+    xmlns:prim="using:Microsoft.UI.Xaml.Controls.Primitives"
     Title="WhereIsIt">
 
     <Grid x:Name="RootGrid" RowDefinitions="Auto,Auto,Auto,*,Auto" Padding="0">
@@ -134,6 +135,22 @@
                 <ToggleMenuFlyoutItem Text="Runs"
                     IsChecked="{x:Bind app:ColumnSettings.Current.ShowRunCountColumn, Mode=TwoWay}"
                     Click="OnColumnToggleClick"/>
+                <ToggleMenuFlyoutItem Text="Dimensions"
+                    IsChecked="{x:Bind app:ColumnSettings.Current.ShowDimensionsColumn, Mode=TwoWay}"
+                    Click="OnPropertyColumnToggleClick"/>
+                <ToggleMenuFlyoutItem Text="Artist"
+                    IsChecked="{x:Bind app:ColumnSettings.Current.ShowArtistColumn, Mode=TwoWay}"
+                    Click="OnPropertyColumnToggleClick"/>
+                <ToggleMenuFlyoutItem Text="Album"
+                    IsChecked="{x:Bind app:ColumnSettings.Current.ShowAlbumColumn, Mode=TwoWay}"
+                    Click="OnPropertyColumnToggleClick"/>
+                <ToggleMenuFlyoutItem Text="Author"
+                    IsChecked="{x:Bind app:ColumnSettings.Current.ShowAuthorColumn, Mode=TwoWay}"
+                    Click="OnPropertyColumnToggleClick"/>
+                <MenuFlyoutSeparator/>
+                <ToggleMenuFlyoutItem Text="Preview pane"
+                    IsChecked="{x:Bind app:ColumnSettings.Current.ShowPreviewPane, Mode=TwoWay}"
+                    Click="OnPreviewToggleClick"/>
                 <MenuFlyoutSeparator/>
                 <MenuFlyoutItem Text="Thumbnails" IsEnabled="False" FontWeight="SemiBold"/>
                 <ToggleMenuFlyoutItem Text="Off"         Tag="0"   Click="OnThumbnailSizeClick"
@@ -150,6 +167,9 @@
 
             <MenuBarItem Title="Tools">
                 <MenuFlyoutItem Text="Options…" Click="OnSettingsClick"/>
+                <MenuFlyoutSeparator/>
+                <ToggleMenuFlyoutItem x:Name="ShellMenuToggle"
+                    Text="Add to Explorer context menu" Click="OnShellMenuToggleClick"/>
             </MenuBarItem>
 
             <MenuBarItem Title="Help">
@@ -180,8 +200,13 @@
             </muxc:TabView.TabItemTemplate>
         </muxc:TabView>
 
-        <!-- Results -->
-        <Grid Grid.Row="3" RowDefinitions="Auto,*" Padding="12,0,12,0">
+        <!-- Results + optional preview pane -->
+        <Grid Grid.Row="3">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.PreviewPaneWidth, Mode=OneWay}"/>
+        </Grid.ColumnDefinitions>
+        <Grid Grid.Column="0" RowDefinitions="Auto,*" Padding="12,0,12,0">
             <!-- Column headers -->
             <Grid Grid.Row="0"
                   x:Name="HeaderGrid"
@@ -192,13 +217,17 @@
                     <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.ThumbnailColumnWidth, Mode=OneWay}"/>
                     <ColumnDefinition Width="2*"/>
                     <ColumnDefinition Width="3*"/>
-                    <ColumnDefinition Width="120"/>
-                    <ColumnDefinition Width="160"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.SizeColWidth, Mode=OneWay}"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.ModifiedColWidth, Mode=OneWay}"/>
                     <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.CreatedColumnWidth, Mode=OneWay}"/>
                     <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AccessedColumnWidth, Mode=OneWay}"/>
                     <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.RunCountColumnWidth, Mode=OneWay}"/>
-                    <ColumnDefinition Width="100"/>
-                    <ColumnDefinition Width="80"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.TypeColWidth, Mode=OneWay}"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AttrColWidth, Mode=OneWay}"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.DimensionsColumnWidth, Mode=OneWay}"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.ArtistColumnWidth, Mode=OneWay}"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AlbumColumnWidth, Mode=OneWay}"/>
+                    <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AuthorColumnWidth, Mode=OneWay}"/>
                 </Grid.ColumnDefinitions>
                 <Button Grid.Column="1" Style="{StaticResource ColumnHeaderButton}"
                         Command="{x:Bind ViewModel.ResultsList.SortByCommand}" CommandParameter="name">
@@ -215,7 +244,7 @@
                     </StackPanel>
                 </Button>
                 <Button Grid.Column="3" Style="{StaticResource ColumnHeaderButton}"
-                        Width="120" HorizontalContentAlignment="Right"
+                        HorizontalContentAlignment="Right"
                         Command="{x:Bind ViewModel.ResultsList.SortByCommand}" CommandParameter="size">
                     <StackPanel Orientation="Horizontal" Spacing="2">
                         <TextBlock Text="Size" FontWeight="SemiBold"/>
@@ -223,7 +252,6 @@
                     </StackPanel>
                 </Button>
                 <Button Grid.Column="4" Style="{StaticResource ColumnHeaderButton}"
-                        Width="160"
                         Command="{x:Bind ViewModel.ResultsList.SortByCommand}" CommandParameter="modified">
                     <StackPanel Orientation="Horizontal" Spacing="2">
                         <TextBlock Text="Modified" FontWeight="SemiBold"/>
@@ -259,6 +287,23 @@
                         <TextBlock Text="Attr"/><TextBlock Text="{x:Bind ViewModel.ResultsList.AttributesSortIndicator, Mode=OneWay}" Opacity="0.7"/>
                     </StackPanel>
                 </Button>
+                <Button Grid.Column="10" Style="{StaticResource ColumnHeaderButton}" Content="Dimensions"
+                        Visibility="{x:Bind app:ColumnSettings.Current.DimensionsColumnVisibility, Mode=OneWay}"/>
+                <Button Grid.Column="11" Style="{StaticResource ColumnHeaderButton}" Content="Artist"
+                        Visibility="{x:Bind app:ColumnSettings.Current.ArtistColumnVisibility, Mode=OneWay}"/>
+                <Button Grid.Column="12" Style="{StaticResource ColumnHeaderButton}" Content="Album"
+                        Visibility="{x:Bind app:ColumnSettings.Current.AlbumColumnVisibility, Mode=OneWay}"/>
+                <Button Grid.Column="13" Style="{StaticResource ColumnHeaderButton}" Content="Author"
+                        Visibility="{x:Bind app:ColumnSettings.Current.AuthorColumnVisibility, Mode=OneWay}"/>
+                <!-- Resize grippers on the right edge of the fixed columns. -->
+                <prim:Thumb Grid.Column="3" Tag="size" HorizontalAlignment="Right" Width="6"
+                            Background="Transparent" DragDelta="OnColumnResize"/>
+                <prim:Thumb Grid.Column="4" Tag="modified" HorizontalAlignment="Right" Width="6"
+                            Background="Transparent" DragDelta="OnColumnResize"/>
+                <prim:Thumb Grid.Column="8" Tag="type" HorizontalAlignment="Right" Width="6"
+                            Background="Transparent" DragDelta="OnColumnResize"/>
+                <prim:Thumb Grid.Column="9" Tag="attr" HorizontalAlignment="Right" Width="6"
+                            Background="Transparent" DragDelta="OnColumnResize"/>
             </Grid>
 
             <!-- Empty state overlay -->
@@ -321,13 +366,17 @@
                                 <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.ThumbnailColumnWidth, Mode=OneWay}"/>
                                 <ColumnDefinition Width="2*"/>
                                 <ColumnDefinition Width="3*"/>
-                                <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="160"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.SizeColWidth, Mode=OneWay}"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.ModifiedColWidth, Mode=OneWay}"/>
                                 <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.CreatedColumnWidth, Mode=OneWay}"/>
                                 <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AccessedColumnWidth, Mode=OneWay}"/>
                                 <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.RunCountColumnWidth, Mode=OneWay}"/>
-                                <ColumnDefinition Width="100"/>
-                                <ColumnDefinition Width="80"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.TypeColWidth, Mode=OneWay}"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AttrColWidth, Mode=OneWay}"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.DimensionsColumnWidth, Mode=OneWay}"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.ArtistColumnWidth, Mode=OneWay}"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AlbumColumnWidth, Mode=OneWay}"/>
+                                <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AuthorColumnWidth, Mode=OneWay}"/>
                             </Grid.ColumnDefinitions>
                             <Image Grid.Column="0"
                                    Source="{x:Bind app:Converters.AsImageSource(ThumbnailSource), Mode=OneWay}"
@@ -336,7 +385,9 @@
                                    Stretch="Uniform"
                                    Margin="0,0,8,0"
                                    Visibility="{x:Bind app:ColumnSettings.Current.ThumbnailColumnVisibility, Mode=OneWay}"/>
-                            <TextBlock Grid.Column="1" Text="{x:Bind Name, Mode=OneWay}" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock Grid.Column="1" TextTrimming="CharacterEllipsis"
+                                       app:SearchHighlighter.Text="{x:Bind Name, Mode=OneWay}"
+                                       app:SearchHighlighter.Terms="{x:Bind HighlightTerms, Mode=OneWay}"/>
                             <TextBlock Grid.Column="2" Text="{x:Bind ParentPath, Mode=OneWay}"
                                        Opacity="0.7" TextTrimming="CharacterEllipsis"/>
                             <TextBlock Grid.Column="3" Text="{x:Bind SizeText, Mode=OneWay}"
@@ -348,10 +399,35 @@
                                        HorizontalAlignment="Right" Opacity="0.55"/>
                             <TextBlock Grid.Column="8" Text="{x:Bind ExtensionText, Mode=OneWay}" TextTrimming="CharacterEllipsis" Opacity="0.6"/>
                             <TextBlock Grid.Column="9" Text="{x:Bind AttributesText, Mode=OneWay}" Opacity="0.6"/>
+                            <TextBlock Grid.Column="10" Text="{x:Bind DimensionsText, Mode=OneWay}" Opacity="0.6" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock Grid.Column="11" Text="{x:Bind ArtistText, Mode=OneWay}" Opacity="0.6" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock Grid.Column="12" Text="{x:Bind AlbumText, Mode=OneWay}" Opacity="0.6" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock Grid.Column="13" Text="{x:Bind AuthorText, Mode=OneWay}" Opacity="0.6" TextTrimming="CharacterEllipsis"/>
                         </Grid>
                     </DataTemplate>
                 </ListView.ItemTemplate>
             </ListView>
+        </Grid>
+
+        <!-- Preview pane (toggled from View → Preview pane) -->
+        <Border Grid.Column="1"
+                x:Name="PreviewPaneBorder"
+                Visibility="{x:Bind app:ColumnSettings.Current.PreviewPaneVisibility, Mode=OneWay}"
+                BorderBrush="{ThemeResource SystemControlForegroundBaseLowBrush}"
+                BorderThickness="1,0,0,0"
+                Padding="12,4,12,4">
+            <ScrollViewer>
+                <StackPanel Spacing="8">
+                    <TextBlock x:Name="PreviewName" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                    <Image x:Name="PreviewImage" Stretch="Uniform" MaxHeight="280"
+                           HorizontalAlignment="Left" Visibility="Collapsed"/>
+                    <TextBlock x:Name="PreviewInfo" Opacity="0.7" TextWrapping="Wrap"/>
+                    <TextBox x:Name="PreviewText" IsReadOnly="True" AcceptsReturn="True"
+                             TextWrapping="Wrap" BorderThickness="0" Background="Transparent"
+                             FontFamily="Consolas" Visibility="Collapsed" MaxHeight="400"/>
+                </StackPanel>
+            </ScrollViewer>
+        </Border>
         </Grid>
 
         <!-- Status bar -->

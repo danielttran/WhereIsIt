@@ -26,6 +26,19 @@ public partial class ResultRowViewModel : ObservableObject
     [ObservableProperty] private string attributesText = string.Empty;
     [ObservableProperty] private int runCount;
 
+    // Optional metadata-property columns, filled lazily by the App layer (which
+    // reads the file header off the UI thread) only when the column is shown.
+    [ObservableProperty] private string dimensionsText = string.Empty;
+    [ObservableProperty] private string artistText = string.Empty;
+    [ObservableProperty] private string albumText = string.Empty;
+    [ObservableProperty] private string authorText = string.Empty;
+
+    // Newline-separated literal terms the result list should highlight in the
+    // Name column. Shared across all rows of the current search; set by
+    // ResultsListViewModel.BindResults so the highlighter attached property in
+    // the App layer can mark up matched spans without this assembly touching WinUI.
+    [ObservableProperty] private string highlightTerms = string.Empty;
+
     // Loosely typed as object so this assembly doesn't need to reference
     // WinUI. At runtime it's a Microsoft.UI.Xaml.Media.ImageSource set by
     // the App's ThumbnailService; the Image's Source property accepts it

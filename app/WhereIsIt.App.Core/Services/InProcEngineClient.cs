@@ -8,6 +8,11 @@ using System.Threading;
 using System.Threading.Tasks;
 using WhereIsIt.App.Contracts;
 
+// Interlocked/Volatile operations on the volatile `state` field intentionally
+// pass it by ref; the CS0420 "ref to volatile" warning is a known false positive
+// for Interlocked, which already provides the required ordering.
+#pragma warning disable 0420
+
 namespace WhereIsIt.App.Services;
 
 public sealed class InProcEngineClient : IEngineClient, IDisposable
@@ -150,6 +155,9 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         // Pre-compile clause regexes once — without this, every file with a
         // wildcard or regex query pays a Regex compile+JIT per row.
         var clauseRegexes = BuildClauseRegexes(parsed);
+        // Pre-parse each distinct function leaf of a grouped/boolean query so the
+        // per-row evaluation reuses Matches() against the leaf's single-filter query.
+        var funcLeaves = BuildFuncLeaves(parsed);
 
         var results = new List<FileSystemInfo>(256);
         var opts = new EnumerationOptions
@@ -176,7 +184,7 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
                 foreach (var info in rootInfo.EnumerateFileSystemInfos("*", opts))
                 {
                     if (cancellationToken.IsCancellationRequested) break;
-                    if (!Matches(info, parsed, root, childPrefixLower, parentLower, clauseRegexes)) continue;
+                    if (!Matches(info, parsed, root, childPrefixLower, parentLower, clauseRegexes, funcLeaves)) continue;
                     results.Add(info);
                 }
             }
@@ -186,7 +194,28 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         return results.ToArray();
     }
 
-    private static bool Matches(FileSystemInfo info, ParsedQuery q, string root, string? childPrefixLower, string? parentLower, Regex?[]? clauseRegexes)
+    private sealed record FuncLeaf(ParsedQuery Query, string? ChildPrefixLower, string? ParentLower);
+
+    private static Dictionary<string, FuncLeaf>? BuildFuncLeaves(ParsedQuery parsed)
+    {
+        if (parsed.TermExpr is null) return null;
+        var tokens = new List<string>();
+        BooleanQuery.CollectFunctionTokens(parsed.TermExpr, tokens);
+        if (tokens.Count == 0) return null;
+        var map = new Dictionary<string, FuncLeaf>(StringComparer.Ordinal);
+        foreach (var tok in tokens)
+        {
+            if (map.ContainsKey(tok)) continue;
+            var lq = QueryParser.Parse(tok);
+            string? cp = lq.ChildOfPath is null ? null
+                : TrimTrailingSeparators(lq.ChildOfPath).ToLowerInvariant() + Path.DirectorySeparatorChar;
+            string? pl = lq.ParentIsPath is null ? null : TrimTrailingSeparators(lq.ParentIsPath).ToLowerInvariant();
+            map[tok] = new FuncLeaf(lq, cp, pl);
+        }
+        return map;
+    }
+
+    private static bool Matches(FileSystemInfo info, ParsedQuery q, string root, string? childPrefixLower, string? parentLower, Regex?[]? clauseRegexes, Dictionary<string, FuncLeaf>? funcLeaves = null)
     {
         FileAttributes attr;
         try { attr = info.Attributes; }
@@ -257,14 +286,71 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
             catch { return false; }
         }
 
-        if (q.Clauses.Count == 0) return true;
+        if (q.ChildCount is not null || q.ChildFileCount is not null || q.ChildFolderCount is not null)
+        {
+            if (!isDir) return false;
+            if (!ChildCountsMatch(q, fullPath)) return false;
+        }
+
+        if (q.Depth is not null && !q.Depth.Matches((ulong)QueryParser.FolderDepth(fullPath)))
+            return false;
+
+        if (q.Width is not null || q.Height is not null)
+        {
+            if (isDir) return false;
+            if (!ImageDimensions.TryRead(fullPath, out int w, out int h)) return false;
+            if (q.Width is not null && !q.Width.Matches((ulong)w)) return false;
+            if (q.Height is not null && !q.Height.Matches((ulong)h)) return false;
+        }
+
+        if (q.Orientation is not null)
+        {
+            if (isDir) return false;
+            if (!ImageDimensions.TryReadOrientation(fullPath, out int o)) return false;
+            if (!q.Orientation.Matches((ulong)o)) return false;
+        }
+
+        if (q.MediaFilters.Count > 0)
+        {
+            if (isDir) return false;
+            if (!MediaProperties.Match(q.MediaFilters, fullPath, q.CaseSensitive, q.MatchDiacritics)) return false;
+        }
+
+        if (q.Duration is not null || q.SampleRate is not null || q.Channels is not null)
+        {
+            if (isDir) return false;
+            if (!AudioTags.MatchStream(fullPath, q.Duration, q.SampleRate, q.Channels)) return false;
+        }
+
+        if (q.Bitrate is not null)
+        {
+            if (isDir) return false;
+            ulong sz = info is FileInfo bf ? (ulong)bf.Length : 0;
+            if (!AudioTags.MatchBitrate(fullPath, sz, q.Bitrate)) return false;
+        }
+
+        if (q.TermExpr is null && q.Clauses.Count == 0) return true;
 
         var cmp = q.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
-        // Build the relative path only when a clause needs it (i.e. we have
-        // any clauses). For a typical extension-only or size-only query the
-        // clauses list is empty so we short-circuited above without paying for
-        // GetRelativePath/Replace allocations.
+        // Build the relative path only when a clause/expression needs it. For a
+        // typical extension-only or size-only query both are empty so we
+        // short-circuited above without paying for GetRelativePath/Replace.
         var relative = Path.GetRelativePath(root, fullPath).Replace('\\', '/');
+
+        // Grouped / boolean query: evaluate the expression tree. Term leaves
+        // match here; function leaves re-use Matches() against the pre-parsed
+        // single-filter query for that token.
+        if (q.TermExpr is not null)
+        {
+            var capturedInfo = info;
+            return BooleanQuery.Eval(q.TermExpr, leaf => leaf switch
+            {
+                BoolTerm t => MatchAnyAlt(t.Alternatives, q, name, relative, cmp),
+                BoolFunc f => funcLeaves is not null && funcLeaves.TryGetValue(f.Token, out var fl)
+                              && Matches(capturedInfo, fl.Query, root, fl.ChildPrefixLower, fl.ParentLower, null),
+                _ => true,
+            });
+        }
 
         int rxIdx = 0;
         foreach (var clause in q.Clauses)
@@ -302,7 +388,7 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
         if (parsed.Clauses.Count == 0) return null;
 
         bool anyNeedsRegex = parsed.RegexMode;
-        if (!anyNeedsRegex)
+        if (!anyNeedsRegex && parsed.Wildcards)
         {
             foreach (var clause in parsed.Clauses)
             {
@@ -332,7 +418,7 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
                 {
                     if (parsed.RegexMode)
                         rx = new Regex(alt, opts, RegexTimeout);
-                    else if (alt.Contains('*') || alt.Contains('?'))
+                    else if (parsed.Wildcards && (alt.Contains('*') || alt.Contains('?')))
                         rx = new Regex("^" + Regex.Escape(alt).Replace(@"\*", ".*").Replace(@"\?", ".") + "$", opts, RegexTimeout);
                 }
                 // Failed compile ⇒ a regex/wildcard was intended; never-match
@@ -346,15 +432,31 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
 
     private static bool AlternativeMatches(string alt, Regex? rx, ParsedQuery q, string name, string relative, StringComparison cmp)
     {
+        // Regex/wildcard patterns match the raw strings; folding applies to the
+        // plain substring and whole-word paths only.
         if (rx is not null)
         {
             return rx.IsMatch(name) || rx.IsMatch(relative);
+        }
+
+        if (!q.MatchDiacritics)
+        {
+            name = QueryParser.RemoveDiacritics(name);
+            relative = QueryParser.RemoveDiacritics(relative);
+            alt = QueryParser.RemoveDiacritics(alt);
         }
 
         if (q.WholeWord)
             return MatchesWord(name, alt, cmp) || (q.MatchPath && MatchesWord(relative, alt, cmp));
 
         return name.Contains(alt, cmp) || (q.MatchPath && relative.Contains(alt, cmp));
+    }
+
+    private static bool MatchAnyAlt(IReadOnlyList<string> alts, ParsedQuery q, string name, string relative, StringComparison cmp)
+    {
+        foreach (var alt in alts)
+            if (AlternativeMatches(alt, null, q, name, relative, cmp)) return true;
+        return false;
     }
 
     private static bool MatchesWord(string haystack, string needle, StringComparison cmp)
@@ -370,6 +472,27 @@ public sealed class InProcEngineClient : IEngineClient, IDisposable
             idx += needle.Length;
         }
         return false;
+    }
+
+    private static bool ChildCountsMatch(ParsedQuery q, string fullPath)
+    {
+        try
+        {
+            bool needSplit = q.ChildFileCount is not null || q.ChildFolderCount is not null;
+            ulong total = 0, files = 0, folders = 0;
+            foreach (var entry in Directory.EnumerateFileSystemEntries(fullPath))
+            {
+                total++;
+                if (!needSplit) continue;
+                if (Directory.Exists(entry)) folders++;
+                else files++;
+            }
+            if (q.ChildCount is not null && !q.ChildCount.Matches(total)) return false;
+            if (q.ChildFileCount is not null && !q.ChildFileCount.Matches(files)) return false;
+            if (q.ChildFolderCount is not null && !q.ChildFolderCount.Matches(folders)) return false;
+            return true;
+        }
+        catch { return false; }
     }
 
     private static string TrimTrailingSeparators(string path)

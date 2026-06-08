@@ -19,6 +19,8 @@ public sealed partial class MainWindow : Window
     private readonly WhereIsIt.App.Services.RunCountService?    runCountService;
     private readonly ThumbnailService?                          thumbnailService;
     private GlobalHotkeyHost? hotkeyHost;
+    private TrayIconHost? trayIcon;
+    private EverythingIpcServer? ipcServer;
 
     public MainViewModel ViewModel { get; }
 
@@ -39,11 +41,160 @@ public sealed partial class MainWindow : Window
         TrySetMicaBackdrop();
         TrySetWindowIcon();
         TryRegisterGlobalHotkey();
+        TrySetupTrayIcon();
+        TrySetupEverythingIpc();
+        AppWindow.Changed += OnAppWindowChanged;
         Closed += OnClosedReleaseHotkey;
         Closed += OnClosedPersistTabs;
 
         RefreshBookmarksMenu();
+        ViewModel.ResultsList.PropertyChanged += OnResultsListPropertyChanged;
+        try { ShellMenuToggle.IsChecked = settingsService?.Load().ShellContextMenu ?? false; } catch { }
         Activated += OnFirstActivatedShowRestorePrompt;
+    }
+
+    // ── Column resize (header grippers) ─────────────────────────────────
+
+    private void OnColumnResize(object sender, Microsoft.UI.Xaml.Controls.Primitives.DragDeltaEventArgs e)
+    {
+        if (sender is not FrameworkElement { Tag: string key }) return;
+        ColumnSettings.Current.ResizeColumn(key, e.HorizontalChange);
+        var c = ColumnSettings.Current;
+        settingsService?.SaveColumnWidths(c.SizeColPx, c.ModifiedColPx, c.TypeColPx, c.AttrColPx);
+    }
+
+    // ── Custom property columns ─────────────────────────────────────────
+
+    private void OnPropertyColumnToggleClick(object sender, RoutedEventArgs e)
+    {
+        var c = ColumnSettings.Current;
+        settingsService?.SavePropertyColumns(c.ShowDimensionsColumn, c.ShowArtistColumn, c.ShowAlbumColumn, c.ShowAuthorColumn);
+        // Refresh values for already-realized rows so a freshly-enabled column fills in.
+        foreach (var row in ViewModel.ResultsList.Rows) LoadPropertyColumns(row);
+    }
+
+    private void LoadPropertyColumns(ViewModels.ResultRowViewModel row)
+    {
+        var c = ColumnSettings.Current;
+        bool needAudio = c.ShowArtistColumn || c.ShowAlbumColumn;
+        if (!c.ShowDimensionsColumn && !needAudio && !c.ShowAuthorColumn) return;
+
+        var path = row.FullPath;
+        if (string.IsNullOrEmpty(path)) return;
+
+        _ = System.Threading.Tasks.Task.Run(() =>
+        {
+            string dim = string.Empty, artist = string.Empty, album = string.Empty, author = string.Empty;
+            try
+            {
+                if (c.ShowDimensionsColumn &&
+                    WhereIsIt.App.Services.ImageDimensions.TryRead(path, out int w, out int h))
+                    dim = $"{w}×{h}";
+                if (needAudio && WhereIsIt.App.Services.AudioTags.TryRead(path, out var tags))
+                {
+                    artist = tags.Artist ?? string.Empty;
+                    album = tags.Album ?? string.Empty;
+                }
+                if (c.ShowAuthorColumn &&
+                    WhereIsIt.App.Services.DocumentProps.TryRead(path, out var doc))
+                    author = doc.Author ?? string.Empty;
+            }
+            catch { /* unreadable — leave blank */ }
+
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (c.ShowDimensionsColumn) row.DimensionsText = dim;
+                if (c.ShowArtistColumn) row.ArtistText = artist;
+                if (c.ShowAlbumColumn) row.AlbumText = album;
+                if (c.ShowAuthorColumn) row.AuthorText = author;
+            });
+        });
+    }
+
+    private void OnShellMenuToggleClick(object sender, RoutedEventArgs e)
+    {
+        bool on = (sender as ToggleMenuFlyoutItem)?.IsChecked ?? false;
+        ShellMenuRegistration.Apply(on);
+        if (settingsService is null) return;
+        var s = settingsService.Load();
+        s.ShellContextMenu = on;
+        settingsService.Save(s);
+    }
+
+    // ── Preview pane ────────────────────────────────────────────────────
+
+    private void OnResultsListPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(ViewModels.ResultsListViewModel.SelectedRow))
+            _ = UpdatePreviewAsync();
+    }
+
+    private void OnPreviewToggleClick(object sender, RoutedEventArgs e)
+    {
+        settingsService?.SavePreviewPane(ColumnSettings.Current.ShowPreviewPane);
+        _ = UpdatePreviewAsync();
+    }
+
+    private static readonly System.Collections.Generic.HashSet<string> PreviewImageExts =
+        new(StringComparer.OrdinalIgnoreCase) { ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".ico", ".tif", ".tiff" };
+    private static readonly System.Collections.Generic.HashSet<string> PreviewTextExts =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".txt", ".log", ".md", ".csv", ".json", ".xml", ".yaml", ".yml", ".ini", ".cfg",
+            ".cs", ".c", ".cpp", ".h", ".hpp", ".py", ".js", ".ts", ".html", ".htm", ".css",
+            ".sql", ".sh", ".ps1", ".bat", ".cmd", ".rs", ".go", ".java", ".rb", ".php",
+        };
+
+    private async System.Threading.Tasks.Task UpdatePreviewAsync()
+    {
+        if (!ColumnSettings.Current.ShowPreviewPane) return;
+        var row = ViewModel.ResultsList.SelectedRow;
+        PreviewImage.Visibility = Visibility.Collapsed;
+        PreviewText.Visibility = Visibility.Collapsed;
+        if (row is null) { PreviewName.Text = string.Empty; PreviewInfo.Text = string.Empty; return; }
+
+        await row.EnsureLoadedAsync(System.Threading.CancellationToken.None);
+        var path = row.FullPath;
+        PreviewName.Text = row.Name;
+
+        try
+        {
+            var fi = new System.IO.FileInfo(path);
+            PreviewInfo.Text = fi.Exists
+                ? $"{ViewModels.ResultRowViewModel.FormatBytes((ulong)fi.Length)} · {fi.LastWriteTime:yyyy-MM-dd HH:mm}\n{path}"
+                : path;
+        }
+        catch { PreviewInfo.Text = path; }
+
+        var ext = System.IO.Path.GetExtension(path);
+        if (PreviewImageExts.Contains(ext))
+        {
+            try
+            {
+                PreviewImage.Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(path));
+                PreviewImage.Visibility = Visibility.Visible;
+            }
+            catch { /* unreadable image — leave hidden */ }
+        }
+        else if (PreviewTextExts.Contains(ext))
+        {
+            try
+            {
+                var text = await ReadHeadAsync(path, 16 * 1024);
+                PreviewText.Text = text;
+                PreviewText.Visibility = Visibility.Visible;
+            }
+            catch { /* unreadable text — leave hidden */ }
+        }
+    }
+
+    private static async System.Threading.Tasks.Task<string> ReadHeadAsync(string path, int maxChars)
+    {
+        using var reader = new System.IO.StreamReader(path, detectEncodingFromByteOrderMarks: true);
+        var buf = new char[maxChars];
+        int n = await reader.ReadAsync(buf, 0, maxChars);
+        var head = new string(buf, 0, n);
+        return n >= maxChars ? head + "\n…" : head;
     }
 
     private void OnFirstActivatedShowRestorePrompt(object sender, WindowActivatedEventArgs args)
@@ -85,6 +236,9 @@ public sealed partial class MainWindow : Window
     private void BringToFront()
     {
         AppWindow.Show();
+        // Restore the presenter too, so a window that was minimized-to-tray
+        // comes back to a normal (not minimized) state.
+        if (AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter p) p.Restore();
         SetForegroundWindow(WinRT.Interop.WindowNative.GetWindowHandle(this));
         SearchTextBox.Focus(FocusState.Programmatic);
         SearchTextBox.SelectAll();
@@ -93,8 +247,50 @@ public sealed partial class MainWindow : Window
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr hWnd);
 
+    // ── System tray / minimize-to-tray ──────────────────────────────────
+
+    private void TrySetupTrayIcon()
+    {
+        try
+        {
+            var iconPath = System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "WhereIsIt.ico");
+            trayIcon = new TrayIconHost("WhereIsIt", iconPath, BringToFront, Close);
+        }
+        catch { /* tray icon is optional — never block startup on it */ }
+    }
+
+    private void OnAppWindowChanged(Microsoft.UI.Windowing.AppWindow sender,
+                                    Microsoft.UI.Windowing.AppWindowChangedEventArgs args)
+    {
+        // Minimize-to-tray: only when the tray icon is live (otherwise the user
+        // would have no way to bring the window back).
+        if (trayIcon is null) return;
+        if (sender.Presenter is Microsoft.UI.Windowing.OverlappedPresenter
+            { State: Microsoft.UI.Windowing.OverlappedPresenterState.Minimized })
+        {
+            sender.Hide();
+        }
+    }
+
+    private void TrySetupEverythingIpc()
+    {
+        try
+        {
+            if (settingsService?.Load().EnableEverythingIpc != true) return;
+            if (services.GetService(typeof(WhereIsIt.App.Contracts.IEngineClient))
+                is WhereIsIt.App.Contracts.IEngineClient engine)
+                ipcServer = new EverythingIpcServer(engine);
+        }
+        catch { /* IPC is optional — never block startup on it */ }
+    }
+
     private void OnClosedReleaseHotkey(object sender, WindowEventArgs args)
-        => hotkeyHost?.Dispose();
+    {
+        AppWindow.Changed -= OnAppWindowChanged;
+        hotkeyHost?.Dispose();
+        trayIcon?.Dispose();
+        ipcServer?.Dispose();
+    }
 
     private void OnClosedPersistTabs(object sender, WindowEventArgs args)
     {
@@ -203,6 +399,7 @@ public sealed partial class MainWindow : Window
 
         await row.EnsureLoadedAsync(System.Threading.CancellationToken.None);
         if (runCountService is not null) row.RunCount = runCountService.Get(row.FullPath);
+        LoadPropertyColumns(row);
 
         var thumbs = thumbnailService;
         var size = thumbs?.CurrentSize ?? WhereIsIt.App.Services.ThumbnailSize.Off;
@@ -580,6 +777,7 @@ public sealed partial class MainWindow : Window
             runCountService.Increment(path);
             row.RunCount = runCountService.Get(path);
             settingsService?.SaveRunCounts(runCountService.Snapshot());
+            settingsService?.SaveRunDates(runCountService.SnapshotRunDates());
         }
     }
 

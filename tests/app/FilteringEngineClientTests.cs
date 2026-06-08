@@ -225,6 +225,112 @@ public class FilteringEngineClientTests
     }
 
     [Fact]
+    public async Task RunCountFilter_UsesLookup()
+    {
+        var inner = new FakeInner();
+        inner.Rows[1] = Row("hot.txt",  @"C:\");
+        inner.Rows[2] = Row("cold.txt", @"C:\");
+
+        var runs = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+        {
+            [Path.Combine(@"C:\", "hot.txt")] = 7,
+            [Path.Combine(@"C:\", "cold.txt")] = 1,
+        };
+        using var client = new FilteringEngineClient(
+            inner, p => runs.TryGetValue(p, out var n) ? n : 0, null);
+        IReadOnlyList<uint>? rec = null;
+        using var sub = client.ObserveResults.Subscribe(ids => rec = ids);
+
+        await client.SearchAsync("rc:>5", CancellationToken.None);
+        inner.Emit(1, 2);
+        await Task.Delay(50);
+
+        rec!.Should().Equal((uint)1);
+    }
+
+    [Fact]
+    public async Task DateRunFilter_ExcludesNeverOpened()
+    {
+        var inner = new FakeInner();
+        inner.Rows[1] = Row("opened.txt", @"C:\");
+        inner.Rows[2] = Row("never.txt",  @"C:\");
+
+        var dates = new Dictionary<string, DateTimeOffset>(StringComparer.OrdinalIgnoreCase)
+        {
+            [Path.Combine(@"C:\", "opened.txt")] = DateTimeOffset.Now,
+        };
+        using var client = new FilteringEngineClient(
+            inner, null, p => dates.TryGetValue(p, out var d) ? d : default);
+        IReadOnlyList<uint>? rec = null;
+        using var sub = client.ObserveResults.Subscribe(ids => rec = ids);
+
+        await client.SearchAsync("dr:today", CancellationToken.None);
+        inner.Emit(1, 2);
+        await Task.Delay(50);
+
+        rec!.Should().Equal((uint)1);
+    }
+
+    [Fact]
+    public async Task GroupedFunctionOr_MatchesEitherFunction()
+    {
+        var inner = new FakeInner();
+        inner.Rows[1] = Row("a.cs",  @"C:\");
+        inner.Rows[2] = Row("b.txt", @"C:\");
+        inner.Rows[3] = Row("c.py",  @"C:\");
+
+        using var client = new FilteringEngineClient(inner);
+        IReadOnlyList<uint>? rec = null;
+        using var sub = client.ObserveResults.Subscribe(ids => rec = ids);
+
+        // Function-level OR via grouping: ext:cs OR ext:txt.
+        await client.SearchAsync("<ext:cs>|<ext:txt>", CancellationToken.None);
+        inner.Emit(1, 2, 3);
+        await Task.Delay(50);
+
+        rec!.Should().Equal((uint)1, (uint)2);
+    }
+
+    [Fact]
+    public async Task BracketlessFunctionOr_MatchesEitherFunction()
+    {
+        var inner = new FakeInner();
+        inner.Rows[1] = Row("a.cs",  @"C:\");
+        inner.Rows[2] = Row("b.txt", @"C:\");
+        inner.Rows[3] = Row("c.py",  @"C:\");
+
+        using var client = new FilteringEngineClient(inner);
+        IReadOnlyList<uint>? rec = null;
+        using var sub = client.ObserveResults.Subscribe(ids => rec = ids);
+
+        // Bracketless function-level OR via a standalone '|'.
+        await client.SearchAsync("ext:cs | ext:txt", CancellationToken.None);
+        inner.Emit(1, 2, 3);
+        await Task.Delay(50);
+
+        rec!.Should().Equal((uint)1, (uint)2);
+    }
+
+    [Fact]
+    public async Task GroupedFunctionAndTerm_AppliesBoth()
+    {
+        var inner = new FakeInner();
+        inner.Rows[1] = Row("alpha.cs", @"C:\");
+        inner.Rows[2] = Row("beta.cs",  @"C:\");
+
+        using var client = new FilteringEngineClient(inner);
+        IReadOnlyList<uint>? rec = null;
+        using var sub = client.ObserveResults.Subscribe(ids => rec = ids);
+
+        // <ext:cs alpha> — function AND term inside a group.
+        await client.SearchAsync("<ext:cs alpha>", CancellationToken.None);
+        inner.Emit(1, 2);
+        await Task.Delay(50);
+
+        rec!.Should().Equal((uint)1);
+    }
+
+    [Fact]
     public async Task SearchAsync_TranslatesModifierTokens()
     {
         var inner = new FakeInner();

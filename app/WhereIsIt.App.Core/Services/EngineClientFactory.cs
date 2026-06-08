@@ -10,15 +10,22 @@ public static class EngineClientFactory
 {
     private const string PipeName = "WhereIsIt.Engine";
 
-    public static IEngineClient Create(string[]? scopeRoots = null, bool? forceElevated = null)
+    public static IEngineClient Create(
+        string[]? scopeRoots = null,
+        bool? forceElevated = null,
+        RunCountService? runCounts = null)
     {
         var inner = CreateInner(scopeRoots, forceElevated);
         // Wrap with the filtering decorator so the C# QueryParser features
         // (ext:/size:/dm:/attrib:/child:/parent:/!/|/...) work against engines
         // that don't speak those modifiers natively. InProcEngineClient already
         // applies them internally, so wrapping is a no-op for it but still
-        // keeps a single code path.
-        return new FilteringEngineClient(inner);
+        // keeps a single code path. The run-count service (when present) backs
+        // the rc:/runcount:/dr: filters via path-keyed lookups.
+        return new FilteringEngineClient(
+            inner,
+            runCounts is null ? null : runCounts.Get,
+            runCounts is null ? null : runCounts.GetLastRun);
     }
 
     private static IEngineClient CreateInner(string[]? scopeRoots, bool? forceElevated)
@@ -29,11 +36,27 @@ public static class EngineClientFactory
             catch { /* DLL present but failed to load; fall through */ }
         }
 
+        // Non-admin: if the background indexing service is listening, talk to it
+        // over the named pipe so we get a live index without elevation.
         var elevated = forceElevated ?? IsElevated();
         if (!elevated && CanConnectToPipe())
-            return new PipeEngineClient();
+            return new NamedPipeEngineClient(PipeName);
 
         return new InProcEngineClient();
+    }
+
+    /// <summary>Creates a raw local engine (native if available, else in-proc) with
+    /// no filtering decorator or pipe — used by the background service host.</summary>
+    public static IEngineClient CreateLocalEngine(string[]? scopeRoots = null)
+    {
+        if (NativeEngineClient.IsAvailable())
+        {
+            try { return new NativeEngineClient(scopeRoots); }
+            catch { /* fall through to in-proc */ }
+        }
+        return scopeRoots is { Length: > 0 }
+            ? new InProcEngineClient(() => scopeRoots)
+            : new InProcEngineClient();
     }
 
     private static bool CanConnectToPipe()

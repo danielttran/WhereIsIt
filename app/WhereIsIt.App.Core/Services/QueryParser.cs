@@ -14,11 +14,28 @@ public sealed record ParsedQuery
     public bool MatchPath { get; init; }
     public bool FileOnly { get; init; }
     public bool FolderOnly { get; init; }
+
+    /// <summary><c>wildcards:</c>/<c>nowildcards:</c> — when false, <c>*</c> and
+    /// <c>?</c> in a term are matched literally instead of as wildcards. Defaults
+    /// to true, matching Everything's default. Ignored when <see cref="RegexMode"/>
+    /// is on (regex always interprets its own metacharacters).</summary>
+    public bool Wildcards { get; init; } = true;
+
+    /// <summary><c>diacritics:</c>/<c>nodiacritics:</c> — when false, accented
+    /// characters fold to their base letter for matching (so <c>e</c> matches
+    /// <c>é</c>). Defaults to true (diacritic-sensitive). Folding applies to the
+    /// substring and whole-word match paths.</summary>
+    public bool MatchDiacritics { get; init; } = true;
     public string[]? ExtWhitelist { get; init; }
     public SizeRange? Size { get; init; }
     public DateRange? Modified { get; init; }
     public DateRange? Created  { get; init; }
     public DateRange? Accessed { get; init; }
+    /// <summary><c>dr:</c> — date the file was last run/opened from WhereIsIt.</summary>
+    public DateRange? DateRun { get; init; }
+    /// <summary><c>rc:</c>/<c>runcount:</c> — how many times the file has been
+    /// opened from WhereIsIt.</summary>
+    public SizeRange? RunCount { get; init; }
     public AttributeFilter? Attribute { get; init; }
     public string? ChildOfPath  { get; init; }
     public string? ParentIsPath { get; init; }
@@ -46,8 +63,43 @@ public sealed record ParsedQuery
     /// <summary><c>count:</c> — cap the number of returned rows.</summary>
     public int? MaxResults { get; init; }
 
+    /// <summary><c>childcount:</c> — folders whose immediate child count matches
+    /// (files + folders). Applies to folders only.</summary>
+    public SizeRange? ChildCount { get; init; }
+    /// <summary><c>childfilecount:</c> — folders whose immediate file count matches.</summary>
+    public SizeRange? ChildFileCount { get; init; }
+    /// <summary><c>childfoldercount:</c> — folders whose immediate sub-folder count matches.</summary>
+    public SizeRange? ChildFolderCount { get; init; }
+    /// <summary><c>depth:</c>/<c>parents:</c> — folder depth, defined as the number
+    /// of path separators in the full path (a volume-root entry is depth 1).</summary>
+    public SizeRange? Depth { get; init; }
+    /// <summary><c>width:</c> / <c>dimensions:</c> — image pixel width.</summary>
+    public SizeRange? Width { get; init; }
+    /// <summary><c>height:</c> / <c>dimensions:</c> — image pixel height.</summary>
+    public SizeRange? Height { get; init; }
+    /// <summary><c>orientation:</c> — EXIF orientation value (1–8).</summary>
+    public SizeRange? Orientation { get; init; }
+    /// <summary>Audio tag filters (<c>artist:</c>/<c>album:</c>/<c>title:</c>/
+    /// <c>year:</c>/<c>genre:</c>/<c>track:</c>/<c>comment:</c>), matched as
+    /// case-insensitive substrings against ID3 tags.</summary>
+    public IReadOnlyList<MediaFilter> MediaFilters { get; init; } = [];
+    /// <summary><c>duration:</c> — playback length in seconds (also accepts H:M:S).</summary>
+    public SizeRange? Duration { get; init; }
+    /// <summary><c>samplerate:</c> — audio sample rate in Hz.</summary>
+    public SizeRange? SampleRate { get; init; }
+    /// <summary><c>channels:</c> — audio channel count.</summary>
+    public SizeRange? Channels { get; init; }
+    /// <summary><c>bitrate:</c> — average audio bitrate in kbps (file size × 8 ÷ duration).</summary>
+    public SizeRange? Bitrate { get; init; }
+
     public string? ContentSearch { get; init; }
     public IReadOnlyList<SearchClause> Clauses { get; init; } = [];
+
+    /// <summary>Boolean expression tree for grouped (<c>&lt; &gt;</c>) queries.
+    /// Non-null only when the query used grouping; when set it supersedes
+    /// <see cref="Clauses"/> for term matching and the engines evaluate it
+    /// instead. Filters (ext:/size:/…) still apply globally.</summary>
+    public BoolExpr? TermExpr { get; init; }
 
     public bool IsEmpty => Clauses.Count == 0 && ExtWhitelist == null
         && !FileOnly && !FolderOnly && Size == null
@@ -55,7 +107,12 @@ public sealed record ParsedQuery
         && Attribute == null && ChildOfPath == null && ParentIsPath == null
         && DupeMode == DupeKind.None && ContentSearch == null
         && StartsWith == null && EndsWith == null && WholeFilename == null
-        && !RootOnly && NameLength == null && !EmptyOnly && MaxResults == null;
+        && !RootOnly && NameLength == null && !EmptyOnly && MaxResults == null
+        && ChildCount == null && ChildFileCount == null && ChildFolderCount == null
+        && DateRun == null && RunCount == null && TermExpr == null && Depth == null
+        && Width == null && Height == null && MediaFilters.Count == 0
+        && Duration == null && SampleRate == null && Channels == null && Bitrate == null
+        && Orientation == null;
 }
 
 /// <summary>Everything-compatible duplicate-grouping keys.</summary>
@@ -206,6 +263,22 @@ public static class QueryParser
         SizeRange? nameLen = null;
         bool emptyOnly  = false;
         int? maxResults = null;
+        bool wildcards  = true;
+        bool matchDiacritics = true;
+        SizeRange? childCount = null;
+        SizeRange? childFileCount = null;
+        SizeRange? childFolderCount = null;
+        SizeRange? depth = null;
+        SizeRange? widthRange = null;
+        SizeRange? heightRange = null;
+        SizeRange? orientationRange = null;
+        var mediaFilters = new List<MediaFilter>();
+        SizeRange? durationRange = null;
+        SizeRange? sampleRateRange = null;
+        SizeRange? channelsRange = null;
+        SizeRange? bitrateRange = null;
+        DateRange? drRange = null;
+        SizeRange? runCount = null;
         var clauses = new List<SearchClause>();
 
         foreach (var token in tokens)
@@ -272,6 +345,26 @@ public static class QueryParser
                 continue;
             }
 
+            // ── modifier: wildcards ───────────────────────────────────────
+            if (lower == "wildcards:" || lower == "wildcards:true") { wildcards = true; continue; }
+            if (lower == "nowildcards:" || lower == "wildcards:false") { wildcards = false; continue; }
+            if (lower.StartsWith("wildcards:") && lower.Length > 10)
+            {
+                wildcards = true;
+                AddTerm(clauses, token[10..], false);
+                continue;
+            }
+
+            // ── modifier: diacritics ──────────────────────────────────────
+            if (lower == "diacritics:" || lower == "diacritics:true") { matchDiacritics = true; continue; }
+            if (lower == "nodiacritics:" || lower == "diacritics:false") { matchDiacritics = false; continue; }
+            if (lower.StartsWith("diacritics:") && lower.Length > 11)
+            {
+                matchDiacritics = true;
+                AddTerm(clauses, token[11..], false);
+                continue;
+            }
+
             // ── type: file / folder ───────────────────────────────────────
             if (lower == "file:" || lower == "files:") { fileOnly = true; continue; }
             if (lower.StartsWith("file:") && lower.Length > 5)
@@ -322,6 +415,23 @@ public static class QueryParser
                 daRange = ParseDateSpec(lower[3..], DateTime.Now);
                 continue;
             }
+            if (lower.StartsWith("dr:") && lower.Length > 3)
+            {
+                drRange = ParseDateSpec(lower[3..], DateTime.Now);
+                continue;
+            }
+
+            // ── run-count filter (rc: / runcount:) ───────────────────────
+            if (lower.StartsWith("runcount:") && lower.Length > 9)
+            {
+                runCount = ParseIntExpression(lower[9..]);
+                continue;
+            }
+            if (lower.StartsWith("rc:") && lower.Length > 3)
+            {
+                runCount = ParseIntExpression(lower[3..]);
+                continue;
+            }
 
             // ── attribute filter ──────────────────────────────────────────
             if (lower.StartsWith("attrib:") && lower.Length > 7)
@@ -334,6 +444,13 @@ public static class QueryParser
             if (lower.StartsWith("child:") && token.Length > 6)
             {
                 childOfPath = token[6..];
+                continue;
+            }
+            // Everything's infolder:<path> is the recursive "anywhere under this
+            // folder" filter — the same semantics as child:.
+            if (lower.StartsWith("infolder:") && token.Length > 9)
+            {
+                childOfPath = token[9..];
                 continue;
             }
             if (lower.StartsWith("parent:") && token.Length > 7)
@@ -405,7 +522,86 @@ public static class QueryParser
                 continue;
             }
 
-            // ── content: (file-contents post-filter) ─────────────────────
+            // ── childcount: family (folder child-count post-filter) ──────
+            if (lower.StartsWith("childfilecount:") && lower.Length > 15)
+            {
+                childFileCount = ParseIntExpression(lower[15..]);
+                continue;
+            }
+            if (lower.StartsWith("childfoldercount:") && lower.Length > 17)
+            {
+                childFolderCount = ParseIntExpression(lower[17..]);
+                continue;
+            }
+            if (lower.StartsWith("childcount:") && lower.Length > 11)
+            {
+                childCount = ParseIntExpression(lower[11..]);
+                continue;
+            }
+
+            // ── depth: / parents: (folder-depth post-filter) ─────────────
+            if (lower.StartsWith("depth:") && lower.Length > 6)
+            {
+                depth = ParseIntExpression(lower[6..]);
+                continue;
+            }
+            if (lower.StartsWith("parents:") && lower.Length > 8)
+            {
+                depth = ParseIntExpression(lower[8..]);
+                continue;
+            }
+
+            // ── image dimensions (width: / height: / dimensions:) ────────
+            if (lower.StartsWith("width:") && lower.Length > 6)
+            {
+                widthRange = ParseIntExpression(lower[6..]);
+                continue;
+            }
+            if (lower.StartsWith("height:") && lower.Length > 7)
+            {
+                heightRange = ParseIntExpression(lower[7..]);
+                continue;
+            }
+            if (lower.StartsWith("dimensions:") && lower.Length > 11)
+            {
+                ParseDimensions(lower[11..], ref widthRange, ref heightRange);
+                continue;
+            }
+            if (lower.StartsWith("orientation:") && lower.Length > 12)
+            {
+                orientationRange = ParseIntExpression(lower[12..]);
+                continue;
+            }
+
+            // ── audio tags (artist:/album:/title:/year:/genre:/track:/comment:) ──
+            if (TryMediaFilter(lower, token, mediaFilters)) continue;
+
+            // ── audio stream properties (duration:/samplerate:/channels:) ──
+            if (lower.StartsWith("duration:") && lower.Length > 9)
+            {
+                durationRange = ParseDuration(lower[9..]);
+                continue;
+            }
+            if (lower.StartsWith("samplerate:") && lower.Length > 11)
+            {
+                sampleRateRange = ParseIntExpression(lower[11..]);
+                continue;
+            }
+            if (lower.StartsWith("channels:") && lower.Length > 9)
+            {
+                channelsRange = ParseIntExpression(lower[9..]);
+                continue;
+            }
+            if (lower.StartsWith("bitrate:") && lower.Length > 8)
+            {
+                bitrateRange = ParseIntExpression(lower[8..]);
+                continue;
+            }
+
+            // ── content: family (file-contents post-filter) ──────────────
+            // Everything exposes encoding-specific aliases; WhereIsIt's reader
+            // auto-detects encoding, so they all map to the same content search.
+            if (TryContentAlias(lower, token, ref contentSearch)) continue;
             if (lower.StartsWith("content:") && token.Length > 8)
             {
                 contentSearch = token[8..];
@@ -420,7 +616,17 @@ public static class QueryParser
                     termStr.Split('|', StringSplitOptions.RemoveEmptyEntries)));
         }
 
-        return new ParsedQuery
+        // Grouped / boolean queries build an expression tree that supersedes the
+        // flat clause list AND the global per-row filters (both terms and
+        // functions become tree leaves). Engaged for an explicit group (< >) or a
+        // top-level OR — a standalone "|" token, e.g. "ext:cs | ext:txt". A bare
+        // "a|b" (no spaces) stays the flat alternative form, so non-grouped
+        // queries keep the original fast path untouched.
+        BoolExpr? termExpr = null;
+        if (query.IndexOf('<') >= 0 || query.IndexOf('>') >= 0 || tokens.Contains("|"))
+            termExpr = BooleanQuery.TryParse(query);
+
+        var result = new ParsedQuery
         {
             CaseSensitive = caseSensitive,
             RegexMode = regexMode,
@@ -445,9 +651,68 @@ public static class QueryParser
             NameLength    = nameLen,
             EmptyOnly     = emptyOnly,
             MaxResults    = maxResults,
+            Wildcards        = wildcards,
+            MatchDiacritics  = matchDiacritics,
+            ChildCount       = childCount,
+            ChildFileCount   = childFileCount,
+            ChildFolderCount = childFolderCount,
+            Depth            = depth,
+            Width            = widthRange,
+            Height           = heightRange,
+            Orientation      = orientationRange,
+            MediaFilters     = mediaFilters.Count > 0 ? mediaFilters.ToArray() : [],
+            Duration         = durationRange,
+            SampleRate       = sampleRateRange,
+            Channels         = channelsRange,
+            Bitrate          = bitrateRange,
+            DateRun          = drRange,
+            RunCount         = runCount,
+            TermExpr         = termExpr,
             Clauses = clauses,
         };
+
+        // When the boolean tree is active it owns all term + per-row function
+        // matching, so drop the flat clauses and the global per-row filters (the
+        // tree's leaves re-parse each function token). Keep the global modifiers,
+        // and the cross-row dupe:/count: which the tree can't express per row.
+        if (termExpr is not null)
+            result = result with
+            {
+                Clauses = [],
+                ExtWhitelist = null, Size = null, Modified = null, Created = null, Accessed = null,
+                Attribute = null, ChildOfPath = null, ParentIsPath = null, FileOnly = false, FolderOnly = false,
+                ContentSearch = null, StartsWith = null, EndsWith = null, WholeFilename = null,
+                RootOnly = false, NameLength = null, EmptyOnly = false,
+                ChildCount = null, ChildFileCount = null, ChildFolderCount = null, Depth = null,
+                Width = null, Height = null, Orientation = null, MediaFilters = [],
+                Duration = null, SampleRate = null, Channels = null, Bitrate = null,
+                DateRun = null, RunCount = null,
+            };
+
+        return result;
     }
+
+    /// <summary>
+    /// Maps Everything's encoding-specific content functions
+    /// (<c>ansicontent:</c>, <c>utf8content:</c>, <c>utf16content:</c>,
+    /// <c>utf16becontent:</c>) onto <see cref="ParsedQuery.ContentSearch"/>.
+    /// The reader auto-detects encoding, so the search itself is identical.
+    /// </summary>
+    private static bool TryContentAlias(string lower, string token, ref string? contentSearch)
+    {
+        foreach (var prefix in ContentAliasPrefixes)
+        {
+            if (lower.StartsWith(prefix, StringComparison.Ordinal) && token.Length > prefix.Length)
+            {
+                contentSearch = token[prefix.Length..];
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static readonly string[] ContentAliasPrefixes =
+        ["ansicontent:", "utf8content:", "utf16becontent:", "utf16content:"];
 
     /// <summary>
     /// Parses an integer comparison expression (<c>N</c>, <c>&gt;N</c>, <c>&lt;=N</c>,
@@ -479,7 +744,130 @@ public static class QueryParser
         return ulong.TryParse(rest, out var v) ? new SizeRange(op, v) : null;
     }
 
+    /// <summary>
+    /// Extracts the plain literal terms a result-list highlighter should mark up
+    /// in matched names: the positive (non-negated) clause alternatives, minus
+    /// wildcard/regex patterns that wouldn't map to a simple substring span.
+    /// Returns an empty list for regex queries (no literal span to highlight).
+    /// </summary>
+    public static IReadOnlyList<string> ExtractHighlightTerms(string query)
+    {
+        var parsed = Parse(query);
+        if (parsed.RegexMode || parsed.Clauses.Count == 0) return [];
+
+        var terms = new List<string>();
+        foreach (var clause in parsed.Clauses)
+        {
+            if (clause.Negated) continue;
+            foreach (var alt in clause.Alternatives)
+            {
+                if (string.IsNullOrEmpty(alt)) continue;
+                if (alt.Contains('*') || alt.Contains('?')) continue; // wildcard, not a literal span
+                terms.Add(alt);
+            }
+        }
+        return terms;
+    }
+
+    /// <summary>
+    /// Parses an Everything <c>dimensions:</c> value. <c>WxH</c> sets both to an
+    /// exact match; a bare <c>N</c> or comparison applies to both width and
+    /// height (so <c>dimensions:&gt;1000</c> means wide-and-tall).
+    /// </summary>
+    private static void ParseDimensions(string spec, ref SizeRange? width, ref SizeRange? height)
+    {
+        spec = spec.Trim();
+        int x = spec.IndexOf('x');
+        if (x < 0) x = spec.IndexOf('X');
+        if (x > 0 && x < spec.Length - 1)
+        {
+            width = ParseIntExpression(spec[..x]);
+            height = ParseIntExpression(spec[(x + 1)..]);
+            return;
+        }
+        var both = ParseIntExpression(spec);
+        width = both;
+        height = both;
+    }
+
+    /// <summary>Parses a <c>duration:</c> value: an <c>H:M:S</c>/<c>M:S</c> clock
+    /// form (exact match) or a plain seconds count / comparison via
+    /// <see cref="ParseIntExpression"/>.</summary>
+    private static SizeRange? ParseDuration(string spec)
+    {
+        spec = spec.Trim();
+        if (spec.Contains(':'))
+        {
+            long secs = 0;
+            foreach (var part in spec.Split(':'))
+            {
+                if (!long.TryParse(part, out var v) || v < 0) return null;
+                secs = secs * 60 + v;
+            }
+            return new SizeRange(SizeOp.Equal, (ulong)secs);
+        }
+        return ParseIntExpression(spec);
+    }
+
+    private static readonly (string Prefix, MediaField Field)[] MediaPrefixes =
+    [
+        ("artist:", MediaField.Artist), ("album:", MediaField.Album), ("title:", MediaField.Title),
+        ("genre:", MediaField.Genre), ("track:", MediaField.Track), ("comment:", MediaField.Comment),
+        ("year:", MediaField.Year),
+        ("author:", MediaField.Author), ("subject:", MediaField.Subject), ("keywords:", MediaField.Keywords),
+    ];
+
+    private static bool TryMediaFilter(string lower, string token, List<MediaFilter> into)
+    {
+        foreach (var (prefix, field) in MediaPrefixes)
+        {
+            if (lower.StartsWith(prefix, StringComparison.Ordinal) && token.Length > prefix.Length)
+            {
+                into.Add(new MediaFilter(field, token[prefix.Length..]));
+                return true;
+            }
+        }
+        return false;
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────
+
+    /// <summary>Folder depth = number of path separators in the full path, so a
+    /// volume-root entry (<c>C:\file.txt</c>) is depth 1. Used by <c>depth:</c>/
+    /// <c>parents:</c>.</summary>
+    public static int FolderDepth(string fullPath)
+    {
+        if (string.IsNullOrEmpty(fullPath)) return 0;
+        int n = 0;
+        foreach (var ch in fullPath)
+            if (ch == '\\' || ch == '/') n++;
+        return n;
+    }
+
+    /// <summary>
+    /// Strips combining diacritical marks so accented characters fold to their
+    /// base letter (é → e). Used by both engines for <c>nodiacritics:</c>
+    /// matching. Returns the input unchanged when it has no non-ASCII chars,
+    /// avoiding the Normalize allocation on the common all-ASCII hot path.
+    /// </summary>
+    public static string RemoveDiacritics(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        bool hasNonAscii = false;
+        foreach (var ch in text)
+            if (ch > 127) { hasNonAscii = true; break; }
+        if (!hasNonAscii) return text;
+
+        var normalized = text.Normalize(System.Text.NormalizationForm.FormD);
+        var sb = new StringBuilder(normalized.Length);
+        foreach (var ch in normalized)
+        {
+            if (System.Globalization.CharUnicodeInfo.GetUnicodeCategory(ch)
+                != System.Globalization.UnicodeCategory.NonSpacingMark)
+                sb.Append(ch);
+        }
+        return sb.ToString().Normalize(System.Text.NormalizationForm.FormC);
+    }
 
     private static bool TryTypeMacro(string lower, string token, ref string[]? extWhitelist, List<SearchClause> clauses)
     {
@@ -645,6 +1033,11 @@ public static class QueryParser
         var keyword = TryKeyword(spec, now);
         if (keyword is not null) return keyword;
 
+        // Relative span: "3days", "last2weeks", "past6months", "next1year", … —
+        // a rolling window relative to now (past unless next/coming).
+        var relative = TryRelativeSpan(spec, now);
+        if (relative is not null) return relative;
+
         // Range with ".." separator
         int dotdot = spec.IndexOf("..", StringComparison.Ordinal);
         if (dotdot > 0)
@@ -684,22 +1077,105 @@ public static class QueryParser
         return (low is null || high is null) ? null : new DateRange(low.Value, high.Value);
     }
 
+    // "[last|past|prev|previous|next|coming] N unit[s]" collapsed to one token
+    // (the tokenizer splits on spaces, so multi-word forms must be quoted).
+    private static readonly System.Text.RegularExpressions.Regex RelativeSpanRx =
+        new(@"^(last|past|prev|previous|next|coming)?\s*(\d{1,6})\s*(minute|min|hour|hr|day|week|wk|month|mon|year|yr)s?$",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    private static DateRange? TryRelativeSpan(string spec, DateTime now)
+    {
+        var m = RelativeSpanRx.Match(spec);
+        if (!m.Success) return null;
+        if (!int.TryParse(m.Groups[2].Value, out var n) || n <= 0) return null;
+
+        bool future = m.Groups[1].Value is "next" or "coming";
+        var unit = m.Groups[3].Value;
+
+        DateTime Shift(DateTime t, int sign) => unit switch
+        {
+            "minute" or "min"  => t.AddMinutes(sign * n),
+            "hour" or "hr"     => t.AddHours(sign * n),
+            "day"              => t.AddDays(sign * n),
+            "week" or "wk"     => t.AddDays(sign * 7 * n),
+            "month" or "mon"   => t.AddMonths(sign * n),
+            "year" or "yr"     => t.AddYears(sign * n),
+            _                  => t,
+        };
+
+        return future
+            ? new DateRange(now, Shift(now, +1))
+            : new DateRange(Shift(now, -1), now);
+    }
+
     private static DateRange? TryKeyword(string spec, DateTime now)
     {
         var today = now.Date;
-        return spec switch
+        var kw = spec switch
         {
             "today"     => new DateRange(today, today.AddDays(1).AddTicks(-1)),
             "yesterday" => new DateRange(today.AddDays(-1), today.AddTicks(-1)),
+            "tomorrow"  => new DateRange(today.AddDays(1), today.AddDays(2).AddTicks(-1)),
             "thisweek"  => WeekRange(today, 0),
             "lastweek"  => WeekRange(today, -1),
             "thismonth" => MonthRange(today.Year, today.Month),
             "lastmonth" => MonthOffsetRange(today, -1),
             "thisyear"  => YearRange(today.Year),
             "lastyear"  => YearRange(today.Year - 1),
-            _ => null
+            // Rolling "past N to now" ranges (distinct from the calendar-aligned
+            // last* keywords above), matching Everything's past* functions.
+            "pastweek"  => new DateRange(today.AddDays(-7), now),
+            "pastmonth" => new DateRange(today.AddMonths(-1), now),
+            "pastyear"  => new DateRange(today.AddYears(-1), now),
+            _ => (DateRange?)null
         };
+        if (kw is not null) return kw;
+
+        // Month names (january…december and the jan…dec abbreviations) resolve
+        // to that month of the current year, matching Everything's <month>
+        // date function.
+        if (MonthNames.TryGetValue(spec, out var month))
+            return MonthRange(today.Year, month);
+
+        // Weekday names (monday…sunday and mon…sun) resolve to the most recent
+        // occurrence of that weekday, including today — Everything's <weekday>
+        // date function.
+        if (WeekdayNames.TryGetValue(spec, out var dow))
+        {
+            int back = ((int)today.DayOfWeek - (int)dow + 7) % 7;
+            var day = today.AddDays(-back);
+            return new DateRange(day, day.AddDays(1).AddTicks(-1));
+        }
+
+        return null;
     }
+
+    private static readonly Dictionary<string, DayOfWeek> WeekdayNames = new(StringComparer.Ordinal)
+    {
+        ["sunday"] = DayOfWeek.Sunday, ["sun"] = DayOfWeek.Sunday,
+        ["monday"] = DayOfWeek.Monday, ["mon"] = DayOfWeek.Monday,
+        ["tuesday"] = DayOfWeek.Tuesday, ["tue"] = DayOfWeek.Tuesday, ["tues"] = DayOfWeek.Tuesday,
+        ["wednesday"] = DayOfWeek.Wednesday, ["wed"] = DayOfWeek.Wednesday,
+        ["thursday"] = DayOfWeek.Thursday, ["thu"] = DayOfWeek.Thursday, ["thur"] = DayOfWeek.Thursday, ["thurs"] = DayOfWeek.Thursday,
+        ["friday"] = DayOfWeek.Friday, ["fri"] = DayOfWeek.Friday,
+        ["saturday"] = DayOfWeek.Saturday, ["sat"] = DayOfWeek.Saturday,
+    };
+
+    private static readonly Dictionary<string, int> MonthNames = new(StringComparer.Ordinal)
+    {
+        ["january"] = 1, ["jan"] = 1,
+        ["february"] = 2, ["feb"] = 2,
+        ["march"] = 3, ["mar"] = 3,
+        ["april"] = 4, ["apr"] = 4,
+        ["may"] = 5,
+        ["june"] = 6, ["jun"] = 6,
+        ["july"] = 7, ["jul"] = 7,
+        ["august"] = 8, ["aug"] = 8,
+        ["september"] = 9, ["sep"] = 9, ["sept"] = 9,
+        ["october"] = 10, ["oct"] = 10,
+        ["november"] = 11, ["nov"] = 11,
+        ["december"] = 12, ["dec"] = 12,
+    };
 
     private static DateRange WeekRange(DateTime today, int weekOffset)
     {

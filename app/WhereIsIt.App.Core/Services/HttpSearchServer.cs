@@ -14,7 +14,8 @@ namespace WhereIsIt.App.Services;
 /// <summary>
 /// Minimal HTTP frontend so other devices on localhost can query the index.
 /// Listens on <c>http://127.0.0.1:{port}/</c> only — never on a network
-/// interface — so this stays a same-host tool by design. Returns JSON.
+/// interface — so this stays a same-host tool by design. Serves an HTML search
+/// page at <c>/</c> (like Everything's HTTP server) and JSON at <c>/search</c>.
 /// </summary>
 public sealed class HttpSearchServer : IDisposable
 {
@@ -72,6 +73,18 @@ public sealed class HttpSearchServer : IDisposable
         try
         {
             var path = ctx.Request.Url!.AbsolutePath;
+
+            // Serve the HTML search page at the root (Everything-style web UI).
+            if (path.Length == 0 || path == "/")
+            {
+                var html = Encoding.UTF8.GetBytes(IndexHtml);
+                ctx.Response.ContentType = "text/html; charset=utf-8";
+                ctx.Response.ContentLength64 = html.Length;
+                await ctx.Response.OutputStream.WriteAsync(html, ct);
+                ctx.Response.Close();
+                return;
+            }
+
             if (!path.Equals("/search", StringComparison.OrdinalIgnoreCase) &&
                 !path.Equals("/search/", StringComparison.OrdinalIgnoreCase))
             {
@@ -156,6 +169,62 @@ public sealed class HttpSearchServer : IDisposable
         try { listener.Close(); } catch { }
         try { loopTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
     }
+
+    // Self-contained search page: an input that queries /search and renders the
+    // results. Filenames are inserted with textContent, never innerHTML, so a
+    // crafted name can't inject markup.
+    internal const string IndexHtml = """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>WhereIsIt</title>
+          <style>
+            body { font: 14px system-ui, sans-serif; margin: 0; padding: 1rem; }
+            h1 { font-size: 1.1rem; }
+            #q { width: 100%; padding: .5rem; box-sizing: border-box; font-size: 1rem; }
+            #status { color: #666; margin: .5rem 0; }
+            table { border-collapse: collapse; width: 100%; }
+            th, td { text-align: left; padding: .3rem .6rem; border-bottom: 1px solid #ddd; font-size: 13px; }
+            td.size { text-align: right; white-space: nowrap; }
+            td.path { color: #666; }
+          </style>
+        </head>
+        <body>
+          <h1>WhereIsIt</h1>
+          <input id="q" type="search" placeholder="Search files and folders…" autofocus>
+          <div id="status"></div>
+          <table><thead><tr><th>Name</th><th>Path</th><th class="size">Size</th><th>Modified</th></tr></thead>
+          <tbody id="rows"></tbody></table>
+          <script>
+            const q = document.getElementById('q');
+            const rows = document.getElementById('rows');
+            const status = document.getElementById('status');
+            let timer = null;
+            function fmt(n) { if (n < 1024) return n + ' B'; const u=['KB','MB','GB','TB']; let i=-1; do { n/=1024; i++; } while (n>=1024 && i<u.length-1); return n.toFixed(1)+' '+u[i]; }
+            async function run() {
+              const term = q.value.trim();
+              rows.replaceChildren();
+              if (!term) { status.textContent = ''; return; }
+              status.textContent = 'Searching…';
+              try {
+                const r = await fetch('/search?q=' + encodeURIComponent(term));
+                const data = await r.json();
+                status.textContent = data.count + ' results' + (data.count > data.results.length ? ' (showing ' + data.results.length + ')' : '');
+                for (const it of data.results) {
+                  const tr = document.createElement('tr');
+                  const c = [it.name, it.parentPath, fmt(it.size), (it.modifiedUtc||'').replace('T',' ').slice(0,16)];
+                  c.forEach((v, i) => { const td = document.createElement('td'); if (i===2) td.className='size'; if (i===1) td.className='path'; td.textContent = v; tr.appendChild(td); });
+                  rows.appendChild(tr);
+                }
+              } catch (e) { status.textContent = 'Error: ' + e; }
+            }
+            q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 150); });
+          </script>
+        </body>
+        </html>
+        """;
 
     private sealed class SearchResponse
     {

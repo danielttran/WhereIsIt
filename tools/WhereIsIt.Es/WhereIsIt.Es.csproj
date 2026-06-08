@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- es.exe-compatible command name. -->
+    <AssemblyName>es</AssemblyName>
+    <RootNamespace>WhereIsIt.Es</RootNamespace>
+    <!-- This CLI tool is authored without a local build; keep a stray analyzer
+         warning from failing the whole solution build. -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\app\WhereIsIt.App.Core\WhereIsIt.App.Core.csproj" />
+  </ItemGroup>
+</Project>
