@@ -22,7 +22,30 @@ public sealed record ParsedQuery
     public AttributeFilter? Attribute { get; init; }
     public string? ChildOfPath  { get; init; }
     public string? ParentIsPath { get; init; }
-    public bool Dupe { get; init; }
+
+    /// <summary>Everything-style duplicate grouping mode. <see cref="DupeKind.None"/>
+    /// when no <c>dupe:</c>/<c>sizedupe:</c>/… modifier was present.</summary>
+    public DupeKind DupeMode { get; init; }
+
+    /// <summary>Back-compat shim: true when any duplicate mode is active.</summary>
+    public bool Dupe => DupeMode != DupeKind.None;
+
+    /// <summary><c>startwith:</c> — filename must start with every listed prefix.</summary>
+    public string[]? StartsWith { get; init; }
+    /// <summary><c>endwith:</c> — filename must end with every listed suffix.</summary>
+    public string[]? EndsWith { get; init; }
+    /// <summary><c>wfn:</c>/<c>wholefilename:</c> — the whole filename must match
+    /// each pattern (wildcards allowed).</summary>
+    public string[]? WholeFilename { get; init; }
+    /// <summary><c>root:</c> — only entries directly under a volume/share root.</summary>
+    public bool RootOnly { get; init; }
+    /// <summary><c>len:</c> — filename-length constraint (units ignored).</summary>
+    public SizeRange? NameLength { get; init; }
+    /// <summary><c>empty:</c> — zero-byte files and childless folders.</summary>
+    public bool EmptyOnly { get; init; }
+    /// <summary><c>count:</c> — cap the number of returned rows.</summary>
+    public int? MaxResults { get; init; }
+
     public string? ContentSearch { get; init; }
     public IReadOnlyList<SearchClause> Clauses { get; init; } = [];
 
@@ -30,7 +53,23 @@ public sealed record ParsedQuery
         && !FileOnly && !FolderOnly && Size == null
         && Modified == null && Created == null && Accessed == null
         && Attribute == null && ChildOfPath == null && ParentIsPath == null
-        && !Dupe && ContentSearch == null;
+        && DupeMode == DupeKind.None && ContentSearch == null
+        && StartsWith == null && EndsWith == null && WholeFilename == null
+        && !RootOnly && NameLength == null && !EmptyOnly && MaxResults == null;
+}
+
+/// <summary>Everything-compatible duplicate-grouping keys.</summary>
+public enum DupeKind
+{
+    None,
+    /// <summary><c>dupe:</c> — same filename (case-insensitive) AND same size.</summary>
+    NameSize,
+    /// <summary><c>sizedupe:</c> — same size.</summary>
+    Size,
+    /// <summary><c>namepartdupe:</c> — same name excluding extension.</summary>
+    NamePart,
+    /// <summary><c>attribdupe:</c> — same attribute set.</summary>
+    Attrib,
 }
 
 public sealed record SearchClause(bool Negated, IReadOnlyList<string> Alternatives);
@@ -158,8 +197,15 @@ public static class QueryParser
         AttributeFilter? attribFilter = null;
         string? childOfPath  = null;
         string? parentIsPath = null;
-        bool    dupe         = false;
+        DupeKind dupeMode    = DupeKind.None;
         string? contentSearch = null;
+        var startsWith  = new List<string>();
+        var endsWith    = new List<string>();
+        var wholeName   = new List<string>();
+        bool rootOnly   = false;
+        SizeRange? nameLen = null;
+        bool emptyOnly  = false;
+        int? maxResults = null;
         var clauses = new List<SearchClause>();
 
         foreach (var token in tokens)
@@ -209,6 +255,22 @@ public static class QueryParser
             // ── modifier: match path ──────────────────────────────────────
             if (lower == "path:" || lower == "matchpath:" || lower == "matchpath:true") { matchPath = true; continue; }
             if (lower == "nopath:" || lower == "matchpath:false") { matchPath = false; continue; }
+            // path:VALUE / matchpath:VALUE — enable match-path AND search VALUE,
+            // mirroring case:/word:. Without this, "path:report" fell through to a
+            // literal substring search for the token "path:report".
+            if (lower.StartsWith("path:") && lower.Length > 5)
+            {
+                matchPath = true;
+                AddTerm(clauses, token[5..], false);
+                continue;
+            }
+            if (lower.StartsWith("matchpath:") && lower.Length > 10
+                && lower != "matchpath:true" && lower != "matchpath:false")
+            {
+                matchPath = true;
+                AddTerm(clauses, token[10..], false);
+                continue;
+            }
 
             // ── type: file / folder ───────────────────────────────────────
             if (lower == "file:" || lower == "files:") { fileOnly = true; continue; }
@@ -280,10 +342,66 @@ public static class QueryParser
                 continue;
             }
 
-            // ── dupe: (duplicate post-filter) ────────────────────────────
+            // ── dupe: family (duplicate post-filter) ─────────────────────
             if (lower == "dupe:" || lower == "dupes:" || lower == "duplicates:")
             {
-                dupe = true;
+                dupeMode = DupeKind.NameSize;
+                continue;
+            }
+            if (lower == "sizedupe:" || lower == "sizedupes:")
+            {
+                dupeMode = DupeKind.Size;
+                continue;
+            }
+            if (lower == "namepartdupe:" || lower == "namepartdupes:")
+            {
+                dupeMode = DupeKind.NamePart;
+                continue;
+            }
+            if (lower == "attribdupe:" || lower == "attribdupes:")
+            {
+                dupeMode = DupeKind.Attrib;
+                continue;
+            }
+
+            // ── startwith: / endwith: / wfn: ─────────────────────────────
+            if ((lower.StartsWith("startwith:") || lower.StartsWith("startswith:"))
+                && token.Contains(':'))
+            {
+                var v = token[(token.IndexOf(':') + 1)..];
+                if (v.Length > 0) startsWith.Add(v);
+                continue;
+            }
+            if ((lower.StartsWith("endwith:") || lower.StartsWith("endswith:"))
+                && token.Contains(':'))
+            {
+                var v = token[(token.IndexOf(':') + 1)..];
+                if (v.Length > 0) endsWith.Add(v);
+                continue;
+            }
+            if ((lower.StartsWith("wfn:") || lower.StartsWith("wholefilename:"))
+                && token.Contains(':'))
+            {
+                var v = token[(token.IndexOf(':') + 1)..];
+                if (v.Length > 0) wholeName.Add(v);
+                continue;
+            }
+
+            // ── root: / empty: (no value) ────────────────────────────────
+            if (lower == "root:") { rootOnly = true; continue; }
+            if (lower == "empty:") { emptyOnly = true; continue; }
+
+            // ── len: (filename length) ───────────────────────────────────
+            if (lower.StartsWith("len:") && lower.Length > 4)
+            {
+                nameLen = ParseIntExpression(lower[4..]);
+                continue;
+            }
+
+            // ── count: (result cap) ──────────────────────────────────────
+            if (lower.StartsWith("count:") && lower.Length > 6)
+            {
+                if (int.TryParse(lower[6..], out var n) && n >= 0) maxResults = n;
                 continue;
             }
 
@@ -318,10 +436,47 @@ public static class QueryParser
             Attribute = attribFilter,
             ChildOfPath  = childOfPath,
             ParentIsPath = parentIsPath,
-            Dupe         = dupe,
+            DupeMode     = dupeMode,
             ContentSearch = contentSearch,
+            StartsWith    = startsWith.Count  > 0 ? startsWith.ToArray()  : null,
+            EndsWith      = endsWith.Count    > 0 ? endsWith.ToArray()    : null,
+            WholeFilename = wholeName.Count   > 0 ? wholeName.ToArray()   : null,
+            RootOnly      = rootOnly,
+            NameLength    = nameLen,
+            EmptyOnly     = emptyOnly,
+            MaxResults    = maxResults,
             Clauses = clauses,
         };
+    }
+
+    /// <summary>
+    /// Parses an integer comparison expression (<c>N</c>, <c>&gt;N</c>, <c>&lt;=N</c>,
+    /// <c>a..b</c>) for <c>len:</c>. Units are intentionally ignored — a filename
+    /// length is a plain count, never kb/mb.
+    /// </summary>
+    private static SizeRange? ParseIntExpression(string spec)
+    {
+        spec = spec.Trim();
+        if (spec.Length == 0) return null;
+
+        int dotdot = spec.IndexOf("..", StringComparison.Ordinal);
+        if (dotdot > 0)
+        {
+            if (ulong.TryParse(spec[..dotdot], out var lo) &&
+                ulong.TryParse(spec[(dotdot + 2)..], out var hi))
+                return new SizeRange(SizeOp.Between, lo, hi);
+            return null;
+        }
+
+        SizeOp op = SizeOp.Equal;
+        string rest = spec;
+        if (spec.StartsWith(">=")) { op = SizeOp.GreaterOrEqual; rest = spec[2..]; }
+        else if (spec.StartsWith("<=")) { op = SizeOp.LessOrEqual; rest = spec[2..]; }
+        else if (spec.StartsWith(">")) { op = SizeOp.GreaterThan; rest = spec[1..]; }
+        else if (spec.StartsWith("<")) { op = SizeOp.LessThan; rest = spec[1..]; }
+        else if (spec.StartsWith("=")) { op = SizeOp.Equal; rest = spec[1..]; }
+
+        return ulong.TryParse(rest, out var v) ? new SizeRange(op, v) : null;
     }
 
     // ── helpers ───────────────────────────────────────────────────────────
@@ -374,13 +529,20 @@ public static class QueryParser
             if (upper == "OR" && output.Count > 0 && i + 1 < tokens.Count)
             {
                 var prev = output[^1];
-                var next = tokens[++i];
-                // If prev or next already negated, leave the OR untransformed.
-                if (!prev.StartsWith('!') && !next.StartsWith('!'))
+                var next = tokens[i + 1];
+                // Only fold two plain terms into the a|b alternative form. A
+                // modifier token (ext:, size:, …) or a negated term can't be
+                // OR-folded into one token without corrupting it — e.g.
+                // "ext:cs OR txt" must NOT become the bogus extension "cs|txt".
+                // For those, drop the OR and let the neighbours stand as
+                // implicit-AND terms (peek, don't consume, so no term is lost).
+                if (!prev.StartsWith('!') && !next.StartsWith('!')
+                    && !prev.Contains(':') && !next.Contains(':'))
                 {
                     output[^1] = prev + "|" + next;
-                    continue;
+                    i++; // consume the folded next term
                 }
+                continue; // the OR keyword itself is never emitted as a term
             }
 
             if (negateNext)
@@ -401,17 +563,31 @@ public static class QueryParser
     {
         var tokens = new List<string>();
         var current = new StringBuilder();
-        bool inQuote = false;
 
-        foreach (char c in query)
+        int i = 0;
+        while (i < query.Length)
         {
-            if (c == '"') { inQuote = !inQuote; continue; }
-            if (!inQuote && c == ' ')
+            char c = query[i];
+            if (c == '"')
+            {
+                // A quote only groups when it has a matching close quote. A lone,
+                // unterminated quote is skipped so it cannot swallow the rest of
+                // the query (and any following modifier tokens) into one literal
+                // term — e.g. `report" ext:cs` must still parse the ext: filter.
+                int close = query.IndexOf('"', i + 1);
+                if (close < 0) { i++; continue; }
+                current.Append(query, i + 1, close - (i + 1));  // spaces preserved
+                i = close + 1;
+                continue;
+            }
+            if (c == ' ')
             {
                 if (current.Length > 0) { tokens.Add(current.ToString()); current.Clear(); }
+                i++;
                 continue;
             }
             current.Append(c);
+            i++;
         }
         if (current.Length > 0) tokens.Add(current.ToString());
         return tokens;

@@ -7,7 +7,8 @@ enum class DriveFileSystem {
     Generic
 };
 
-enum class QuerySortKey { Name, Path, Size, Date };
+// Appended values keep the existing ints stable for the engine_sort C-ABI.
+enum class QuerySortKey { Name, Path, Size, Date, Extension, Attributes, Created, Accessed };
 
 constexpr uint32_t kInvalidIndex   = 0xFFFFFFFFu;
 // Sentinel stored in FileRecord::FileSize when the file/dir is >=4 GB.
@@ -20,6 +21,8 @@ struct FileRecord {
     uint32_t ParentMftIndex;
     uint32_t MftIndex;
     uint32_t LastModifiedEpoch;
+    uint32_t CreatedEpoch;
+    uint32_t AccessedEpoch;
     uint32_t FileSize;
     uint16_t MftSequence;
     uint16_t ParentSequence;
@@ -31,7 +34,7 @@ struct FileRecord {
     uint32_t ParentRecordIndex;
 };
 #pragma pack(pop)
-static_assert(sizeof(FileRecord) == 32, "FileRecord MUST be exactly 32 bytes for cache alignment");
+static_assert(sizeof(FileRecord) == 40, "FileRecord layout is persisted in index.dat; bump its schema version when changing it");
 
 // Internal NTFS Direct-Disk Structures
 #pragma pack(push, 1)

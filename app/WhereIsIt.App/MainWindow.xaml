@@ -25,6 +25,7 @@
             <MenuBarItem Title="File">
                 <MenuFlyoutItem Text="Export to CSV…" Click="OnExportCsvClick"/>
                 <MenuFlyoutItem Text="Export to TSV…" Click="OnExportTsvClick"/>
+                <MenuFlyoutItem Text="Export Everything file list (.efu)…" Click="OnExportEfuClick"/>
                 <MenuFlyoutSeparator/>
                 <MenuFlyoutItem Text="Exit" Click="OnExitClick">
                     <MenuFlyoutItem.KeyboardAccelerators>
@@ -51,6 +52,14 @@
                         <KeyboardAccelerator Modifiers="Control,Shift" Key="C"/>
                     </MenuFlyoutItem.KeyboardAccelerators>
                 </MenuFlyoutItem>
+                <MenuFlyoutSeparator/>
+                <MenuFlyoutItem Text="Rename…" Click="OnRenameClick"/>
+                <MenuFlyoutItem Text="Move to Recycle Bin…" Click="OnDeleteClick">
+                    <MenuFlyoutItem.KeyboardAccelerators>
+                        <KeyboardAccelerator Key="Delete"/>
+                    </MenuFlyoutItem.KeyboardAccelerators>
+                </MenuFlyoutItem>
+                <MenuFlyoutItem Text="Properties" Click="OnPropertiesClick"/>
             </MenuBarItem>
 
             <MenuBarItem Title="Search">
@@ -188,6 +197,7 @@
                     <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.CreatedColumnWidth, Mode=OneWay}"/>
                     <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AccessedColumnWidth, Mode=OneWay}"/>
                     <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.RunCountColumnWidth, Mode=OneWay}"/>
+                    <ColumnDefinition Width="100"/>
                     <ColumnDefinition Width="80"/>
                 </Grid.ColumnDefinitions>
                 <Button Grid.Column="1" Style="{StaticResource ColumnHeaderButton}"
@@ -221,17 +231,34 @@
                     </StackPanel>
                 </Button>
                 <Button Grid.Column="5" Style="{StaticResource ColumnHeaderButton}"
-                        Content="Created"
-                        Visibility="{x:Bind app:ColumnSettings.Current.CreatedColumnVisibility, Mode=OneWay}"/>
+                        Visibility="{x:Bind app:ColumnSettings.Current.CreatedColumnVisibility, Mode=OneWay}"
+                        Command="{x:Bind ViewModel.ResultsList.SortByCommand}" CommandParameter="created">
+                    <StackPanel Orientation="Horizontal" Spacing="2">
+                        <TextBlock Text="Created"/><TextBlock Text="{x:Bind ViewModel.ResultsList.CreatedSortIndicator, Mode=OneWay}" Opacity="0.7"/>
+                    </StackPanel>
+                </Button>
                 <Button Grid.Column="6" Style="{StaticResource ColumnHeaderButton}"
-                        Content="Accessed"
-                        Visibility="{x:Bind app:ColumnSettings.Current.AccessedColumnVisibility, Mode=OneWay}"/>
+                        Visibility="{x:Bind app:ColumnSettings.Current.AccessedColumnVisibility, Mode=OneWay}"
+                        Command="{x:Bind ViewModel.ResultsList.SortByCommand}" CommandParameter="accessed">
+                    <StackPanel Orientation="Horizontal" Spacing="2">
+                        <TextBlock Text="Accessed"/><TextBlock Text="{x:Bind ViewModel.ResultsList.AccessedSortIndicator, Mode=OneWay}" Opacity="0.7"/>
+                    </StackPanel>
+                </Button>
                 <Button Grid.Column="7" Style="{StaticResource ColumnHeaderButton}"
                         Content="Runs"
                         Visibility="{x:Bind app:ColumnSettings.Current.RunCountColumnVisibility, Mode=OneWay}"/>
                 <Button Grid.Column="8" Style="{StaticResource ColumnHeaderButton}"
-                        Width="80"
-                        Content="Attr"/>
+                        Command="{x:Bind ViewModel.ResultsList.SortByCommand}" CommandParameter="extension">
+                    <StackPanel Orientation="Horizontal" Spacing="2">
+                        <TextBlock Text="Type"/><TextBlock Text="{x:Bind ViewModel.ResultsList.ExtensionSortIndicator, Mode=OneWay}" Opacity="0.7"/>
+                    </StackPanel>
+                </Button>
+                <Button Grid.Column="9" Style="{StaticResource ColumnHeaderButton}"
+                        Command="{x:Bind ViewModel.ResultsList.SortByCommand}" CommandParameter="attributes">
+                    <StackPanel Orientation="Horizontal" Spacing="2">
+                        <TextBlock Text="Attr"/><TextBlock Text="{x:Bind ViewModel.ResultsList.AttributesSortIndicator, Mode=OneWay}" Opacity="0.7"/>
+                    </StackPanel>
+                </Button>
             </Grid>
 
             <!-- Empty state overlay -->
@@ -281,6 +308,10 @@
                                 <KeyboardAccelerator Modifiers="Control,Shift" Key="C"/>
                             </MenuFlyoutItem.KeyboardAccelerators>
                         </MenuFlyoutItem>
+                        <MenuFlyoutSeparator/>
+                        <MenuFlyoutItem Text="Rename…" Click="OnRenameClick"/>
+                        <MenuFlyoutItem Text="Move to Recycle Bin…" Click="OnDeleteClick"/>
+                        <MenuFlyoutItem Text="Properties" Click="OnPropertiesClick"/>
                     </MenuFlyout>
                 </ListView.ContextFlyout>
                 <ListView.ItemTemplate>
@@ -295,6 +326,7 @@
                                 <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.CreatedColumnWidth, Mode=OneWay}"/>
                                 <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.AccessedColumnWidth, Mode=OneWay}"/>
                                 <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.RunCountColumnWidth, Mode=OneWay}"/>
+                                <ColumnDefinition Width="100"/>
                                 <ColumnDefinition Width="80"/>
                             </Grid.ColumnDefinitions>
                             <Image Grid.Column="0"
@@ -314,7 +346,8 @@
                             <TextBlock Grid.Column="6" Text="{x:Bind AccessedText, Mode=OneWay}" Opacity="0.55"/>
                             <TextBlock Grid.Column="7" Text="{x:Bind RunCount, Mode=OneWay}"
                                        HorizontalAlignment="Right" Opacity="0.55"/>
-                            <TextBlock Grid.Column="8" Text="{x:Bind AttributesText, Mode=OneWay}" Opacity="0.6"/>
+                            <TextBlock Grid.Column="8" Text="{x:Bind ExtensionText, Mode=OneWay}" TextTrimming="CharacterEllipsis" Opacity="0.6"/>
+                            <TextBlock Grid.Column="9" Text="{x:Bind AttributesText, Mode=OneWay}" Opacity="0.6"/>
                         </Grid>
                     </DataTemplate>
                 </ListView.ItemTemplate>

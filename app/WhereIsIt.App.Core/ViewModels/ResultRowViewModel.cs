@@ -15,7 +15,9 @@ public partial class ResultRowViewModel : ObservableObject
     private readonly uint id;
     private bool loaded;
 
-    [ObservableProperty] private string name = string.Empty;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ExtensionText))]
+    private string name = string.Empty;
     [ObservableProperty] private string parentPath = string.Empty;
     [ObservableProperty] private string sizeText = string.Empty;
     [ObservableProperty] private string modifiedText = string.Empty;
@@ -52,11 +54,19 @@ public partial class ResultRowViewModel : ObservableObject
 
     public ulong SizeBytes { get; private set; }
     public DateTimeOffset ModifiedUtc { get; private set; }
+    public DateTimeOffset CreatedUtc { get; private set; }
+    public DateTimeOffset AccessedUtc { get; private set; }
 
     public string FullPath =>
         string.IsNullOrEmpty(ParentPath) ? Name : Path.Combine(ParentPath, Name);
 
-    public ResultRowModel ToModel() => new(Name, ParentPath, SizeBytes, ModifiedUtc, AttributesText);
+    public string ExtensionText => Path.GetExtension(Name).TrimStart('.');
+
+    public ResultRowModel ToModel() => new(Name, ParentPath, SizeBytes, ModifiedUtc, AttributesText)
+    {
+        CreatedUtc = this.CreatedUtc,
+        AccessedUtc = this.AccessedUtc,
+    };
 
     public ResultRowViewModel(IEngineClient engineClient, uint id)
     {
@@ -74,8 +84,10 @@ public partial class ResultRowViewModel : ObservableObject
         SizeText = FormatBytes(row.SizeBytes);
         ModifiedUtc = row.ModifiedUtc;
         ModifiedText = row.ModifiedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
-        CreatedText  = FormatOptionalDate(row.CreatedUtc);
-        AccessedText = FormatOptionalDate(row.AccessedUtc);
+        CreatedUtc = row.CreatedUtc;
+        AccessedUtc = row.AccessedUtc;
+        CreatedText  = FormatOptionalDate(CreatedUtc);
+        AccessedText = FormatOptionalDate(AccessedUtc);
         AttributesText = row.Attributes;
         loaded = true;
         OnPropertyChanged(nameof(FullPath));
@@ -84,13 +96,17 @@ public partial class ResultRowViewModel : ObservableObject
     public static string FormatOptionalDate(DateTimeOffset d)
         => d == default ? "—" : d.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
 
+    // Hoisted out of FormatBytes so the array isn't re-allocated per call.
+    // FormatBytes is called for every row (DisplayCap = 2000) — the original
+    // collection-expression-in-method-body allocated a fresh string[] each time.
+    private static readonly string[] SizeUnits = ["B", "KB", "MB", "GB", "TB"];
+
     public static string FormatBytes(ulong bytes)
     {
         if (bytes < 1024) return $"{bytes} B";
         double value = bytes;
-        string[] units = ["B", "KB", "MB", "GB", "TB"];
         var idx = 0;
-        while (value >= 1024 && idx < units.Length - 1) { value /= 1024; idx++; }
-        return $"{value:0.##} {units[idx]}";
+        while (value >= 1024 && idx < SizeUnits.Length - 1) { value /= 1024; idx++; }
+        return $"{value:0.##} {SizeUnits[idx]}";
     }
 }

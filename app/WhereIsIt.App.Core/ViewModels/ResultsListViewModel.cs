@@ -30,12 +30,16 @@ public partial class ResultsListViewModel : ObservableObject
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(NameSortIndicator), nameof(PathSortIndicator),
-                              nameof(SizeSortIndicator), nameof(ModifiedSortIndicator))]
+                              nameof(SizeSortIndicator), nameof(ModifiedSortIndicator),
+                              nameof(CreatedSortIndicator), nameof(AccessedSortIndicator),
+                              nameof(ExtensionSortIndicator), nameof(AttributesSortIndicator))]
     private string sortKey = "name";
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(NameSortIndicator), nameof(PathSortIndicator),
-                              nameof(SizeSortIndicator), nameof(ModifiedSortIndicator))]
+                              nameof(SizeSortIndicator), nameof(ModifiedSortIndicator),
+                              nameof(CreatedSortIndicator), nameof(AccessedSortIndicator),
+                              nameof(ExtensionSortIndicator), nameof(AttributesSortIndicator))]
     private bool sortDescending;
 
     [ObservableProperty] private int totalResultCount;
@@ -44,6 +48,10 @@ public partial class ResultsListViewModel : ObservableObject
     public string PathSortIndicator => SortKey == "path" ? (SortDescending ? " ▼" : " ▲") : string.Empty;
     public string SizeSortIndicator => SortKey == "size" ? (SortDescending ? " ▼" : " ▲") : string.Empty;
     public string ModifiedSortIndicator => SortKey == "modified" ? (SortDescending ? " ▼" : " ▲") : string.Empty;
+    public string CreatedSortIndicator => SortKey == "created" ? (SortDescending ? " ▼" : " ▲") : string.Empty;
+    public string AccessedSortIndicator => SortKey == "accessed" ? (SortDescending ? " ▼" : " ▲") : string.Empty;
+    public string ExtensionSortIndicator => SortKey is "extension" or "type" ? (SortDescending ? " ▼" : " ▲") : string.Empty;
+    public string AttributesSortIndicator => SortKey == "attributes" ? (SortDescending ? " ▼" : " ▲") : string.Empty;
 
     public ResultsListViewModel(IEngineClient engineClient)
     {
@@ -54,9 +62,6 @@ public partial class ResultsListViewModel : ObservableObject
     {
         var display = Math.Min(ids.Count, DisplayCap);
         var list = new List<ResultRowViewModel>(display);
-        // Track ids included in *this* BindResults so we can evict them safely
-        // without an O(N) List.Contains scan per cache miss.
-        var inThisBatch = new HashSet<uint>(display);
         for (int i = 0; i < display; i++)
         {
             var id = ids[i];
@@ -78,7 +83,6 @@ public partial class ResultsListViewModel : ObservableObject
             if (i < EagerLoadCount)
                 _ = row.EnsureLoadedAsync(CancellationToken.None);
             list.Add(row);
-            inThisBatch.Add(id);
         }
         TotalResultCount = ids.Count;
         Rows = list;

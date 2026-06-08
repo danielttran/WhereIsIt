@@ -15,6 +15,8 @@ struct SortRecord {
     std::wstring parentPath;
     uint64_t size = 0;
     uint64_t date = 0;
+    uint64_t created = 0;
+    uint64_t accessed = 0;
 };
 
 using FillRecordFn = std::function<bool(uint32_t, SortRecord&)>;

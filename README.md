@@ -8,19 +8,31 @@ built as a daily-use replacement for voidtools' *Everything*.
 - **Native indexing** — USN journal + MFT scan via the C++ engine in
   `src/engine/native/`; results stay live as the file system changes.
 - **Everything-grade query syntax** — `ext:`, `size:`, `dm:`/`dc:`/`da:`,
-  `attrib:`, `child:`/`parent:`, `dupe:`, `content:`, `audio:`/`video:`/`doc:`/
-  `pic:`/`exe:`/`zip:`, `file:`/`folder:`, `case:`, `regex:`, `word:`,
-  `path:`, `!`/`|`, `AND`/`OR`/`NOT`.
+  `attrib:`, `child:`/`parent:`, `dupe:`/`sizedupe:`/`namepartdupe:`/
+  `attribdupe:`, `content:`, `startwith:`/`endwith:`, `wfn:`/`wholefilename:`,
+  `root:`, `empty:`, `len:`, `count:`, `audio:`/`video:`/`doc:`/`pic:`/`exe:`/
+  `zip:`, `file:`/`folder:`, `case:`, `regex:`, `word:`, `path:`, `!`/`|`,
+  `AND`/`OR`/`NOT`.
+- **Everything File List (.efu)** — import and export the voidtools EFU
+  format (`ResultExporter.ToEfu`/`ParseEfu`) alongside CSV/TSV, so file lists
+  round-trip with Everything itself.
+- **Full sort parity** — name, path, size, modified, created, accessed,
+  extension/type, attributes. Native index schema v10 stores all three file
+  timestamps, so Created and Accessed sorting work in both native and fallback
+  modes. Existing v9 indexes rebuild automatically after upgrade.
 - **Everything-style menu bar** — `File / Edit / Search / Bookmarks / View /
   Tools / Help`. Match-case, regex, whole-word, match-path are toggles in the
   Search menu; the quick filters (Audio, Video, Document, ...) sit under
   *Search → Quick filter*. Power users from Everything pick it up with no
   retraining.
 - **Modern shell** — Mica backdrop, multi-column sortable results, tabbed
-  searches, drag-and-drop into Explorer or editors, CSV/TSV export, search
+  searches, drag-and-drop into Explorer or editors, CSV/TSV/EFU export, search
   history (↑/↓ recall), bookmarks, run-count column, optional Created /
-  Accessed columns, configurable hotkey (default `Ctrl+Alt+W`), command-line
-  args (`-s "query"`, `-p "path"`), and a localhost-only HTTP server for
+  Accessed columns, type/attribute sorting, standard Explorer-style file
+  operations (rename, Recycle Bin, properties), optional run-on-startup,
+  configurable hotkey (default
+  `Ctrl+Alt+W`), command-line args (`-s "query"`, `-p "path"`), and a
+  localhost-only HTTP server for
   cross-device search.
 - **Snappy** — 75 ms keystroke throttle, lock-free seq-fenced decorator,
   bounded post-filter scan, and a cached row view-model pool keep typing
@@ -113,8 +125,8 @@ everything still works.
 
 ## Settings file
 
-`%LOCALAPPDATA%\WhereIsIt\settings.json` — scope roots, hotkey, column
-visibility, bookmarks, search history, run counts, and the opt-in HTTP
+`%LOCALAPPDATA%\WhereIsIt\settings.json` — scope roots, hotkey, run-on-startup,
+column visibility, bookmarks, search history, run counts, and the opt-in HTTP
 server's port.
 
 ## Tests

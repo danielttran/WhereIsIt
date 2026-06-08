@@ -67,13 +67,35 @@ static void copy_wide(wchar_t* dst, int dstMax, const std::wstring& src) noexcep
 
 extern "C" {
 
+int engine_api_version() {
+    return 10;
+}
+
 EngineHandle engine_create() {
     try { return new EngineState(); }
     catch (...) { return nullptr; }
 }
 
 void engine_destroy(EngineHandle h) {
-    delete static_cast<EngineState*>(h);
+    if (!h) return;
+    auto* s = static_cast<EngineState*>(h);
+
+    // Ensure the engine is stopped (idempotent) so WasCleanStop() is decided
+    // before we consider freeing. engine_stop() normally already did this.
+    s->engine.Stop();
+
+    if (s->engine.WasCleanStop()) {
+        delete s;
+    } else {
+        // A worker (typically the initial, non-cancellable full-disk scan)
+        // could not be joined within the shutdown budget and was detached.
+        // It is still executing on this object's memory; deleting now would
+        // be a use-after-free. The process is terminating anyway, so leak
+        // the EngineState intentionally and let the OS reclaim it.
+        OutputDebugStringW(
+            L"[WhereIsIt] engine_destroy: worker still running; "
+            L"leaking EngineState to avoid use-after-free.\n");
+    }
 }
 
 void engine_start(EngineHandle h) {
@@ -112,6 +134,10 @@ void engine_sort(EngineHandle h, int sortKey, int descending) {
         case 1:  key = QuerySortKey::Path; break;
         case 2:  key = QuerySortKey::Size; break;
         case 3:  key = QuerySortKey::Date; break;
+        case 4:  key = QuerySortKey::Extension; break;
+        case 5:  key = QuerySortKey::Attributes; break;
+        case 6:  key = QuerySortKey::Created; break;
+        case 7:  key = QuerySortKey::Accessed; break;
         default: key = QuerySortKey::Name; break;
     }
     static_cast<EngineState*>(h)->engine.Sort(key, descending != 0);
@@ -158,11 +184,55 @@ void engine_get_result_ids(EngineHandle h, uint32_t* buf, int count) {
     std::copy(results->begin(), results->begin() + n, buf);
 }
 
+/*
+ * Atomic count + copy from the SAME result snapshot that the last
+ * engine_wait_results_changed observed. The two-call pattern
+ * (engine_result_count then engine_get_result_ids) raced: each call fetched a
+ * fresh GetSearchResults() snapshot, so a search completing between them made
+ * the C# caller size its buffer to one result set but fill it from another —
+ * leaking stale/zero-filled IDs. Reading s->prevResults under the lock keeps
+ * the count and the copied IDs coherent. Returns the number of IDs written;
+ * *outTotal (optional) receives the snapshot's full size so the caller can tell
+ * when its buffer was too small.
+ */
+int engine_get_results(EngineHandle h, uint32_t* buf, int capacity, int* outTotal) {
+    if (outTotal) *outTotal = 0;
+    if (!h) return 0;
+    auto* s = static_cast<EngineState*>(h);
+
+    std::shared_ptr<std::vector<uint32_t>> snap;
+    {
+        std::lock_guard<std::mutex> lk(s->mutex);
+        snap = s->prevResults;
+    }
+    if (!snap) return 0;
+
+    const int total = static_cast<int>(snap->size());
+    if (outTotal) *outTotal = total;
+    if (!buf || capacity <= 0) return 0;
+    const int n = std::min(capacity, total);
+    std::copy(snap->begin(), snap->begin() + n, buf);
+    return n;
+}
+
 int engine_get_row(EngineHandle h, uint32_t recordId,
     wchar_t* name,       int nameMax,
     wchar_t* parentPath, int parentMax,
     uint64_t* sizeBytes,
     uint64_t* modifiedFileTime,
+    uint16_t* attributes)
+{
+    return engine_get_row_v2(h, recordId, name, nameMax, parentPath, parentMax,
+        sizeBytes, modifiedFileTime, nullptr, nullptr, attributes);
+}
+
+int engine_get_row_v2(EngineHandle h, uint32_t recordId,
+    wchar_t* name,       int nameMax,
+    wchar_t* parentPath, int parentMax,
+    uint64_t* sizeBytes,
+    uint64_t* modifiedFileTime,
+    uint64_t* createdFileTime,
+    uint64_t* accessedFileTime,
     uint16_t* attributes)
 {
     if (!h) return -1;
@@ -174,7 +244,9 @@ int engine_get_row(EngineHandle h, uint32_t recordId,
     copy_wide(name, nameMax, row.Name);
     copy_wide(parentPath, parentMax, row.ParentPath);
     if (sizeBytes)        *sizeBytes        = row.FileSize;
-    if (modifiedFileTime) *modifiedFileTime = row.FileTime;
+    if (modifiedFileTime) *modifiedFileTime = row.ModifiedFileTime;
+    if (createdFileTime)  *createdFileTime  = row.CreatedFileTime;
+    if (accessedFileTime) *accessedFileTime = row.AccessedFileTime;
     if (attributes)       *attributes       = row.Attributes;
     return 0;
 }

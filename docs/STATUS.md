@@ -75,9 +75,24 @@ The original P-1…P4 plan is done:
 | **P3** perf gates (BenchmarkDotNet, footprint) | Deferred |
 | **P4** delete `src/legacy/` | Done 2026-05-13 — folder removed entirely |
 
+Closed 2026-05-21 (technical-debt audit):
+
+- ✅ Engine handle/mapping leak: `~IndexingEngine` now unmaps both shared-memory views (`m_recordsCount`, `m_driveLettersShared`) and closes the file mappings, data mutex, and data-changed event. Previously it closed only the data-changed event, leaking the rest on every clean engine teardown.
+- ✅ Result-delivery race: the C# watch loop sized its buffer from `engine_result_count` then filled it from `engine_get_result_ids` — two independent snapshots, so a search completing between the calls could publish stale/zero-filled IDs. New `engine_get_results` copies count + IDs from the single snapshot the last `engine_wait_results_changed` observed, and the loop publishes only the IDs actually written.
+- ✅ Watcher resilience: `NativeEngineClient.WatchLoop` wraps its iteration in try/catch so a faulting P/Invoke, throwing subscriber, or post-dispose `Subject` access exits the loop cleanly instead of faulting `_watchTask` with an unobserved exception.
+
+Closed 2026-05-17 (Everything-parity bridge):
+
+- ✅ Query funcs: `startwith:`/`endwith:`, `wfn:`/`wholefilename:`, `root:`, `empty:`, `len:`, `count:`, and the dupe family (`sizedupe:`/`namepartdupe:`/`attribdupe:` alongside the existing name+size `dupe:`). Parsed in `QueryParser`, post-filtered in `FilteringEngineClient`. `bool Dupe` is now a back-compat shim over the new `DupeKind DupeMode`.
+- ✅ Sort parity: added created / accessed / extension(type) / attributes. In-proc engine sorts all of them; native engine gained `Extension`/`Attributes` (appended to `QuerySortKey` so the `engine_sort` ints stay stable).
+- ✅ EFU (Everything File List) import/export in `ResultExporter` (`ToEfu`/`WriteEfu`/`ParseEfu`/`ReadEfu`) — FILETIME ticks + numeric attribute mask, round-trips with voidtools.
+- ✅ Shutdown use-after-free fix: `IndexingEngine::Stop()` is now idempotent and records whether any worker had to be detached (timeout during the non-cancellable initial full-disk scan). `engine_destroy` refuses to free the `EngineState` when a worker is still live, converting a use-after-free into a one-shot leak at process exit.
+
 Remaining Everything-parity gaps:
 
 - **ETP / FTP server** — proprietary Everything protocol. Skipped; HTTP server covers the cross-device search use case.
+- **Everything IPC/SDK & `es.exe` CLI** — third-party-tool integration surface; not started.
+- **UI tier** — system tray and match-term highlighting. Not started.
 
 Closed this session:
 
@@ -86,6 +101,12 @@ Closed this session:
 - ✅ Run-count column + persisted `RunCountService`
 - ✅ HTTP server — `HttpSearchServer`, `127.0.0.1`-only, JSON `/search?q=` endpoint
 - ✅ Column-visibility toggle — Columns flyout button + persisted settings (Created/Accessed/Runs)
+- ✅ File operations — result menu entries for rename, Recycle Bin deletion, and Windows properties
+- ✅ Reachable sort/export polish — Created/Accessed/Type/Attributes headers call engine sorting; File menu exports Everything `.efu` lists; row exports retain optional timestamps
+- ✅ Settings polish — index scope, hotkey, run-on-startup, and localhost HTTP server options are editable with validation
+- ✅ Native Created/Accessed parity — index schema v10 stores all three timestamps, safely rebuilds v9 indexes, preserves the v1 row ABI while adding version-probed `engine_get_row_v2`, isolates v10 shared-memory mappings from older processes, marshals Created/Accessed rows to C#, and sorts both columns natively
+- ✅ Production-readiness follow-up — eagerly starts the opt-in HTTP server, fixes native `sort:desc` / `sort:asc`, makes settings flush retries durable, explicitly uses the Recycle Bin, rejects unsafe Windows rename targets, and isolates concurrent native app processes
+- ✅ Production-readiness audit round 2 — retries failed native incremental saves, validates persisted string/drive/giant-index data before commit, guarantees the latest settings snapshot is flushed on shutdown, releases timed-out HTTP subscriptions, tightens HTTP route matching, and applies startup registration immediately after save
 
 The aspirational `src/core/`, `src/adapters/win32/`, `src/engine/winrt/`, `service/` scaffolds are still present as empty/partial vcxprojs. They are NOT on the active build path; the only C++ project that's built is `src/engine/native/WhereIsIt.Engine.Native.vcxproj`. Decide later whether to refactor the engine into the layered architecture or remove those folders.
 
@@ -95,7 +116,7 @@ The aspirational `src/core/`, `src/adapters/win32/`, `src/engine/winrt/`, `servi
 
 - **Indexer:** native C++. Legacy code moved verbatim from `src/legacy/` into `src/engine/native/cpp/` (2026-05-13). Consumed via P/Invoke + a `FilteringEngineClient` decorator on the C# side that handles every Everything-style query modifier the native engine doesn't understand.
 - **Service:** named-pipe service deferred. `PipeEngineClient` is a stub. Native engine runs in-process; elevation prompt is acceptable.
-- **UI:** Everything-grade — multi-column results, sort, context menu, Mica, settings, quick-filter bar, modifier toggle buttons, search history with up/down recall, bookmarks, CSV/TSV export, global hotkey, command-line args, drag-and-drop, optional Created/Accessed columns.
+- **UI:** Everything-grade — multi-column results, sort, Explorer-style file operations, Mica, settings, quick-filter bar, modifier toggle buttons, search history with up/down recall, bookmarks, CSV/TSV/EFU export, global hotkey, command-line args, drag-and-drop, optional Created/Accessed columns.
 
 ---
 

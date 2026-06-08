@@ -58,15 +58,17 @@ struct IIndexEngine {
     virtual std::wstring                         GetRecordName(uint32_t recordIndex) const = 0;
     virtual std::pair<FileRecord, std::wstring>  GetRecordAndName(uint32_t recordIndex) const = 0;
 
-    // All four detail-view display fields from a single lock acquisition.
+    // All detail-view display fields from a single lock acquisition.
     // Prevents size/attribute mismatch bugs that occur when multiple separate
     // GetRecord / GetRecordFileSize calls race between USN delta updates.
     struct RowDisplayData {
         std::wstring Name;
         std::wstring ParentPath;
         uint64_t     FileSize   = 0;   // already resolved (giant-map aware)
-        uint64_t     FileTime   = 0;   // FILETIME ticks (0 = unknown)
-        uint16_t     Attributes = 0;
+        uint64_t     ModifiedFileTime = 0;   // FILETIME ticks (0 = unknown)
+        uint64_t     CreatedFileTime  = 0;
+        uint64_t     AccessedFileTime = 0;
+        uint16_t     Attributes       = 0;
     };
     virtual RowDisplayData GetRowDisplayData(uint32_t recordIndex) const = 0;
 
@@ -112,7 +114,7 @@ public:
     std::wstring GetRecordName(uint32_t recordIndex) const override;
     // Single-lock fetch of both record and name — use in hot paint paths to halve lock acquisitions.
     std::pair<FileRecord, std::wstring> GetRecordAndName(uint32_t recordIndex) const override;
-    // Atomic fetch of all four detail-view display columns in one shared_lock acquisition.
+    // Atomic fetch of all detail-view display columns in one shared_lock acquisition.
     RowDisplayData GetRowDisplayData(uint32_t recordIndex) const override;
     void SetStatus(const std::wstring& status) {
         std::lock_guard<std::mutex> lock(m_statusMutex);
@@ -136,6 +138,13 @@ public:
 
     void SetDriveEnumeratorForTesting(std::unique_ptr<IDriveEnumerator> driveEnumerator);
 
+    // True only when Stop() joined every worker within the shutdown budget.
+    // When false, a worker was detached (still running on this object's
+    // memory) and the owner MUST NOT free this instance — see engine_destroy.
+    bool WasCleanStop() const noexcept {
+        return m_cleanStop.load(std::memory_order_acquire);
+    }
+
 private:
     struct PendingUsnDelta {
         enum class Kind { Upsert, Delete } Type = Kind::Upsert;
@@ -147,6 +156,9 @@ private:
         std::wstring Name;
         uint64_t FileSize = 0;
         uint64_t LastModified = 0;
+        uint64_t Created = 0;
+        uint64_t Accessed = 0;
+        bool HasFileMetadata = false;
         uint16_t FileAttributes = 0;
     };
 
@@ -218,12 +230,15 @@ private:
     std::thread m_searchWorker;
     std::atomic<bool> m_running;
     std::atomic<bool> m_ready;
+    std::atomic<bool> m_stopGuard{ false };  // makes Stop() run its body exactly once
+    std::atomic<bool> m_cleanStop{ false };  // set true iff all workers joined (none detached)
     std::atomic<bool> m_indexDirty{ false };  // set on bad_alloc during USN processing; triggers full re-scan
     // Incremental SaveIndex throttle — flush to disk at most every 60 seconds
     // and only after at least N applied USN records, so per-keystroke drains
     // never trigger a write storm but a busy session still persists progress.
     std::chrono::steady_clock::time_point m_lastSaveTime{};
     std::atomic<uint32_t>                 m_recordsAppliedSinceSave{ 0 };
+    std::atomic<bool>                     m_indexSaveRetryNeeded{ false };
     static constexpr uint32_t             kSaveAfterRecords = 50'000;
     static constexpr auto                 kSaveAfterDuration = std::chrono::seconds(60);
     mutable std::mutex m_statusMutex;
