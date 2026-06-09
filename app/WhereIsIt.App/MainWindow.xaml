@@ -15,8 +15,10 @@
                 <Setter Property="BorderThickness" Value="0"/>
                 <Setter Property="HorizontalAlignment" Value="Stretch"/>
                 <Setter Property="HorizontalContentAlignment" Value="Left"/>
-                <Setter Property="Padding" Value="8,4"/>
+                <Setter Property="Padding" Value="6,2"/>
+                <Setter Property="MinHeight" Value="0"/>
                 <Setter Property="FontWeight" Value="SemiBold"/>
+                <Setter Property="FontSize" Value="13"/>
             </Style>
         </Grid.Resources>
 
@@ -329,9 +331,19 @@
                     <TransitionCollection/>
                 </ListView.ItemContainerTransitions>
                 <ListView.ItemContainerStyle>
+                    <!-- Crush WinUI's default ListViewItem height (44 px) down to
+                         Everything-like density. MinHeight goes to 0 so the row
+                         shrinks to the body text run; the DataTemplate's own
+                         Padding="6,1" handles spacing. Without this override, every
+                         row was ~44 px tall regardless of how compact the template was. -->
                     <Style TargetType="ListViewItem">
                         <Setter Property="Padding" Value="0"/>
+                        <Setter Property="MinHeight" Value="0"/>
                         <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                        <Setter Property="VerticalContentAlignment" Value="Center"/>
+                        <!-- FontSize is inherited by every TextBlock in the template;
+                             14 px matches Everything's compact list. -->
+                        <Setter Property="FontSize" Value="13"/>
                     </Style>
                 </ListView.ItemContainerStyle>
                 <ListView.ContextFlyout>
@@ -361,7 +373,7 @@
                 </ListView.ContextFlyout>
                 <ListView.ItemTemplate>
                     <DataTemplate x:DataType="vm:ResultRowViewModel">
-                        <Grid Padding="8,2">
+                        <Grid Padding="6,1">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="{x:Bind app:ColumnSettings.Current.ThumbnailColumnWidth, Mode=OneWay}"/>
                                 <ColumnDefinition Width="2*"/>

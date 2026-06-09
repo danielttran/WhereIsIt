@@ -44,6 +44,11 @@ public sealed partial class MainWindow : Window
         TrySetupTrayIcon();
         TrySetupEverythingIpc();
         AppWindow.Changed += OnAppWindowChanged;
+        // Close-to-tray: when the user clicks the X (or hits Alt+F4), hide the
+        // window to the tray icon instead of tearing down the engine, so the
+        // index stays warm and re-opening is instant. The tray icon's "Exit"
+        // command is the only thing that actually closes the process.
+        AppWindow.Closing += OnAppWindowClosing;
         Closed += OnClosedReleaseHotkey;
         Closed += OnClosedPersistTabs;
 
@@ -147,15 +152,17 @@ public sealed partial class MainWindow : Window
 
     private async System.Threading.Tasks.Task UpdatePreviewAsync()
     {
-        if (!ColumnSettings.Current.ShowPreviewPane) return;
-        var row = ViewModel.ResultsList.SelectedRow;
-        PreviewImage.Visibility = Visibility.Collapsed;
-        PreviewText.Visibility = Visibility.Collapsed;
-        if (row is null) { PreviewName.Text = string.Empty; PreviewInfo.Text = string.Empty; return; }
+        try
+        {
+            if (!ColumnSettings.Current.ShowPreviewPane) return;
+            var row = ViewModel.ResultsList.SelectedRow;
+            PreviewImage.Visibility = Visibility.Collapsed;
+            PreviewText.Visibility = Visibility.Collapsed;
+            if (row is null) { PreviewName.Text = string.Empty; PreviewInfo.Text = string.Empty; return; }
 
-        await row.EnsureLoadedAsync(System.Threading.CancellationToken.None);
-        var path = row.FullPath;
-        PreviewName.Text = row.Name;
+            await row.EnsureLoadedAsync(System.Threading.CancellationToken.None);
+            var path = row.FullPath;
+            PreviewName.Text = row.Name;
 
         try
         {
@@ -186,6 +193,8 @@ public sealed partial class MainWindow : Window
             }
             catch { /* unreadable text — leave hidden */ }
         }
+        }
+        catch (Exception ex) { LogHandlerCrash(nameof(UpdatePreviewAsync), ex); }
     }
 
     private static async System.Threading.Tasks.Task<string> ReadHeadAsync(string path, int maxChars)
@@ -199,10 +208,20 @@ public sealed partial class MainWindow : Window
 
     private void OnFirstActivatedShowRestorePrompt(object sender, WindowActivatedEventArgs args)
     {
-        // One-shot — ContentDialog needs XamlRoot which isn't reliably ready
-        // in the constructor for unpackaged WinUI 3 windows.
-        Activated -= OnFirstActivatedShowRestorePrompt;
-        _ = MaybePromptRestoreTabsAsync();
+        try
+        {
+            // One-shot — ContentDialog needs XamlRoot which isn't reliably ready
+            // in the constructor for unpackaged WinUI 3 windows.
+            Activated -= OnFirstActivatedShowRestorePrompt;
+            _ = SafeMaybePromptRestoreTabsAsync();
+        }
+        catch (Exception ex) { LogHandlerCrash(nameof(OnFirstActivatedShowRestorePrompt), ex); }
+    }
+
+    private async System.Threading.Tasks.Task SafeMaybePromptRestoreTabsAsync()
+    {
+        try { await MaybePromptRestoreTabsAsync(); }
+        catch (Exception ex) { LogHandlerCrash(nameof(MaybePromptRestoreTabsAsync), ex); }
     }
 
     // ── Bootstrapping ───────────────────────────────────────────────────
@@ -271,6 +290,32 @@ public sealed partial class MainWindow : Window
             sender.Hide();
         }
     }
+
+    // Title-bar X / Alt+F4 → divert to tray instead of process exit. When the
+    // tray isn't live (icon failed to register), let the close proceed so the
+    // user isn't stuck with an unhideable window.
+    private void OnAppWindowClosing(Microsoft.UI.Windowing.AppWindow sender,
+                                    Microsoft.UI.Windowing.AppWindowClosingEventArgs args)
+    {
+        try
+        {
+            if (trayIcon is null) return;
+            args.Cancel = true;
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                try { HideToTray(); } catch { }
+            });
+        }
+        catch (Exception ex) { LogHandlerCrash(nameof(OnAppWindowClosing), ex); }
+    }
+
+    /// <summary>Hide the window so only the tray icon remains. Engine + index
+    /// stay alive; <see cref="BringFromTray"/> restores from this state.</summary>
+    public void HideToTray() => AppWindow.Hide();
+
+    /// <summary>Reverse of <see cref="HideToTray"/>: show + foreground + focus
+    /// the search box ready for input.</summary>
+    public void BringFromTray() => BringToFront();
 
     private void TrySetupEverythingIpc()
     {
@@ -383,47 +428,68 @@ public sealed partial class MainWindow : Window
 
     // ── Result list events ──────────────────────────────────────────────
 
+    // CRASH FIX: this is `async void`, fired by ListView every time a row's
+    // container is realised. During indexing, `row.EnsureLoadedAsync` calls
+    // the engine's GetRowAsync — if the engine throws (record ID transiently
+    // out-of-range while the index grows, P/Invoke failure during USN drain,
+    // etc.) the exception bubbles to the WinUI dispatcher and is rethrown as
+    // a STATUS_STOWED_EXCEPTION (0xc000027b), which the user reported as
+    // "app crashed while indexing." Wrap the entire body — an exception here
+    // must never kill the process; the worst valid behaviour is "this row
+    // shows blank until the next realisation pass."
     private async void OnContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
     {
-        // ListView recycles containers during fast scroll. When that fires we
-        // CANCEL the row's in-flight thumbnail fetch — without this the user
-        // can pile up hundreds of stale StorageFile.GetThumbnailAsync tasks
-        // by flick-scrolling, and the UI thread stalls draining them later.
-        if (args.Item is not ResultRowViewModel row) return;
-        if (args.InRecycleQueue)
+        try
         {
-            row.CancelThumbnail();
-            row.ThumbnailSource = null;
-            return;
-        }
-
-        await row.EnsureLoadedAsync(System.Threading.CancellationToken.None);
-        if (runCountService is not null) row.RunCount = runCountService.Get(row.FullPath);
-        LoadPropertyColumns(row);
-
-        var thumbs = thumbnailService;
-        var size = thumbs?.CurrentSize ?? WhereIsIt.App.Services.ThumbnailSize.Off;
-        if (thumbs is null || size == WhereIsIt.App.Services.ThumbnailSize.Off) return;
-
-        // Cache hit → set synchronously to avoid the async dispatch flicker.
-        if (thumbs.TryGetCached(row.FullPath, size, out var cached))
-        {
-            row.ThumbnailSource = cached;
-            return;
-        }
-
-        var token = row.BeginThumbnailLoad();
-        var captured = row;
-        _ = thumbs.GetAsync(captured.FullPath, size, token).ContinueWith(t =>
-        {
-            if (t.IsCompletedSuccessfully && !token.IsCancellationRequested)
+            if (args.Item is not ResultRowViewModel row) return;
+            if (args.InRecycleQueue)
             {
-                DispatcherQueue.TryEnqueue(() =>
-                {
-                    if (!token.IsCancellationRequested) captured.ThumbnailSource = t.Result;
-                });
+                row.CancelThumbnail();
+                row.ThumbnailSource = null;
+                return;
             }
-        }, System.Threading.Tasks.TaskScheduler.Default);
+
+            await row.EnsureLoadedAsync(System.Threading.CancellationToken.None);
+            if (runCountService is not null) row.RunCount = runCountService.Get(row.FullPath);
+            LoadPropertyColumns(row);
+
+            var thumbs = thumbnailService;
+            var size = thumbs?.CurrentSize ?? WhereIsIt.App.Services.ThumbnailSize.Off;
+            if (thumbs is null || size == WhereIsIt.App.Services.ThumbnailSize.Off) return;
+
+            // Cache hit → set synchronously to avoid the async dispatch flicker.
+            if (thumbs.TryGetCached(row.FullPath, size, out var cached))
+            {
+                row.ThumbnailSource = cached;
+                return;
+            }
+
+            var token = row.BeginThumbnailLoad();
+            var captured = row;
+            _ = thumbs.GetAsync(captured.FullPath, size, token).ContinueWith(t =>
+            {
+                if (t.IsCompletedSuccessfully && !token.IsCancellationRequested)
+                {
+                    DispatcherQueue.TryEnqueue(() =>
+                    {
+                        try { if (!token.IsCancellationRequested) captured.ThumbnailSource = t.Result; }
+                        catch { }
+                    });
+                }
+            }, System.Threading.Tasks.TaskScheduler.Default);
+        }
+        catch (System.Exception ex)
+        {
+            // Best-effort log so a recurrence leaves a trail. The whole purpose
+            // is to keep the dispatcher alive.
+            try
+            {
+                System.IO.File.AppendAllText(
+                    System.IO.Path.Combine(System.IO.Path.GetTempPath(), "whereisit-crashes.log"),
+                    $"[{System.DateTimeOffset.Now:O}] OnContainerContentChanging: {ex}\n\n");
+            }
+            catch { }
+        }
     }
 
     private void OnResultsKeyDown(object sender, KeyRoutedEventArgs e)
@@ -581,60 +647,68 @@ public sealed partial class MainWindow : Window
 
     private async void OnRenameClick(object sender, RoutedEventArgs e)
     {
-        var row = ViewModel.ResultsList.SelectedRow;
-        if (row is null || string.IsNullOrEmpty(row.FullPath)) return;
-        var newName = await PromptForTextAsync("Rename", "New name", row.Name, "Rename");
-        if (string.IsNullOrWhiteSpace(newName) || newName == row.Name) return;
-        if (!IsValidFileName(newName))
-        {
-            await ShowErrorAsync("Rename failed", "The new name contains characters that Windows does not allow in file names.");
-            return;
-        }
-
         try
         {
-            var destination = System.IO.Path.Combine(row.ParentPath, newName);
-            if (System.IO.Directory.Exists(row.FullPath)) System.IO.Directory.Move(row.FullPath, destination);
-            else System.IO.File.Move(row.FullPath, destination);
+            var row = ViewModel.ResultsList.SelectedRow;
+            if (row is null || string.IsNullOrEmpty(row.FullPath)) return;
+            var newName = await PromptForTextAsync("Rename", "New name", row.Name, "Rename");
+            if (string.IsNullOrWhiteSpace(newName) || newName == row.Name) return;
+            if (!IsValidFileName(newName))
+            {
+                await ShowErrorAsync("Rename failed", "The new name contains characters that Windows does not allow in file names.");
+                return;
+            }
+
+            try
+            {
+                var destination = System.IO.Path.Combine(row.ParentPath, newName);
+                if (System.IO.Directory.Exists(row.FullPath)) System.IO.Directory.Move(row.FullPath, destination);
+                else System.IO.File.Move(row.FullPath, destination);
+            }
+            catch (Exception ex)
+            {
+                await ShowErrorAsync("Rename failed", ex.Message);
+            }
         }
-        catch (Exception ex)
-        {
-            await ShowErrorAsync("Rename failed", ex.Message);
-        }
+        catch (Exception ex) { LogHandlerCrash(nameof(OnRenameClick), ex); }
     }
 
     private async void OnDeleteClick(object sender, RoutedEventArgs e)
     {
-        var row = ViewModel.ResultsList.SelectedRow;
-        if (row is null || string.IsNullOrEmpty(row.FullPath)) return;
-        var dialog = new ContentDialog
-        {
-            Title = "Move to Recycle Bin?",
-            Content = $"Move “{row.Name}” to the Recycle Bin?",
-            PrimaryButtonText = "Move to Recycle Bin",
-            CloseButtonText = "Cancel",
-            DefaultButton = ContentDialogButton.Close,
-            XamlRoot = (Content as FrameworkElement)?.XamlRoot,
-        };
-        ContentDialogResult result;
-        try { result = await dialog.ShowAsync(); } catch { return; }
-        if (result != ContentDialogResult.Primary) return;
-
         try
         {
-            if (System.IO.Directory.Exists(row.FullPath))
-                Microsoft.VisualBasic.FileIO.FileSystem.DeleteDirectory(row.FullPath,
-                    Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
-                    Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
-            else
-                Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(row.FullPath,
-                    Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
-                    Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+            var row = ViewModel.ResultsList.SelectedRow;
+            if (row is null || string.IsNullOrEmpty(row.FullPath)) return;
+            var dialog = new ContentDialog
+            {
+                Title = "Move to Recycle Bin?",
+                Content = $"Move “{row.Name}” to the Recycle Bin?",
+                PrimaryButtonText = "Move to Recycle Bin",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+                XamlRoot = (Content as FrameworkElement)?.XamlRoot,
+            };
+            ContentDialogResult result;
+            try { result = await dialog.ShowAsync(); } catch { return; }
+            if (result != ContentDialogResult.Primary) return;
+
+            try
+            {
+                if (System.IO.Directory.Exists(row.FullPath))
+                    Microsoft.VisualBasic.FileIO.FileSystem.DeleteDirectory(row.FullPath,
+                        Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
+                        Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+                else
+                    Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(row.FullPath,
+                        Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
+                        Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+            }
+            catch (Exception ex)
+            {
+                await ShowErrorAsync("Delete failed", ex.Message);
+            }
         }
-        catch (Exception ex)
-        {
-            await ShowErrorAsync("Delete failed", ex.Message);
-        }
+        catch (Exception ex) { LogHandlerCrash(nameof(OnDeleteClick), ex); }
     }
 
     private void OnPropertiesClick(object sender, RoutedEventArgs e)
@@ -674,14 +748,18 @@ public sealed partial class MainWindow : Window
 
     private async void OnSaveBookmarkClick(object sender, RoutedEventArgs e)
     {
-        if (bookmarkService is null) return;
+        try
+        {
+            if (bookmarkService is null) return;
 
-        var name = await PromptForTextAsync("Save bookmark", "Bookmark name", ViewModel.SearchBox.Query, "Save");
-        if (string.IsNullOrWhiteSpace(name)) return;
+            var name = await PromptForTextAsync("Save bookmark", "Bookmark name", ViewModel.SearchBox.Query, "Save");
+            if (string.IsNullOrWhiteSpace(name)) return;
 
-        bookmarkService.Add(name, ViewModel.SearchBox.Query);
-        settingsService?.SaveBookmarks(bookmarkService.Snapshot());
-        RefreshBookmarksMenu();
+            bookmarkService.Add(name, ViewModel.SearchBox.Query);
+            settingsService?.SaveBookmarks(bookmarkService.Snapshot());
+            RefreshBookmarksMenu();
+        }
+        catch (Exception ex) { LogHandlerCrash(nameof(OnSaveBookmarkClick), ex); }
     }
 
     // ── View menu ───────────────────────────────────────────────────────
@@ -721,17 +799,37 @@ public sealed partial class MainWindow : Window
 
     private async void OnAboutClick(object sender, RoutedEventArgs e)
     {
-        var dialog = new ContentDialog
+        try
         {
-            Title = "About WhereIsIt",
-            Content = "WhereIsIt — a fast Windows file search tool.\n\n" +
-                      "Modern WinUI 3 shell over a native C++ NTFS indexer.\n" +
-                      "Familiar Everything-style query syntax: ext: size: dm: " +
-                      "attrib: child: parent: dupe: content: and more.",
-            CloseButtonText = "Close",
-            XamlRoot = (Content as FrameworkElement)?.XamlRoot,
-        };
-        try { await dialog.ShowAsync(); } catch { }
+            var dialog = new ContentDialog
+            {
+                Title = "About WhereIsIt",
+                Content = "WhereIsIt — a fast Windows file search tool.\n\n" +
+                          "Modern WinUI 3 shell over a native C++ NTFS indexer.\n" +
+                          "Familiar Everything-style query syntax: ext: size: dm: " +
+                          "attrib: child: parent: dupe: content: and more.",
+                CloseButtonText = "Close",
+                XamlRoot = (Content as FrameworkElement)?.XamlRoot,
+            };
+            try { await dialog.ShowAsync(); } catch { }
+        }
+        catch (Exception ex) { LogHandlerCrash(nameof(OnAboutClick), ex); }
+    }
+
+    /// <summary>Any unhandled exception inside an `async void` UI handler is
+    /// rethrown on the WinUI dispatcher and surfaces as STATUS_STOWED_EXCEPTION
+    /// (0xc000027b) — process death. Every async-void handler in this class
+    /// MUST funnel through this so an engine hiccup, a missing file, etc., is
+    /// recorded instead of killing the app.</summary>
+    private static void LogHandlerCrash(string source, Exception ex)
+    {
+        try
+        {
+            System.IO.File.AppendAllText(
+                System.IO.Path.Combine(System.IO.Path.GetTempPath(), "whereisit-crashes.log"),
+                $"[{System.DateTimeOffset.Now:O}] {source}: {ex}\n\n");
+        }
+        catch { }
     }
 
     // ── Shared helpers ──────────────────────────────────────────────────

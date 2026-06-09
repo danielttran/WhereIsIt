@@ -43,7 +43,7 @@ namespace WhereIsIt.App;
 
 /// <summary>Subset of <c>IExplorerCommand</c> (shobjidl_core.h) used to add a
 /// top-level Win11 context-menu entry. Method order MUST match the COM vtable.</summary>
-[GeneratedComInterface]
+[GeneratedComInterface(StringMarshalling = StringMarshalling.Utf16)]
 [Guid("A08CE4D0-FA25-44AB-B57C-C7B1C323E0B9")]
 internal partial interface IExplorerCommand
 {

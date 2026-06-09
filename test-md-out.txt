@@ -1,0 +1,32 @@
+[whereisit] status=Ready - 2,999,103 items
+C:\Users\Daniel\AppData\Roaming\Antigravity\User\History\-1f60fa5e\00er.md
+E:\Dev\TheJournal\node_modules\next\dist\docs\01-app\03-api-reference\07-adapters\01-configuration.md
+E:\Dev\TheJournal\node_modules\next\dist\docs\02-pages\04-api-reference\06-adapters\01-configuration.md
+E:\Dev\Retirement\node_modules\next\dist\docs\01-app\03-api-reference\07-adapters\01-configuration.md
+E:\Dev\Retirement\node_modules\next\dist\docs\02-pages\04-api-reference\06-adapters\01-configuration.md
+E:\Dev\TheJournal\node_modules\next\dist\docs\04-community\01-contribution-guide.md
+E:\Dev\Retirement\node_modules\next\dist\docs\04-community\01-contribution-guide.md
+E:\Dev\TheJournal\node_modules\next\dist\docs\02-pages\03-building-your-application\03-data-fetching\01-get-static-props.md
+E:\Dev\Retirement\node_modules\next\dist\docs\02-pages\03-building-your-application\03-data-fetching\01-get-static-props.md
+E:\Dev\TheJournal\node_modules\next\dist\docs\01-app\01-getting-started\01-installation.md
+E:\Dev\TheJournal\node_modules\next\dist\docs\02-pages\01-getting-started\01-installation.md
+E:\Dev\Retirement\node_modules\next\dist\docs\01-app\01-getting-started\01-installation.md
+E:\Dev\Retirement\node_modules\next\dist\docs\02-pages\01-getting-started\01-installation.md
+E:\Dev\TheJournal\node_modules\next\dist\docs\02-pages\03-building-your-application\01-routing\01-pages-and-layouts.md
+E:\Dev\Retirement\node_modules\next\dist\docs\02-pages\03-building-your-application\01-routing\01-pages-and-layouts.md
+E:\Dev\TheJournal\node_modules\next\dist\docs\02-pages\03-building-your-application\02-rendering\01-server-side-rendering.md
+E:\Dev\Retirement\node_modules\next\dist\docs\02-pages\03-building-your-application\02-rendering\01-server-side-rendering.md
+E:\Dev\TheJournal\node_modules\next\dist\docs\02-pages\04-api-reference\04-config\01-typescript.md
+E:\Dev\Retirement\node_modules\next\dist\docs\02-pages\04-api-reference\04-config\01-typescript.md
+C:\Users\Daniel\AppData\Roaming\Antigravity\User\History\-659a5063\01Xa.md
+E:\Dev\TheJournal\node_modules\next\dist\docs\01-app\03-api-reference\07-adapters\02-creating-an-adapter.md
+E:\Dev\TheJournal\node_modules\next\dist\docs\02-pages\04-api-reference\06-adapters\02-creating-an-adapter.md
+E:\Dev\Retirement\node_modules\next\dist\docs\01-app\03-api-reference\07-adapters\02-creating-an-adapter.md
+E:\Dev\Retirement\node_modules\next\dist\docs\02-pages\04-api-reference\06-adapters\02-creating-an-adapter.md
+E:\Dev\TheJournal\node_modules\next\dist\docs\02-pages\03-building-your-application\01-routing\02-dynamic-routes.md
+E:\Dev\Retirement\node_modules\next\dist\docs\02-pages\03-building-your-application\01-routing\02-dynamic-routes.md
+E:\Dev\TheJournal\node_modules\next\dist\docs\02-pages\04-api-reference\04-config\02-eslint.md
+E:\Dev\Retirement\node_modules\next\dist\docs\02-pages\04-api-reference\04-config\02-eslint.md
+E:\Dev\TheJournal\node_modules\next\dist\docs\02-pages\03-building-your-application\03-data-fetching\02-get-static-paths.md
+E:\Dev\Retirement\node_modules\next\dist\docs\02-pages\03-building-your-application\03-data-fetching\02-get-static-paths.md
+[whereisit] query=*.md returned=2000 printed=30 postfilterPasses=3

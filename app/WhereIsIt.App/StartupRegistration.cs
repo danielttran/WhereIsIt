@@ -1,5 +1,6 @@
 using System;
 using Microsoft.Win32;
+using WhereIsIt.App.Services;
 
 namespace WhereIsIt.App;
 
@@ -7,27 +8,28 @@ namespace WhereIsIt.App;
 /// Keeps the per-user Windows sign-in registration in sync with settings.
 /// Registry failures are non-fatal: search must still launch normally in
 /// locked-down enterprise environments.
+///
+/// The exact value names + format live in <see cref="RegistrationFormat"/>
+/// (App.Core) so xUnit can lock them down without touching the registry.
 /// </summary>
 internal static class StartupRegistration
 {
-    private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    private const string ValueName = "WhereIsIt";
-
     public static void Apply(bool enabled)
     {
         try
         {
-            using var key = Registry.CurrentUser.CreateSubKey(RunKey);
+            using var key = Registry.CurrentUser.CreateSubKey(RegistrationFormat.RunKeyPath);
             if (key is null) return;
             if (!enabled)
             {
-                key.DeleteValue(ValueName, throwOnMissingValue: false);
+                key.DeleteValue(RegistrationFormat.RunValueName, throwOnMissingValue: false);
                 return;
             }
 
             var executable = Environment.ProcessPath;
             if (!string.IsNullOrWhiteSpace(executable))
-                key.SetValue(ValueName, $"\"{executable}\"");
+                key.SetValue(RegistrationFormat.RunValueName,
+                    RegistrationFormat.RunValue(executable));
         }
         catch
         {

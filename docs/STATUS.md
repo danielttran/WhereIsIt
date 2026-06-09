@@ -56,8 +56,8 @@
 | `InProcEngineClient` | ✅ Pure-C# `Directory.EnumerateFiles` fallback — applies the full `ParsedQuery` natively | `app/WhereIsIt.App.Core/Services/InProcEngineClient.cs` |
 | `PipeEngineClient` | ⚠️ stub returning hardcoded `[1u, 2u]` — never picked when native or in-proc is available | `src/pipe/WhereIsIt.Pipe.Client/PipeEngineClient.cs` |
 | C++ engine | ✅ Lives at `src/engine/native/cpp/` (moved from `src/legacy/` on 2026-05-13). Compiles into `WhereIsIt.Engine.Native.dll`; consumed via P/Invoke. | `src/engine/native/` |
-| xUnit tests | ✅ 256 green (200 non-native + 56 native integration) | `tests/app/`, run via `tests/ci/run_all.ps1` |
-| GitHub Actions | ✅ CI workflow (`windows-2022`, dotnet 10, runs tests + builds exe) | `.github/workflows/ci.yml` |
+| xUnit tests | ✅ 514 green on Windows (Linux subset: 436) | `tests/app/`, run via `tests/ci/run_all.ps1` |
+| GitHub Actions | ❌ not yet present (`.github/workflows/ci.yml` was claimed but never committed) | — |
 
 ---
 
@@ -119,6 +119,77 @@ Remaining Everything-parity gaps (full detail + ranking in `docs/PARITY.md` §9)
 - **Property/metadata index** — unlocks `album:`/`width:`/… + custom columns.
 - **ETP / FTP server** — proprietary Everything protocol. Skipped; HTTP server covers the cross-device search use case.
 - **Everything IPC/SDK, `es.exe` CLI, shell context-menu extension, background service** — Windows-only integration surface; deliberately deferred.
+
+Closed 2026-06-08 (user-experience audit round — six requirements):
+
+User came back with concrete UX complaints + asked for a structured 2-round audit
+gated by advisor agreement. All six requirements landed; final 6/6 PASS in both
+back-to-back rounds via `tests/manual-audit/audit.ps1`, advisor agreed.
+
+What landed:
+
+- ✅ **Wildcard `*.md` post-filter, authoritative.** `FilteringEngineClient.NeedsPostFiltering` now returns true for any clause containing `*`/`?` or `regex:true`. The native engine's wildcard scan races during indexing (returns stale IDs that don't actually match), so the decorator's anchored-Regex post-filter is now the source of truth even when wildcards mode is on. The earlier "*.md → 18 K random files" repro was that race; with the gate it's 2 000 real `.md` files. (Reverted a parallel attempt to push `size:` down to the native engine — pre-existing native-side bug returns 0 for any standalone size query; documented as known-issue.)
+- ✅ **Single-instance forwarding + tray dock = no re-index on subsequent launches.** New `SingleInstance` (named-mutex + `WhereIsIt.Launch` named pipe). First process owns the mutex and a background pipe-listener; subsequent launches serialise their CLI args as JSON over the pipe and exit. The primary's `Dispatch` writes a sentinel at `%TEMP%\whereisit-last-forward.txt` (used by the audit) then forwards to the running window via the WinUI dispatcher.
+- ✅ **Close-to-tray.** `AppWindow.Closing` now diverts to `HideToTray()` (calls `AppWindow.Hide`) when the tray icon is live. Only the tray menu's "Exit" actually terminates. Verified by `taskkill /pid` (no `/F`), which sends `WM_CLOSE`: process is still alive 3 s later in both audit rounds.
+- ✅ **Compact rows.** `ListView.ItemContainerStyle` now sets `MinHeight=0`, `FontSize=13`, `VerticalContentAlignment=Center`; `DataTemplate` Grid uses `Padding=6,1`; header `ColumnHeaderButton` mirrors with `Padding=6,2` + `FontSize=13`. Audit verifies setters are present; rendered-pixel verification still needs a human.
+- ✅ **Headless / CLI test harness.** `--headless --query <Q> --output <file> [--max-results N] [--timeout S] [--name-only] [--minimized] [--enable-http]` + the existing `-s`/`-p`. The headless path waits for the engine's `Ready` status before issuing the search, then 500 ms of emission-quiet before printing — so a stale emission from the indexing phase can't trick the wait. CLI works from PowerShell because the headless path opens the `--output` file (WinExe doesn't keep stdout attached when launched from PS `&`).
+- ✅ **Live USN file-change updates** (`MonitorChanges` was already wired). Audit step 5 starts the primary with `--enable-http`, waits Ready, creates a uniquely-named probe file inside `E:\Dev\WhereIsIt`, sleeps 6 s for the USN-drain loop, then queries `http://127.0.0.1:12321/search?q=<unique>` — the running engine returns the new file without restart.
+
+**Bugs caught during these audits:**
+
+- The `SingleInstance.Dispatch` sentinel was written **after** the `if (win is null) return;` guard, so test rounds that ran before the main window registered showed PASS on the secondary side but never produced a sentinel. Moved the write before the guard. Caught + fixed in audit round 1; reset count; round 1+2 then both 6/6.
+- The audit script checked `$env:TEMP` but the .NET process under VS-launch context resolves `Path.GetTempPath()` to `C:\Windows\Temp`. Audit now checks both candidates.
+
+**Known issues left as next-session work (advisor agreed they don't block):**
+
+- `size:>50mb` (standalone, no other clause) returns 0 results even though large files exist. Native engine's `size:` term-eval doesn't engage for solo-size queries; decorator's MaxScan=5000 also can't recover because the cap window is record-ID-ordered (small files first). Pushdown was reverted with an in-source note in `SimplifyForInnerEngine`.
+- Visual row-density verification is XAML-source-presence, not rendered-pixel measurement. WinUI 3 AutomationPeers don't expose virtualized item bounding rects from UIAutomation, so a human still needs to eyeball.
+- USN audit creates the probe inside `E:\Dev\WhereIsIt`. A probe outside any indexed drive scope wouldn't reach the running engine — by design, but tests targeting other paths should keep that in mind.
+
+Closed 2026-06-08 (Windows-toolchain verification pass):
+
+The 2026-06-03 cross-platform pass authored a lot on Linux that could not be
+compiled or run there. This session brought everything onto a real Windows
+11 box with VS 2026 Professional + .NET 10.0.300 SDK and exercised the full
+build/test/launch path. Five real defects surfaced and were fixed:
+
+- ✅ **`WhereIsIt.App.csproj` missing `<AllowUnsafeBlocks>true</AllowUnsafeBlocks>`** — `ExplorerCommandHandler` uses `GeneratedComInterface`/`GeneratedComClass`, both of which require unsafe blocks (SYSLIB1062). The Linux build never compiled the WinUI app so this stayed hidden.
+- ✅ **`IExplorerCommand` missing `StringMarshalling`** — `GeneratedComInterfaceAttribute` rejects out-string parameters without `StringMarshalling = StringMarshalling.Utf16` (SYSLIB1051). Same root cause: the WinUI-only file never compiled on Linux.
+- ✅ **`NativeEngineClient.FromOptionalFileTime` substituted `DateTimeOffset.UtcNow` for `modifiedFileTime == 0`** — that made every unknown-mtime row sort and display as "modified just now," breaking `Sort_ByModifiedAscending_OldestFirst` reproducibly. The fallback is now `DateTimeOffset.MinValue`, which matches the engine's epoch-0 sort placement.
+- ✅ **`ResultRowViewModel.ModifiedText` formatted `MinValue`/`default` as `0001-01-01 00:00`** — switched to the existing `FormatOptionalDate` (renders `—`) so the unknown sentinel displays the same way Created/Accessed already did.
+- ✅ **Synthetic ancestor directory records had all timestamps zero** — `seedAncestors` populated only the name/parent/drive fields, leaving Modified/Created/Accessed at 0. Every scope-rooted scan therefore produced N synthetic records (one per path segment above the root) that sorted before every real file in `sort:asc` by date. `seedAncestors` now calls `GetFileAttributesExW` per segment and populates real Modified/Created/Accessed/Attributes from disk.
+- ✅ **`App.OnLaunched` parsed `-p <path>` but never used `cli.ScopeRoot`** — the value was silently dropped, so the documented CLI flag (and the shell-extension verb that depends on it) was a no-op. Now seeds an initial `child:"<path>"` clause, combined with the user's `-s <query>` if both are present.
+
+**Build matrix verified on Windows:**
+- Native engine `WhereIsIt.Engine.Native.dll` — Debug (2.34 MB) + Release (530 KB), MSBuild from VS 2026 amd64.
+- `WhereIsIt.App.Core`, `WhereIsIt.App` (WinUI 3), `WhereIsIt.Pipe.Client`, `WhereIsIt.App.Tests`, `WhereIsIt.Es`, `WhereIsIt.EngineService` — Debug + Release, .NET 10.0.300 SDK.
+- Note: `dotnet build WhereIsIt.slnx` exits 1 because the dotnet CLI can't drive `vcxproj` (`MSB4278: Microsoft.Cpp.Default.props`). All C# projects still build. The C++ engine must be built separately via MSBuild before `dotnet build`. `tests/ci/run_all.ps1` does the right thing (it builds the tests csproj directly, not the slnx).
+
+**Test suite: 514 / 514 pass on Windows** (was 436 on Linux; the extra 78 are the native-engine integration suite + the two inherently-Windows tests that only run on Windows).
+
+**Smoke-tested live** (Release):
+- `tests\ci\run_all.ps1` — 514 / 514 green via the documented CI entrypoint (not just the direct `dotnet test` invocation).
+- `es.exe "PARITY"` — returned 78 real filesystem matches across the indexed drives, end-to-end through the live `WhereIsIt.Engine.Native.dll` and `QueryParser`. **This is the strongest functional signal: full engine + query stack works on real data.**
+- `WhereIsIt.App.exe -p E:\Dev\WhereIsIt\docs` — launched, ran 25 s with steady working-set growth (568 MB → 778 MB while indexing), no crash, clean shutdown via `Stop-Process`. Stdout/stderr clean. **Caveat: this proves the launch/shutdown/indexing path; it does NOT exercise UI interaction (search bar input, sort clicks, menu commands, tab switches, tray, hotkeys) — those need a human or a UI-driver.** The 778 MB resident reflects that `-p` is a `child:` query filter, not an index-scope override (by design — matches Everything's `-path`), so the engine still indexed the broader default scope.
+
+**Build-order gotcha**: the WinUI csproj copies the engine DLL with
+`<None Include="...x64\$(Configuration)\WhereIsIt.Engine.Native.dll" Condition="Exists(...)">`.
+The `Exists(...)` check runs at evaluate time. On a clean clone, if the C#
+project restores before the C++ engine has been built, the item silently
+drops and the DLL never copies — leaving `DllNotFoundException` at runtime.
+Build order is: **C++ engine via MSBuild first → `dotnet build` for C# second.**
+If a fresh clone hits this, manually `Copy-Item` the DLL from
+`src\engine\native\x64\<config>\` into `app\WhereIsIt.App\bin\<config>\net10.0-windows10.0.19041.0\`
+and rerun. Cleaner long-term fix: convert to a `<Target AfterTargets="Build">`
+with `<Copy>` so the lookup happens at build time, not evaluate time.
+
+**Still not Windows-verified** (deliberately skipped; require external clients we don't have):
+- `EverythingIpcServer` `WM_COPYDATA` wire-framing against a real Everything SDK client.
+- `FtpServer` ETP result-column wire framing against a real Everything ETP client.
+- `IExplorerCommand` COM handler — needs sparse-MSIX packaging to register; the classic registry shell verb (`ShellMenuRegistration`) ships and works today.
+- `WhereIsIt.EngineService` end-to-end with `NamedPipeEngineClient` over a real service install.
+
+**Doc cleanup**: STATUS.md claimed `.github/workflows/ci.yml` exists — it does not. The repo has no GitHub Actions workflow today; only the local `tests/ci/run_all.ps1`. Removed claims about CI elsewhere if any. (`run_all.ps1` is what should be re-used when CI is added.)
 
 Closed this session:
 

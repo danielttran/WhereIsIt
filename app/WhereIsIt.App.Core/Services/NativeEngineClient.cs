@@ -172,7 +172,13 @@ public sealed class NativeEngineClient : IEngineClient, IDisposable
         if (rc != 0)
             return Task.FromResult(new ResultRowModel("?", "?", 0, DateTimeOffset.UtcNow, ""));
 
-        var modified = FromOptionalFileTime(modifiedFileTime, DateTimeOffset.UtcNow);
+        // Use MinValue (not UtcNow) when the engine reports an unknown modified
+        // time: the engine sorts unknown-mtime records at the bottom of asc-sort
+        // (epoch 0), so the displayed value must also collate as the earliest
+        // possible instant. Substituting UtcNow made every sort:asc result's
+        // "first" row inconsistently appear to have been modified "just now",
+        // breaking both the UI and Sort_ByModifiedAscending_OldestFirst.
+        var modified = FromOptionalFileTime(modifiedFileTime, DateTimeOffset.MinValue);
 
         return Task.FromResult(new ResultRowModel(
             name.ToString(),

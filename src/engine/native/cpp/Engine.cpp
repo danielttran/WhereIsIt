@@ -1939,10 +1939,28 @@ void IndexingEngine::PerformFullDriveScan() {
                     if (rel.empty()) return kInvalidIndex;
                     uint32_t parentIdx = kInvalidIndex;
                     size_t start = 0;
+                    // Synthetic ancestor records exist so GetFullPathInternal can
+                    // reconstruct paths above the scope root, but they MUST still
+                    // carry real Modified/Created/Accessed/Size from disk —
+                    // otherwise zero-epoch records sort before every real file in
+                    // asc-by-time and display as 1601-01-01 (and previously, via
+                    // the C# UtcNow fallback, as "modified just now"). Populate via
+                    // GetFileAttributesExW: cheap (one call per ancestor segment)
+                    // and matches what the user would see in Explorer.
                     while (start <= rel.size()) {
                         size_t end = rel.find(L'\\', start);
                         if (end == std::wstring::npos) end = rel.size();
                         if (end > start) {
+                            std::wstring ancestorAbs = ctx.DriveLetter + rel.substr(0, end);
+                            WIN32_FILE_ATTRIBUTE_DATA attr = {};
+                            uint64_t mtime = 0, ctime = 0, atime = 0;
+                            uint32_t attrFlags = FILE_ATTRIBUTE_DIRECTORY;
+                            if (GetFileAttributesExW(ancestorAbs.c_str(), GetFileExInfoStandard, &attr)) {
+                                mtime = ((uint64_t)attr.ftLastWriteTime.dwHighDateTime << 32) | attr.ftLastWriteTime.dwLowDateTime;
+                                ctime = ((uint64_t)attr.ftCreationTime.dwHighDateTime  << 32) | attr.ftCreationTime.dwLowDateTime;
+                                atime = ((uint64_t)attr.ftLastAccessTime.dwHighDateTime << 32) | attr.ftLastAccessTime.dwLowDateTime;
+                                attrFlags = attr.dwFileAttributes;
+                            }
                             FileRecord rec = {};
                             rec.NamePoolOffset    = ctx.Pool.AddString(rel.substr(start, end - start));
                             rec.ParentMftIndex    = parentIdx;
@@ -1950,7 +1968,10 @@ void IndexingEngine::PerformFullDriveScan() {
                             rec.MftSequence       = 0;
                             rec.ParentSequence    = 0;
                             rec.DriveIndex        = ctx.DriveIndex;
-                            rec.FileAttributes    = FILE_ATTRIBUTE_DIRECTORY;
+                            rec.FileAttributes    = (uint16_t)attrFlags;
+                            rec.LastModifiedEpoch = FileTimeToUnixEpochSeconds(mtime);
+                            rec.CreatedEpoch      = FileTimeToUnixEpochSeconds(ctime);
+                            rec.AccessedEpoch     = FileTimeToUnixEpochSeconds(atime);
                             rec.ParentRecordIndex = kInvalidIndex;
                             parentIdx = rec.MftIndex;
                             ctx.Records.push_back(rec);

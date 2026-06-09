@@ -1,0 +1,8 @@
+﻿Loading core dump: C:\Users\Daniel\AppData\Local\CrashDumps\WhereIsIt.App.exe.25060.dmp ...
+Ready to process analysis commands. Type 'help' to list available commands or 'help [command]' to get detailed help on a command.
+Type 'quit' or 'exit' to exit the session.
+<END_COMMAND_OUTPUT>
+> clrstack -a
+ERROR: Unrecognized SOS command 'clrstack'
+<END_COMMAND_ERROR>
+> exit

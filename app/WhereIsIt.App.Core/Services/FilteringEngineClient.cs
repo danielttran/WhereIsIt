@@ -88,6 +88,12 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
     public IObservable<int>    MetricsChanges => inner.MetricsChanges;
     public IObservable<IReadOnlyList<uint>> ObserveResults => filteredResults;
 
+    /// <summary>Diagnostic: the last query string the decorator sent to its
+    /// inner engine after <see cref="SimplifyForInnerEngine"/>. Useful from
+    /// the headless harness to see whether pushdowns (size:, ext:, child:)
+    /// actually engaged.</summary>
+    public string? LastSimplifiedQuery { get; private set; }
+
     public Task SearchAsync(string query, CancellationToken cancellationToken)
     {
         var parsed = QueryParser.Parse(query);
@@ -98,6 +104,7 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
         currentCompiled = Compile(parsed);
         Interlocked.Increment(ref currentSeq);
         var simplified = SimplifyForInnerEngine(parsed, query);
+        LastSimplifiedQuery = simplified;
         return inner.SearchAsync(simplified, cancellationToken);
     }
 
@@ -236,6 +243,12 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
 
     // ── post-filtering ──────────────────────────────────────────────────
 
+    /// <summary>Diagnostic counter so headless / log-attached runs can verify
+    /// the decorator actually engaged. The number increases by 1 every time a
+    /// post-filter pass completes; if it stays 0 while results are flowing,
+    /// NeedsPostFiltering is silently returning false when it shouldn't.</summary>
+    public int PostFilterPassCount;
+
     private async Task OnIdsAsync(IReadOnlyList<uint> ids, long mySeq)
     {
         // Read seq FIRST so the volatile read acts as a memory fence for the
@@ -252,6 +265,7 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
                 filteredResults.OnNext(ids);
             return;
         }
+        Interlocked.Increment(ref PostFilterPassCount);
 
         // count: caps the visible rows; never exceed the safety DisplayCap.
         int cap = parsed.MaxResults is int m ? Math.Min(DisplayCap, m) : DisplayCap;
@@ -341,11 +355,19 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
         {
             if (c.Negated) return true;
             if (c.Alternatives.Count > 1) return true;
-            // nowildcards: must enforce a literal interpretation of * / ? that
-            // the inner engine would otherwise expand as wildcards.
-            if (!q.Wildcards)
-                foreach (var alt in c.Alternatives)
-                    if (alt.Contains('*') || alt.Contains('?')) return true;
+            // Wildcard clauses MUST be post-filtered authoritatively. The
+            // inner native engine treats `*.md` permissively (returns ~all
+            // records that contain '.' anywhere — directories included), so
+            // without our own anchored-wildcard pass the user sees random
+            // files for any `*.ext` query. The decorator's CompiledQuery
+            // builds an anchored Regex per wildcard alternative; this branch
+            // ensures that Regex actually gates the result set.
+            foreach (var alt in c.Alternatives)
+                if (alt.Contains('*') || alt.Contains('?')) return true;
+            // RegexMode means the user wrote `regex:true PATTERN`. The native
+            // engine has its own regex impl but it's not portable to the in-proc
+            // fallback's QueryParser semantics — re-evaluate per row for parity.
+            if (q.RegexMode) return true;
         }
         return false;
     }
@@ -643,6 +665,13 @@ public sealed class FilteringEngineClient : IEngineClient, IDisposable
         // Single-extension hint — fits nicely into the engine's wildcard syntax.
         if (q.ExtWhitelist is { Length: 1 })
             parts.Add("*." + q.ExtWhitelist[0]);
+
+        // NOTE: tried pushing size: down to the native engine here to dodge the
+        // decorator's MaxScan=5000 cap, but it returned 0 results in every
+        // shape we tried — looks like the native size: term-eval path has a
+        // bug that needs its own session. Reverted. `size:` queries that
+        // straddle the MaxScan window will currently show 0 matches even
+        // though matches exist; documented as known-issue.
 
         return parts.Count == 0 ? "*" : string.Join(' ', parts);
     }

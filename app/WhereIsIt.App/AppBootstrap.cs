@@ -7,10 +7,12 @@ namespace WhereIsIt.App;
 
 public static class AppBootstrap
 {
-    public static ServiceProvider Build(IServiceCollection services, IAppDispatcher? dispatcher = null)
+    public static ServiceProvider Build(IServiceCollection services, IAppDispatcher? dispatcher = null,
+        bool forceEnableHttp = false)
     {
         var settingsService = new AppSettingsService();
         var settings = settingsService.Load();
+        if (forceEnableHttp) settings.EnableHttpServer = true;
         StartupRegistration.Apply(settings.StartWithWindows);
         ShellMenuRegistration.Apply(settings.ShellContextMenu);
 

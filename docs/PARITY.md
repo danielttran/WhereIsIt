@@ -185,12 +185,17 @@ already verified (below).
 
 ---
 
-*Verification note:* the **logic layer is build- and test-verified**. The .NET 10
-SDK was installed in-session; `WhereIsIt.App.Core`, `WhereIsIt.Pipe.Client`, and
-the xUnit project were compiled with `-p:EnableWindowsTargeting=true` and run on
-Linux. **436 tests pass, 0 fail** (excluding the native-DLL integration tests and
-two inherently-Windows tests — Win32 file attributes and `\`-vs-`/` EFU paths —
-which pass on Windows).
+*Verification note:* the **logic layer is build- and test-verified on both
+Linux (cross-target) and Windows (full toolchain)**. The .NET 10 SDK was
+installed in-session on Linux; `WhereIsIt.App.Core`, `WhereIsIt.Pipe.Client`,
+and the xUnit project were compiled with `-p:EnableWindowsTargeting=true` and
+ran with **436 / 436 pass**. The subsequent **2026-06-08 Windows pass** (VS
+2026 Professional, .NET 10.0.300 SDK) then built the C++ engine, the WinUI
+app, the tests, and both tool projects (Debug + Release), and ran the full
+xUnit suite — **514 / 514 pass on Windows** (the extra 78 are the native-DLL
+integration suite and the two inherently-Windows tests). The Windows pass
+also smoke-tested the live `WhereIsIt.App.exe` and the `es.exe` CLI on a real
+file system.
 
 Building actually surfaced and fixed real defects the never-compiled branch hid:
 a pre-existing CS0420 in `InProcEngineClient`, an `out _`/`using var _` collision
@@ -200,6 +205,28 @@ importantly — a **regression where `<`/`>` comparison operators (`size:>1mb`,
 `BooleanQuery.Lex` and covered by tests. The verified surface includes all query
 parsing/filters, `< >` grouping + bracketless OR, the image/audio/document
 property readers, and the FTP/ETP/named-pipe round-trips.
+
+The **2026-06-08 Windows pass** caught more defects the Linux build couldn't
+even attempt because they live in the WinUI-only / native-engine layer:
+
+- `<AllowUnsafeBlocks>true</AllowUnsafeBlocks>` was missing from the WinUI
+  csproj — `GeneratedComInterface`/`GeneratedComClass` require unsafe blocks
+  (SYSLIB1062).
+- `IExplorerCommand` interface lacked `StringMarshalling = StringMarshalling.Utf16`
+  on its `GeneratedComInterface` attribute (SYSLIB1051), so the source generator
+  refused to marshal its out-string parameters.
+- `NativeEngineClient.FromOptionalFileTime` substituted `DateTimeOffset.UtcNow`
+  as the fallback for an unknown modified time — that mis-displayed every such
+  row as "modified just now" and broke `Sort_ByModifiedAscending_OldestFirst`
+  reproducibly. Switched to `DateTimeOffset.MinValue` (matches the engine's
+  epoch-0 sort placement) and routed the column formatter through
+  `FormatOptionalDate` so the UI renders `—`.
+- `IndexingEngine::seedAncestors` left synthetic above-the-scope-root directory
+  records with all-zero Modified/Created/Accessed. Now populated via
+  `GetFileAttributesExW` per segment.
+- `App.OnLaunched` parsed `-p <path>` into `cli.ScopeRoot` but never used it.
+  The shell-context-menu verb relied on this flag. Now seeds an initial
+  `child:"<path>"` clause (combined with `-s <query>` if both are supplied).
 
 Also compile-verified on Linux: the **`es.exe` CLI** and the **engine service**
 (`tools/WhereIsIt.Es`, `tools/WhereIsIt.EngineService` — net10.0-windows console

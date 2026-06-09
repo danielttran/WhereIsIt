@@ -96,7 +96,7 @@ public partial class ResultRowViewModel : ObservableObject
         SizeBytes = row.SizeBytes;
         SizeText = FormatBytes(row.SizeBytes);
         ModifiedUtc = row.ModifiedUtc;
-        ModifiedText = row.ModifiedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
+        ModifiedText = FormatOptionalDate(row.ModifiedUtc);
         CreatedUtc = row.CreatedUtc;
         AccessedUtc = row.AccessedUtc;
         CreatedText  = FormatOptionalDate(CreatedUtc);

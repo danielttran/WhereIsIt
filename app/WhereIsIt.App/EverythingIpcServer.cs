@@ -135,49 +135,15 @@ public sealed class EverythingIpcServer : IDisposable
         return rows;
     }
 
-    // EVERYTHING_IPC_LISTW: 7 DWORD header, numitems * (3 DWORD item), then the
-    // filename/path strings; item offsets are byte offsets from the list start.
+    // EVERYTHING_IPC_LISTW wire format lives in EverythingIpcFormat (App.Core)
+    // so xUnit can lock down the byte layout without standing up a Win32
+    // message-only window.
     private static byte[] BuildList(List<(string Name, string Parent, bool IsFolder)> rows, int start, int count, int total)
     {
-        const int headerSize = 7 * 4;
-        const int itemSize = 3 * 4;
-        int stringsStart = headerSize + count * itemSize;
-
-        using var strings = new MemoryStream();
-        var itemRecords = new (uint Flags, uint NameOff, uint PathOff)[count];
-        int folders = 0, files = 0;
-        for (int i = 0; i < count; i++)
-        {
-            var (name, parent, isFolder) = rows[start + i];
-            if (isFolder) folders++; else files++;
-            uint nameOff = (uint)(stringsStart + strings.Length);
-            WriteUtf16Z(strings, name);
-            uint pathOff = (uint)(stringsStart + strings.Length);
-            WriteUtf16Z(strings, parent);
-            itemRecords[i] = (isFolder ? EVERYTHING_IPC_FOLDER : 0u, nameOff, pathOff);
-        }
-
-        using var ms = new MemoryStream();
-        var bw = new BinaryWriter(ms);
-        // totfolders/totfiles/totitems then numfolders/numfiles/numitems then offset.
-        bw.Write((uint)rows.Count); // approximations for totals (folders/files of full set)
-        bw.Write((uint)0);
-        bw.Write((uint)total);
-        bw.Write((uint)folders);
-        bw.Write((uint)files);
-        bw.Write((uint)count);
-        bw.Write((uint)start);
-        foreach (var it in itemRecords) { bw.Write(it.Flags); bw.Write(it.NameOff); bw.Write(it.PathOff); }
-        bw.Write(strings.ToArray());
-        bw.Flush();
-        return ms.ToArray();
-    }
-
-    private static void WriteUtf16Z(Stream s, string value)
-    {
-        var bytes = System.Text.Encoding.Unicode.GetBytes(value);
-        s.Write(bytes, 0, bytes.Length);
-        s.WriteByte(0); s.WriteByte(0); // null terminator (WCHAR)
+        var converted = new List<WhereIsIt.App.Services.EverythingIpcFormat.Item>(rows.Count);
+        foreach (var r in rows)
+            converted.Add(new WhereIsIt.App.Services.EverythingIpcFormat.Item(r.Name, r.Parent, r.IsFolder));
+        return WhereIsIt.App.Services.EverythingIpcFormat.BuildList(converted, start, count, total);
     }
 
     private static void SendCopyData(IntPtr target, uint msgData, byte[] payload)

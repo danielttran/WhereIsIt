@@ -34,13 +34,45 @@ public sealed class ThumbnailService
             return null;
         if (cache.TryGet(path, size, out var cached))
             return cached;
+
+        // Cheap eligibility gate (tested in ThumbnailGateTests). The WinRT
+        // GetFileFromPathAsync raises a structured exception on bad paths
+        // that has been observed to escape the managed try/catch under WinUI
+        // dispatcher load — STATUS_STOWED_EXCEPTION (0xc000027b). Centralised
+        // in App.Core so the rule is testable.
+        if (!ThumbnailGate.IsEligible(path)) return null;
+
+        // ISOLATION FENCE: run the WinRT call on a thread-pool thread via
+        // Task.Run so any structured exception (SEH) raised by the WinRT/COM
+        // boundary stays bound to that thread instead of escaping the WinUI
+        // dispatcher and stowing the process. AppDomain.UnhandledException
+        // and TaskScheduler.UnobservedTaskException already swallow what
+        // bubbles up here, so the worst case is a missing thumbnail.
+        StorageFile? storageFile = null;
+        try
+        {
+            storageFile = await Task.Run(async () =>
+            {
+                try { return await StorageFile.GetFileFromPathAsync(path).AsTask(ct); }
+                catch { return null; }
+            }, ct);
+        }
+        catch { return null; }
+        if (storageFile is null) return null;
+
         try
         {
             ct.ThrowIfCancellationRequested();
-            var file = await StorageFile.GetFileFromPathAsync(path).AsTask(ct);
-            ct.ThrowIfCancellationRequested();
-            using var thumb = await file.GetThumbnailAsync(
-                ThumbnailMode.SingleItem, (uint)(int)size, ThumbnailOptions.UseCurrentScale).AsTask(ct);
+            using var thumb = await Task.Run(async () =>
+            {
+                try
+                {
+                    return await storageFile.GetThumbnailAsync(
+                        ThumbnailMode.SingleItem, (uint)(int)size,
+                        ThumbnailOptions.UseCurrentScale).AsTask(ct);
+                }
+                catch { return null; }
+            }, ct);
             if (thumb is null || thumb.Size == 0) return null;
             ct.ThrowIfCancellationRequested();
 

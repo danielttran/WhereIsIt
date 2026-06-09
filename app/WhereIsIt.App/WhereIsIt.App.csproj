@@ -8,6 +8,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <NoWarn>MVVMTK0045</NoWarn>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationIcon>Assets\WhereIsIt.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
